@@ -317,7 +317,7 @@ const inferPermissionSection = (permission: Permission): string => {
 };
 export default function Roles() {
   const [token, setToken] = useState('');
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [userRoles, setUserRoles] = useState<UserRole[]>([]);
@@ -350,6 +350,11 @@ export default function Roles() {
   const [confirmTitle, setConfirmTitle] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
   const [confirmAction, setConfirmAction] = useState<(() => Promise<void> | void) | null>(null);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [showMessageModal, setShowMessageModal] = useState(false);
+  const [messageModalTitle, setMessageModalTitle] = useState('');
+  const [messageModalBody, setMessageModalBody] = useState('');
+  const [messageModalType, setMessageModalType] = useState<'error' | 'success'>('error');
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -378,11 +383,31 @@ export default function Roles() {
   };
 
   const closeConfirm = () => {
+    if (confirmLoading) return;
     setConfirmOpen(false);
     setConfirmTitle('');
     setConfirmMessage('');
     setConfirmAction(null);
   };
+
+  const showModalMessage = (
+    title: string,
+    body: string,
+    type: 'error' | 'success' = 'error'
+  ) => {
+    setMessageModalTitle(title);
+    setMessageModalBody(body);
+    setMessageModalType(type);
+    setShowMessageModal(true);
+  };
+
+  const extractApiErrorMessage = (error: any, fallback: string) =>
+    error?.response?.data?.message ||
+    (error?.response?.data?.errors && typeof error.response.data.errors === 'object'
+      ? String(Object.values(error.response.data.errors).flat()[0] || '')
+      : '') ||
+    error?.response?.data?.error ||
+    fallback;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -783,25 +808,54 @@ export default function Roles() {
   };
 
   const handleDelete = async (id: number) => {
-    try {
-      await axios.delete(`${API_URL}/api/roles/${id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      fetchRoles();
-    } catch (error) {
-      console.error('Error deleting role:', error);
-      // For demo purposes, simulate deletion
-      setRoles(roles.filter(r => r.id !== id));
+    await axios.delete(`${API_URL}/api/roles/${id}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    });
+
+    if (activeRole?.id === id) {
+      setShowPermissionsModal(false);
+      setActiveRole(null);
+      setSelectedPermissions([]);
     }
+
+    if (editingRole?.id === id) {
+      setShowForm(false);
+      setEditingRole(null);
+      setRoleName('');
+      setRoleDescription('');
+      setSelectedPermissions([]);
+      setIsActive(true);
+    }
+
+    await fetchRoles();
+    showModalMessage('Role Deleted', 'Role and its allocated permissions were removed successfully.', 'success');
   };
 
   const confirmDeleteRole = (role: Role) => {
     openConfirm(
       'Delete Role',
-      `Are you sure you want to delete the "${role.name}" role? This action cannot be undone.`,
+      `Are you sure you want to delete "${role.name}"? This will remove the role from the database, unassign it from all users, and clear its allocated permissions.`,
       async () => {
-        await handleDelete(role.id);
-        closeConfirm();
+        setConfirmLoading(true);
+        try {
+          await handleDelete(role.id);
+          setConfirmLoading(false);
+          closeConfirm();
+        } catch (error) {
+          const err: any = error;
+          setConfirmLoading(false);
+          closeConfirm();
+          if (err?.response?.status >= 500) {
+            console.error('Error deleting role:', err?.response?.status, err?.response?.data || err?.message);
+          }
+          showModalMessage(
+            'Delete Failed',
+            extractApiErrorMessage(err, 'Failed to delete role. Please try again.'),
+            'error'
+          );
+        } finally {
+          setConfirmLoading(false);
+        }
       }
     );
   };
@@ -1357,15 +1411,45 @@ export default function Roles() {
             <div className="flex justify-end space-x-3">
               <button
                 onClick={closeConfirm}
-                className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                disabled={confirmLoading}
+                className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition disabled:opacity-60"
               >
                 Cancel
               </button>
               <button
                 onClick={async () => { if (confirmAction) await confirmAction(); }}
-                className="px-5 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700 transition"
+                disabled={confirmLoading}
+                className="px-5 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700 transition disabled:opacity-60"
               >
-                Confirm
+                {confirmLoading ? 'Deleting...' : 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMessageModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-gray-200">
+            <div
+              className={`px-5 py-4 ${
+                messageModalType === 'error'
+                  ? 'bg-gradient-to-r from-red-500 to-pink-500'
+                  : 'bg-gradient-to-r from-emerald-500 to-cyan-500'
+              }`}
+            >
+              <h4 className="text-white font-semibold">{messageModalTitle}</h4>
+            </div>
+            <div className="p-5">
+              <p className="text-sm text-gray-700">{messageModalBody}</p>
+            </div>
+            <div className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowMessageModal(false)}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-100"
+              >
+                OK
               </button>
             </div>
           </div>

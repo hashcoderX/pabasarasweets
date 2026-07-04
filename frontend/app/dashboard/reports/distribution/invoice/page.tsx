@@ -4,8 +4,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from 'axios';
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
 
 type InvoiceStatus = 'pending' | 'partial' | 'paid' | 'cancelled';
 
@@ -53,7 +51,7 @@ export default function DistributionInvoiceReportPage() {
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -70,7 +68,7 @@ export default function DistributionInvoiceReportPage() {
 
     const verifyAccess = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -253,122 +251,6 @@ export default function DistributionInvoiceReportPage() {
     return 'bg-red-100 text-red-700';
   };
 
-  const rowToExport = (row: InvoiceRow) => {
-    return [
-      row.invoice_number || '-',
-      row.customer?.customer_code || '-',
-      row.customer?.shop_name || '-',
-      toDateLabel(row.invoice_date),
-      toDateLabel(row.due_date),
-      row.status ? row.status.toUpperCase() : '-',
-      String((row.items || []).length),
-      formatMoney(row.subtotal),
-      formatMoney(row.discount),
-      formatMoney(row.total),
-      formatMoney(row.paid_amount),
-      formatMoney(getOutstanding(row)),
-    ];
-  };
-
-  const exportCsv = () => {
-    const headers = [
-      'Invoice Number',
-      'Customer Code',
-      'Customer Name',
-      'Invoice Date',
-      'Due Date',
-      'Status',
-      'Item Count',
-      'Sub Total',
-      'Discount',
-      'Total',
-      'Paid',
-      'Outstanding',
-    ];
-
-    const csvContent = [headers, ...filteredRows.map(rowToExport)]
-      .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-      .join('\n');
-
-    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `distribution-invoice-report-${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const buildPdf = () => {
-    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
-
-    doc.setFontSize(16);
-    doc.text('Distribution Invoice Report', 40, 40);
-
-    doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 40, 58);
-    doc.text(`Status Filter: ${statusFilter === 'all' ? 'ALL' : statusFilter.toUpperCase()}`, 40, 72);
-    doc.text(`Customer Filter: ${customerFilter === 'all' ? 'ALL' : customerFilter}`, 40, 86);
-
-    autoTable(doc, {
-      startY: 100,
-      head: [[
-        'Invoice #',
-        'Customer',
-        'Date',
-        'Status',
-        'Items',
-        'Sub Total',
-        'Discount',
-        'Total',
-        'Paid',
-        'Outstanding',
-      ]],
-      body: filteredRows.map((row) => {
-        const values = rowToExport(row);
-        return [
-          values[0],
-          `${values[1]} - ${values[2]}`,
-          values[3],
-          values[5],
-          values[6],
-          values[7],
-          values[8],
-          values[9],
-          values[10],
-          values[11],
-        ];
-      }),
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 4 },
-      headStyles: { fillColor: [22, 163, 74] },
-      margin: { left: 20, right: 20 },
-      didDrawPage: () => {
-        doc.setFontSize(9);
-        doc.text(
-          `Invoices: ${summary.totalInvoices} | Invoice Total: ${formatMoney(summary.invoiceTotal)} | Paid: ${formatMoney(summary.paidTotal)} | Outstanding: ${formatMoney(summary.outstandingTotal)}`,
-          20,
-          doc.internal.pageSize.getHeight() - 20
-        );
-      },
-    });
-
-    return doc;
-  };
-
-  const viewPdf = () => {
-    const doc = buildPdf();
-    const url = doc.output('bloburl');
-    window.open(url, '_blank');
-  };
-
-  const downloadPdf = () => {
-    const doc = buildPdf();
-    doc.save(`distribution-invoice-report-${new Date().toISOString().split('T')[0]}.pdf`);
-  };
-
   if (!token || !accessReady) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-teal-50 to-emerald-50 flex items-center justify-center">
@@ -487,17 +369,6 @@ export default function DistributionInvoiceReportPage() {
             </div>
           </div>
 
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button onClick={viewPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">
-              View PDF
-            </button>
-            <button onClick={downloadPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
-              Download PDF
-            </button>
-            <button onClick={exportCsv} className="px-4 py-2 rounded-md text-sm font-medium border border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100">
-              Download CSV (Excel)
-            </button>
-          </div>
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">

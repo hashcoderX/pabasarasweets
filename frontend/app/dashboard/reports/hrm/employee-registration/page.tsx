@@ -53,7 +53,7 @@ export default function EmployeeRegistrationReportPage() {
 
     const verifyAccess = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -114,7 +114,7 @@ export default function EmployeeRegistrationReportPage() {
       setLoading(true);
       setErrorMessage('');
 
-      const response = await axios.get('http://localhost:8000/api/hr/employees', {
+      const response = await axios.get('/api/hr/employees', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 

@@ -63,7 +63,7 @@ export default function VehiclesPage() {
   const fetchVehicles = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/vehicles', {
+      const response = await axios.get('/api/vehicle-loading/vehicles', {
         headers: {
           Authorization: `Bearer ${token}`
         }
@@ -94,13 +94,13 @@ export default function VehiclesPage() {
       };
 
       if (editingVehicle) {
-        await axios.put(`http://localhost:8000/api/vehicle-loading/vehicles/${editingVehicle.id}`, vehicleData, {
+        await axios.put(`/api/vehicle-loading/vehicles/${editingVehicle.id}`, vehicleData, {
           headers: {
             Authorization: `Bearer ${token}`
           }
         });
       } else {
-        await axios.post('http://localhost:8000/api/vehicle-loading/vehicles', vehicleData, {
+        await axios.post('/api/vehicle-loading/vehicles', vehicleData, {
           headers: {
             Authorization: `Bearer ${token}`
           }
@@ -153,7 +153,7 @@ export default function VehiclesPage() {
   const handleDelete = async (id: number) => {
     if (confirm('Are you sure you want to delete this vehicle?')) {
       try {
-        await axios.delete(`http://localhost:8000/api/vehicle-loading/vehicles/${id}`, {
+        await axios.delete(`/api/vehicle-loading/vehicles/${id}`, {
           headers: {
             Authorization: `Bearer ${token}`
           }

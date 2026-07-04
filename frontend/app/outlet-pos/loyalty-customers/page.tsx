@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
@@ -18,7 +18,7 @@ type LoyaltyCustomer = {
   created_at?: string;
 };
 
-export default function OutletLoyaltyCustomersPage() {
+function OutletLoyaltyCustomersContent() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -37,7 +37,7 @@ export default function OutletLoyaltyCustomersPage() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
@@ -288,5 +288,19 @@ export default function OutletLoyaltyCustomersPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+export default function OutletLoyaltyCustomersPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        </div>
+      }
+    >
+      <OutletLoyaltyCustomersContent />
+    </Suspense>
   );
 }

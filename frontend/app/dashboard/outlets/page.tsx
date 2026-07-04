@@ -48,7 +48,7 @@ export default function OutletsPage() {
 
   const fetchStats = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/outlets', {
+      const response = await axios.get('/api/outlets', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 100 }
       });
@@ -71,7 +71,7 @@ export default function OutletsPage() {
       setStockModalOpen(true);
       setStockLoading(true);
 
-      const response = await axios.get(`http://localhost:8000/api/outlets/${outlet.id}/stock-report`, {
+      const response = await axios.get(`/api/outlets/${outlet.id}/stock-report`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 

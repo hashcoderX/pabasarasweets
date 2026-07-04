@@ -67,7 +67,7 @@ export default function ProductionExecutionPage() {
   const [updateWastageQty, setUpdateWastageQty] = useState('0');
   const [updateNotes, setUpdateNotes] = useState('');
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const router = useRouter();
   const inputClass =
     'w-full rounded-xl border border-amber-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-amber-400 focus:ring-4 focus:ring-amber-100 focus:outline-none';

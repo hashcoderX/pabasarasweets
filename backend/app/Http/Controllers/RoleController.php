@@ -6,6 +6,7 @@ use App\Models\Role;
 use App\Models\Permission;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
 class RoleController extends Controller
@@ -96,12 +97,12 @@ class RoleController extends Controller
 
     public function destroy(Role $role): JsonResponse
     {
-        // Check if role is assigned to any users
-        if ($role->users()->exists()) {
-            return response()->json(['message' => 'Cannot delete role that is assigned to users'], 409);
-        }
+        DB::transaction(function () use ($role) {
+            $role->permissions()->detach();
+            $role->users()->detach();
+            $role->delete();
+        });
 
-        $role->delete();
         return response()->json(['message' => 'Role deleted successfully']);
     }
 

@@ -68,7 +68,7 @@ export default function DistributionPaymentsPage() {
     }
 
     try {
-      const userRes = await axios.get('http://localhost:8000/api/user', {
+      const userRes = await axios.get('/api/user', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -94,7 +94,7 @@ export default function DistributionPaymentsPage() {
       if (routeFromQuery) return;
       if (!employeeId) return;
 
-      const loadsRes = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const loadsRes = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -373,9 +373,9 @@ export default function DistributionPaymentsPage() {
     try {
       setLoading(true);
       const [paymentsRes, customersRes, invoicesRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/distribution/payments', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
-        axios.get('http://localhost:8000/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('http://localhost:8000/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/distribution/payments', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
+        axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
       ]);
 
       setPayments(paymentsRes.data?.data?.data || []);
@@ -407,7 +407,7 @@ export default function DistributionPaymentsPage() {
 
     try {
       setSaving(true);
-      await axios.post('http://localhost:8000/api/distribution/payments', {
+      await axios.post('/api/distribution/payments', {
         ...form,
         distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
         customer_id: Number(form.customer_id),

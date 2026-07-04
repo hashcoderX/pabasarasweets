@@ -32,14 +32,14 @@ export default function PurchasingPage() {
   const fetchStats = async () => {
     try {
       const [ordersRes, suppliersRes, inventoryRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/purchasing/purchase-orders', {
+        axios.get('/api/purchasing/purchase-orders', {
           headers: { Authorization: `Bearer ${token}` }
         }),
-        axios.get('http://localhost:8000/api/stock/suppliers', {
+        axios.get('/api/stock/suppliers', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 100 }
         }),
-        axios.get('http://localhost:8000/api/stock/inventory', {
+        axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 100 }
         }),

@@ -102,7 +102,7 @@ export default function PurchaseOrdersPage() {
 
   const fetchPurchaseOrders = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/purchasing/purchase-orders', {
+      const response = await axios.get('/api/purchasing/purchase-orders', {
         headers: { Authorization: `Bearer ${token}` }
       });
       setPurchaseOrders(response.data.data || response.data || []);
@@ -116,7 +116,7 @@ export default function PurchaseOrdersPage() {
 
   const fetchSuppliers = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/stock/suppliers', {
+      const response = await axios.get('/api/stock/suppliers', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 100 }
       });
@@ -135,7 +135,7 @@ export default function PurchaseOrdersPage() {
 
   const fetchInventoryItems = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/stock/inventory', {
+      const response = await axios.get('/api/stock/inventory', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 100 }
       });
@@ -172,7 +172,7 @@ export default function PurchaseOrdersPage() {
     }
 
     try {
-      await axios.post('http://localhost:8000/api/purchasing/purchase-orders', {
+      await axios.post('/api/purchasing/purchase-orders', {
         ...formData,
         supplier_id: Number(formData.supplier_id),
         items: formData.items.map((item) => ({

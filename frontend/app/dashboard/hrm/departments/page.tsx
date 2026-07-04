@@ -14,7 +14,7 @@ interface Department {
 
 export default function Departments() {
   const [token, setToken] = useState('');
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const [departments, setDepartments] = useState<Department[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
@@ -22,6 +22,13 @@ export default function Departments() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [departmentToDelete, setDepartmentToDelete] = useState<Department | null>(null);
+  const [deletingDepartment, setDeletingDepartment] = useState(false);
+  const [showMessageModal, setShowMessageModal] = useState(false);
+  const [messageModalTitle, setMessageModalTitle] = useState('');
+  const [messageModalBody, setMessageModalBody] = useState('');
+  const [messageModalType, setMessageModalType] = useState<'error' | 'success'>('error');
   const router = useRouter();
 
   // Form fields
@@ -92,6 +99,35 @@ export default function Departments() {
     setEditingDepartment(null);
   };
 
+  const showModalMessage = (
+    title: string,
+    body: string,
+    type: 'error' | 'success' = 'error'
+  ) => {
+    setMessageModalTitle(title);
+    setMessageModalBody(body);
+    setMessageModalType(type);
+    setShowMessageModal(true);
+  };
+
+  const extractApiErrorMessage = (error: any, fallback: string) => {
+    const message =
+      error?.response?.data?.message ||
+      error?.response?.data?.error ||
+      error?.message ||
+      fallback;
+
+    if (
+      typeof message === 'string' &&
+      (message.toLowerCase().includes('foreign key') ||
+        message.toLowerCase().includes('constraint fails'))
+    ) {
+      return 'This department cannot be deleted because it is used by employee records. Reassign or remove those employees first.';
+    }
+
+    return message;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -117,10 +153,10 @@ export default function Departments() {
     } catch (error) {
       const err: any = error;
       console.error('Error saving department:', err?.response?.status, err?.response?.data || err?.message);
-      alert(
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        'Failed to save department. Please try again.'
+      showModalMessage(
+        'Save Failed',
+        extractApiErrorMessage(err, 'Failed to save department. Please try again.'),
+        'error'
       );
     } finally {
       setLoading(false);
@@ -134,18 +170,33 @@ export default function Departments() {
     setShowForm(true);
   };
 
-  const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this department?')) return;
+  const handleDelete = (department: Department) => {
+    setDepartmentToDelete(department);
+    setShowDeleteModal(true);
+  };
 
+  const confirmDelete = async () => {
+    if (!departmentToDelete) return;
+    setDeletingDepartment(true);
     try {
-      await axios.delete(`${API_URL}/api/hr/departments/${id}`, {
+      await axios.delete(`${API_URL}/api/hr/departments/${departmentToDelete.id}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       });
+      setShowDeleteModal(false);
+      setDepartmentToDelete(null);
       fetchDepartments();
     } catch (error) {
       const err: any = error;
-      console.error('Error deleting department:', err?.response?.status, err?.response?.data || err?.message);
-      alert('Failed to delete department. Please try again.');
+      const status = err?.response?.status;
+      const message = extractApiErrorMessage(err, 'Failed to delete department. Please try again.');
+      setShowDeleteModal(false);
+      setDepartmentToDelete(null);
+      if (status && status >= 500) {
+        console.error('Error deleting department:', status, err?.response?.data || err?.message);
+      }
+      showModalMessage('Delete Failed', message, 'error');
+    } finally {
+      setDeletingDepartment(false);
     }
   };
 
@@ -379,7 +430,7 @@ export default function Departments() {
                         Edit
                       </button>
                       <button
-                        onClick={() => handleDelete(department.id)}
+                        onClick={() => handleDelete(department)}
                         className="inline-flex items-center px-3 py-1 rounded-lg text-red-600 hover:text-red-800 hover:bg-red-50 transition-colors duration-200"
                       >
                         <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -425,6 +476,73 @@ export default function Departments() {
             </div>
           </div>
         </div>
+
+        {showDeleteModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-red-200">
+              <div className="px-5 py-4 bg-gradient-to-r from-red-500 to-pink-500">
+                <h4 className="text-white font-semibold">Confirm Deletion</h4>
+              </div>
+              <div className="p-5 space-y-3">
+                <p className="text-sm text-gray-700">
+                  Are you sure you want to delete
+                  <span className="font-semibold"> {departmentToDelete?.name || 'this department'}</span>?
+                </p>
+                <p className="text-xs text-red-700">This action cannot be undone.</p>
+              </div>
+              <div className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (deletingDepartment) return;
+                    setShowDeleteModal(false);
+                    setDepartmentToDelete(null);
+                  }}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-60"
+                  disabled={deletingDepartment}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmDelete}
+                  className="px-4 py-2 rounded-lg bg-red-600 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+                  disabled={deletingDepartment}
+                >
+                  {deletingDepartment ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showMessageModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-gray-200">
+              <div
+                className={`px-5 py-4 ${
+                  messageModalType === 'error'
+                    ? 'bg-gradient-to-r from-red-500 to-pink-500'
+                    : 'bg-gradient-to-r from-emerald-500 to-cyan-500'
+                }`}
+              >
+                <h4 className="text-white font-semibold">{messageModalTitle}</h4>
+              </div>
+              <div className="p-5">
+                <p className="text-sm text-gray-700">{messageModalBody}</p>
+              </div>
+              <div className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowMessageModal(false)}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-100"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
@@ -52,7 +52,7 @@ type TransactionRow = {
   total_sales_amount: number;
 };
 
-export default function OutletCashDrawerPage() {
+function OutletCashDrawerContent() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -79,7 +79,7 @@ export default function OutletCashDrawerPage() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
@@ -737,5 +737,19 @@ export default function OutletCashDrawerPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+export default function OutletCashDrawerPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.18),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.14),_transparent_28%),linear-gradient(180deg,_#f0fdf9_0%,_#ecfeff_45%,_#f0fdfa_100%)]">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+        </div>
+      }
+    >
+      <OutletCashDrawerContent />
+    </Suspense>
   );
 }

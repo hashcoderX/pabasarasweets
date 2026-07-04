@@ -10,11 +10,16 @@ class OutletSale extends Model
 {
     protected $fillable = [
         'sale_number',
+        'do_number',
+        'status',
         'outlet_id',
         'sold_by',
         'sale_date',
         'customer_name',
         'loyalty_customer_id',
+        'load_id',
+        'delivery_employee_id',
+        'delivery_employee_name',
         'total_quantity',
         'total_amount',
         'discount_amount',
@@ -53,5 +58,10 @@ class OutletSale extends Model
     public function loyaltyCustomer(): BelongsTo
     {
         return $this->belongsTo(OutletLoyaltyCustomer::class, 'loyalty_customer_id');
+    }
+
+    public function assignedLoad(): BelongsTo
+    {
+        return $this->belongsTo(Load::class, 'load_id');
     }
 }

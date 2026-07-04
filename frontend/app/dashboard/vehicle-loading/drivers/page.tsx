@@ -61,7 +61,7 @@ export default function DriversPage() {
       setLoading(true);
       setMessage('');
 
-      const response = await axios.get('http://localhost:8000/api/hr/employees', {
+      const response = await axios.get('/api/hr/employees', {
         headers: { Authorization: `Bearer ${authToken}` },
         params: { per_page: 1000 },
         validateStatus: () => true,
@@ -84,11 +84,22 @@ export default function DriversPage() {
         ? payload
         : (payload?.data?.data || payload?.data || []);
 
+      const hasDriverRole = (text: string): boolean => {
+        const normalized = text.toLowerCase();
+        if (!normalized.includes('driver')) return false;
+
+        const excludedTerms = ['helper', 'assistant', 'attendant', 'loader', 'clerk'];
+        return !excludedTerms.some((term) => normalized.includes(term));
+      };
+
       const driverCandidates = employees.filter((emp) => {
-        const designationName = String(emp?.designation?.name || emp?.designation_name || '').toLowerCase();
-        const departmentName = String(emp?.department?.name || emp?.department_name || '').toLowerCase();
-        const searchText = `${designationName} ${departmentName}`;
-        return searchText.includes('driver') || searchText.includes('transport') || searchText.includes('logistics');
+        const designationName = String(emp?.designation?.name || emp?.designation_name || emp?.designation || '').trim();
+        const positionName = String(emp?.position || emp?.job_title || emp?.title || '').trim();
+        const roleNames = Array.isArray(emp?.roles)
+          ? emp.roles.map((role: any) => String(role?.name || role || '')).join(' ')
+          : String(emp?.role || '');
+
+        return [designationName, positionName, roleNames].some((value) => hasDriverRole(value));
       });
 
       const normalized: Driver[] = driverCandidates

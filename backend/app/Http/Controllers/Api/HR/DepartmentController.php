@@ -5,8 +5,11 @@ namespace App\Http\Controllers\Api\HR;
 use App\Http\Controllers\Controller;
 use App\Models\Company;
 use App\Models\Department;
+use App\Models\Employee;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class DepartmentController extends Controller
@@ -117,7 +120,46 @@ class DepartmentController extends Controller
      */
     public function destroy(Department $department): JsonResponse
     {
-        $department->delete();
+        $activeEmployeeCount = Employee::query()
+            ->where('department_id', $department->id)
+            ->count();
+
+        if ($activeEmployeeCount > 0) {
+            return response()->json([
+                'message' => "Cannot delete this department because {$activeEmployeeCount} active employee(s) are still assigned to it. Reassign them first.",
+            ], 422);
+        }
+
+        $archivedEmployeeCount = Employee::onlyTrashed()
+            ->where('department_id', $department->id)
+            ->count();
+
+        $fallbackDepartment = null;
+        if ($archivedEmployeeCount > 0) {
+            $fallbackDepartment = Department::query()
+                ->where('tenant_id', $department->tenant_id)
+                ->where('id', '!=', $department->id)
+                ->orderBy('id')
+                ->first();
+        }
+
+        try {
+            DB::transaction(function () use ($department, $fallbackDepartment, $archivedEmployeeCount) {
+                if ($archivedEmployeeCount > 0) {
+                    Employee::onlyTrashed()
+                        ->where('department_id', $department->id)
+                        ->update([
+                            'department_id' => $fallbackDepartment?->id,
+                        ]);
+                }
+
+                $department->delete();
+            });
+        } catch (QueryException $exception) {
+            return response()->json([
+                'message' => 'Cannot delete this department because related records still exist.',
+            ], 422);
+        }
 
         return response()->json(['message' => 'Department deleted successfully']);
     }

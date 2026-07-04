@@ -91,18 +91,6 @@ export default function DistributionCustomersPage() {
     }
   }, [token, assignedRouteId, selectedRouteFilter, isAdmin]);
 
-  const getInvoiceDueAmount = (invoice: any): number => {
-    const total = Number(invoice?.total || 0);
-    const paidAmount = Number(invoice?.paid_amount || 0);
-    const explicitDue = Number(invoice?.due_amount || invoice?.balance_amount || 0);
-
-    if (explicitDue > 0) {
-      return explicitDue;
-    }
-
-    return Math.max(0, total - paidAmount);
-  };
-
   const filteredCustomers = useMemo(() => {
     const q = searchText.trim().toLowerCase();
     const min = minOutstanding.trim() === '' ? null : Number(minOutstanding);
@@ -171,7 +159,7 @@ export default function DistributionCustomersPage() {
       : null;
 
     try {
-      const userRes = await axios.get('http://localhost:8000/api/user', {
+      const userRes = await axios.get('/api/user', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -206,7 +194,7 @@ export default function DistributionCustomersPage() {
       }
       if (!employeeId) return;
 
-      const loadsRes = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const loadsRes = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -228,46 +216,24 @@ export default function DistributionCustomersPage() {
   const fetchCustomers = async () => {
     try {
       setLoading(true);
-      const [customersRes, invoicesRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/distribution/customers', {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 1000 }
-        }),
-        axios.get('http://localhost:8000/api/distribution/invoices', {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 1000 }
-        }),
-      ]);
-
-      const allCustomers: Customer[] = customersRes.data?.data?.data || [];
-      const allInvoices = invoicesRes.data?.data?.data || [];
-
-      const dueByCustomer = new Map<number, number>();
-      allInvoices.forEach((invoice: any) => {
-        const status = String(invoice?.status || '').toLowerCase();
-        if (status === 'cancelled') return;
-
-        const customerId = Number(invoice?.customer_id || 0);
-        if (!customerId) return;
-
-        const due = getInvoiceDueAmount(invoice);
-        if (due <= 0) return;
-
-        dueByCustomer.set(customerId, (dueByCustomer.get(customerId) || 0) + due);
+      const customersRes = await axios.get('/api/distribution/customers', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { per_page: 1000 }
       });
 
+      const allCustomers: Customer[] = customersRes.data?.data?.data || [];
       const activeRouteFilter = isAdmin ? selectedRouteFilter : assignedRouteId;
 
       const filteredCustomers = activeRouteFilter
         ? allCustomers.filter((customer) => String(customer.route_id || '') === activeRouteFilter)
         : allCustomers;
 
-      const customersWithOutstanding = filteredCustomers.map((customer) => ({
-        ...customer,
-        outstanding: Number(dueByCustomer.get(Number(customer.id)) || 0),
-      }));
-
-      setCustomers(customersWithOutstanding);
+      setCustomers(
+        filteredCustomers.map((customer) => ({
+          ...customer,
+          outstanding: Number(customer.outstanding ?? 0),
+        }))
+      );
     } catch (error) {
       console.error('Error fetching customers:', error);
       setCustomers([]);
@@ -278,7 +244,7 @@ export default function DistributionCustomersPage() {
 
   const fetchRoutes = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/vehicle-loading/routes', {
+      const res = await axios.get('/api/vehicle-loading/routes', {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRoutes(Array.isArray(res.data) ? res.data : (res.data?.data || []));
@@ -339,7 +305,7 @@ export default function DistributionCustomersPage() {
     try {
       setSaving(true);
       if (editingCustomer) {
-        await axios.put(`http://localhost:8000/api/distribution/customers/${editingCustomer.id}`, {
+        await axios.put(`/api/distribution/customers/${editingCustomer.id}`, {
           ...formData,
           route_id: formData.route_id ? Number(formData.route_id) : null,
           outstanding: Number(formData.outstanding || 0),
@@ -347,7 +313,7 @@ export default function DistributionCustomersPage() {
           headers: { Authorization: `Bearer ${token}` }
         });
       } else {
-        await axios.post('http://localhost:8000/api/distribution/customers', {
+        await axios.post('/api/distribution/customers', {
           ...formData,
           route_id: formData.route_id ? Number(formData.route_id) : null,
           outstanding: Number(formData.outstanding || 0),
@@ -371,7 +337,7 @@ export default function DistributionCustomersPage() {
     }
 
     try {
-      await axios.delete(`http://localhost:8000/api/distribution/customers/${customer.id}`, {
+      await axios.delete(`/api/distribution/customers/${customer.id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       fetchCustomers();

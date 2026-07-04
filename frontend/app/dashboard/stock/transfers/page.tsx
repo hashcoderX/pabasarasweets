@@ -118,15 +118,15 @@ export default function StockTransfersPage() {
       setLoading(true);
 
       const [itemsRes, outletsRes, transfersRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/stock/inventory', {
+        axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 1000 }
         }),
-        axios.get('http://localhost:8000/api/outlets', {
+        axios.get('/api/outlets', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 1000 }
         }),
-        axios.get('http://localhost:8000/api/stock/transfers', {
+        axios.get('/api/stock/transfers', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: perPage, page }
         }),
@@ -288,7 +288,7 @@ export default function StockTransfersPage() {
 
     try {
       setSaving(true);
-      await axios.post('http://localhost:8000/api/stock/transfers', {
+      await axios.post('/api/stock/transfers', {
         outlet_id: Number(outletId),
         notes,
         items: transferLines.map((line) => ({
@@ -331,7 +331,7 @@ export default function StockTransfersPage() {
       setSelectedTransferDetails(null);
 
       const response = await axios.get(
-        `http://localhost:8000/api/stock/transfers/reference/${encodeURIComponent(transfer.transfer_reference)}`,
+        `/api/stock/transfers/reference/${encodeURIComponent(transfer.transfer_reference)}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         }

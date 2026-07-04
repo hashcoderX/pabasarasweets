@@ -22,32 +22,35 @@ export default function StockLayout({
       {/* Stock Management Navigation */}
       <div className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center py-4">
-            <div className="flex items-center space-x-8">
-              <h1 className="text-2xl font-bold text-gray-900">Stock Management</h1>
-              <nav className="flex space-x-6">
+          <div className="py-4 space-y-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Stock Management</h1>
+              <Link
+                href="/dashboard"
+                className="inline-flex items-center text-gray-600 hover:text-gray-900 text-sm font-medium"
+              >
+                ← Back to Dashboard
+              </Link>
+            </div>
+
+            <nav className="-mx-1 overflow-x-auto pb-1 sm:mx-0 sm:overflow-visible">
+              <div className="flex min-w-max gap-2 px-1 sm:min-w-0 sm:flex-wrap sm:gap-3 sm:px-0">
                 {navigation.map((item) => (
                   <Link
                     key={item.name}
                     href={item.href}
-                    className={`flex items-center px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    className={`inline-flex items-center whitespace-nowrap rounded-full px-3 py-2 text-sm font-medium transition-colors ${
                       pathname === item.href
-                        ? 'bg-orange-100 text-orange-700'
-                        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                        ? 'bg-orange-100 text-orange-700 border border-orange-200'
+                        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100 border border-gray-200'
                     }`}
                   >
                     <span className="mr-2">{item.icon}</span>
                     {item.name}
                   </Link>
                 ))}
-              </nav>
-            </div>
-            <Link
-              href="/dashboard"
-              className="text-gray-600 hover:text-gray-900 text-sm font-medium"
-            >
-              ← Back to Dashboard
-            </Link>
+              </div>
+            </nav>
           </div>
         </div>
       </div>

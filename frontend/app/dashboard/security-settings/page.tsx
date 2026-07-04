@@ -47,7 +47,7 @@ export default function SecuritySettingsPage() {
 
     const bootstrap = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -94,7 +94,7 @@ export default function SecuritySettingsPage() {
 
     try {
       setLoading(true);
-      const res = await axios.get('http://localhost:8000/api/security-settings', {
+      const res = await axios.get('/api/security-settings', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 
@@ -117,7 +117,7 @@ export default function SecuritySettingsPage() {
   const saveSettings = async () => {
     try {
       setSaving(true);
-      await axios.put('http://localhost:8000/api/security-settings', settings, {
+      await axios.put('/api/security-settings', settings, {
         headers: { Authorization: `Bearer ${token}` },
       });
       alert('Security settings saved successfully.');

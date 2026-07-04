@@ -92,12 +92,6 @@ interface Department {
 interface Designation {
   id: number;
   name: string;
-  source?: 'designation' | 'role';
-}
-
-interface RoleOption {
-  id: number;
-  name: string;
 }
 
 interface Branch {
@@ -167,6 +161,7 @@ export default function Employees() {
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState('employee');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
@@ -397,7 +392,7 @@ export default function Employees() {
     if (!tokenToUse) return;
     
     try {
-      const response = await axios.get('http://localhost:8000/api/hr/employees', {
+      const response = await axios.get('/api/hr/employees', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 
@@ -425,7 +420,7 @@ export default function Employees() {
     if (!tokenToUse) return;
     
     try {
-      const response = await axios.get('http://localhost:8000/api/hr/departments', {
+      const response = await axios.get('/api/hr/departments', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
       setDepartments(response.data.data || []);
@@ -439,52 +434,34 @@ export default function Employees() {
     if (!tokenToUse) return;
     
     try {
-      const [designationRes, roleRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/hr/designations', {
-          headers: { Authorization: `Bearer ${tokenToUse}` },
-        }),
-        axios.get('http://localhost:8000/api/roles', {
-          headers: { Authorization: `Bearer ${tokenToUse}` },
-          params: { per_page: 1000 },
-        }),
-      ]);
+      const response = await axios.get('/api/roles', {
+        headers: { Authorization: `Bearer ${tokenToUse}` },
+        params: { per_page: 1000 },
+      });
 
-      const designationRows = Array.isArray(designationRes.data)
-        ? designationRes.data
-        : (designationRes.data?.data || []);
+      const roleRows = Array.isArray(response.data)
+        ? response.data
+        : (response.data?.data || []);
 
-      const roleRows = Array.isArray(roleRes.data)
-        ? roleRes.data
-        : (roleRes.data?.data || []);
-
-      const normalizedDesignationRows: Designation[] = designationRows.map((row: any) => ({
-        id: Number(row.id),
-        name: String(row.name || ''),
-        source: 'designation',
-      }));
-
-      const usedNames = new Set(
-        normalizedDesignationRows
-          .map((row) => row.name.trim().toLowerCase())
-          .filter(Boolean)
-      );
-
-      const roleOnlyRows: Designation[] = (roleRows as RoleOption[])
-        .map((row) => ({
-          id: -Math.abs(Number(row.id) || 0),
-          name: String(row.name || ''),
-          source: 'role' as const,
+      const normalizedRoleRows: Designation[] = roleRows
+        .map((row: { id?: number | string; name?: string; is_active?: boolean }) => ({
+          id: Number(row.id),
+          name: String(row.name || '').trim(),
+          is_active: row.is_active !== false,
         }))
-        .filter((row) => {
-          const key = row.name.trim().toLowerCase();
-          if (!key || usedNames.has(key)) return false;
-          usedNames.add(key);
-          return true;
-        });
+        .filter(
+          (row: Designation & { is_active?: boolean }) =>
+            Number.isFinite(row.id) &&
+            row.id > 0 &&
+            row.name.length > 0 &&
+            row.is_active !== false
+        )
+        .sort((a: Designation, b: Designation) => a.name.localeCompare(b.name));
 
-      setDesignations([...normalizedDesignationRows, ...roleOnlyRows]);
+      setDesignations(normalizedRoleRows);
     } catch (error) {
-      console.error('Error fetching designations:', error);
+      console.error('Error fetching roles for designation select:', error);
+      setDesignations([]);
     }
   };
 
@@ -493,7 +470,7 @@ export default function Employees() {
     if (!tokenToUse) return;
     
     try {
-      const response = await axios.get('http://localhost:8000/api/companies', {
+      const response = await axios.get('/api/companies', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
       setBranches(response.data || []);
@@ -507,7 +484,7 @@ export default function Employees() {
     if (!tokenToUse) return;
 
     try {
-      const response = await axios.get('http://localhost:8000/api/hr/leave-types', {
+      const response = await axios.get('/api/hr/leave-types', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
         params: { per_page: 1000 }
       });
@@ -536,6 +513,7 @@ export default function Employees() {
     setLastName('');
     setEmail('');
     setPassword('');
+    setShowPassword(false);
     setRole('employee');
     setPhone('');
     setAddress('');
@@ -570,8 +548,7 @@ export default function Employees() {
     e.preventDefault();
     setLoading(true);
 
-    const selectedDesignation = designations.find((desig) => desig.id.toString() === designationId);
-    const parsedDesignationId = Number(designationId);
+    const selectedRole = designations.find((item) => item.id.toString() === designationId);
 
     const employeeData = {
       first_name: firstName,
@@ -596,8 +573,7 @@ export default function Employees() {
       tax_applicable: taxApplicable === 'yes',
       tax_relief_eligible: taxReliefEligible === 'yes',
       department_id: parseInt(departmentId),
-      designation_id: Number.isFinite(parsedDesignationId) && parsedDesignationId > 0 ? parsedDesignationId : undefined,
-      designation_name: selectedDesignation?.name || undefined,
+      designation_name: selectedRole?.name,
       branch_id: parseInt(branchId),
       status,
       leave_balances: employeeLeaveBalances.length > 0 ? employeeLeaveBalances : undefined,
@@ -605,11 +581,11 @@ export default function Employees() {
 
     try {
       if (editingEmployee) {
-        await axios.put(`http://localhost:8000/api/hr/employees/${editingEmployee.id}`, employeeData, {
+        await axios.put(`/api/hr/employees/${editingEmployee.id}`, employeeData, {
           headers: { Authorization: `Bearer ${token}` },
         });
       } else {
-        await axios.post('http://localhost:8000/api/hr/employees', employeeData, {
+        await axios.post('/api/hr/employees', employeeData, {
           headers: { Authorization: `Bearer ${token}` },
         });
       }
@@ -654,7 +630,11 @@ export default function Employees() {
     setTaxApplicable(employee.tax_applicable ? 'yes' : 'no');
     setTaxReliefEligible(employee.tax_relief_eligible ? 'yes' : 'no');
     setDepartmentId(employee.department.id.toString());
-    setDesignationId(employee.designation.id.toString());
+    setDesignationId(
+      designations
+        .find((item) => item.name.toLowerCase() === employee.designation.name.toLowerCase())
+        ?.id.toString() || employee.designation.id.toString()
+    );
     setBranchId(employee.branch.id.toString());
     setStatus(employee.status);
     setShowForm(true);
@@ -662,7 +642,7 @@ export default function Employees() {
 
   const handleDelete = async (id: number) => {
     try {
-      await axios.delete(`http://localhost:8000/api/hr/employees/${id}`, {
+      await axios.delete(`/api/hr/employees/${id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchEmployees();
@@ -687,7 +667,7 @@ export default function Employees() {
     try {
       setProfileLoading(true);
       setShowProfileModal(true);
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${employee.id}`, {
+      const response = await axios.get(`/api/hr/employees/${employee.id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setProfileEmployee(response.data as EmployeeFull);
@@ -739,7 +719,7 @@ export default function Employees() {
     if (!token) return;
     try {
       await axios.post(
-        'http://localhost:8000/api/hr/attendance/mark',
+        '/api/hr/attendance/mark',
         { employee_id: employee.id, status },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -804,7 +784,7 @@ export default function Employees() {
 
   const fetchEmployeeDocuments = async (employeeId: number) => {
     try {
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${employeeId}/documents`, {
+      const response = await axios.get(`/api/hr/employees/${employeeId}/documents`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setDocuments(response.data || []);
@@ -815,7 +795,7 @@ export default function Employees() {
 
   const fetchEmployeeEducation = async (employeeId: number) => {
     try {
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${employeeId}/education`, {
+      const response = await axios.get(`/api/hr/employees/${employeeId}/education`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setEducations(response.data || []);
@@ -826,7 +806,7 @@ export default function Employees() {
 
   const fetchEmployeeExperience = async (employeeId: number) => {
     try {
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${employeeId}/experience`, {
+      const response = await axios.get(`/api/hr/employees/${employeeId}/experience`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setExperiences(response.data || []);
@@ -845,7 +825,7 @@ export default function Employees() {
     if (docNotes) formData.append('notes', docNotes);
 
     try {
-      await axios.post(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/documents`, formData, {
+      await axios.post(`/api/hr/employees/${activeEmployee.id}/documents`, formData, {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchEmployeeDocuments(activeEmployee.id);
@@ -873,7 +853,7 @@ export default function Employees() {
     };
 
     try {
-      await axios.post(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/education`, educationData, {
+      await axios.post(`/api/hr/employees/${activeEmployee.id}/education`, educationData, {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchEmployeeEducation(activeEmployee.id);
@@ -906,7 +886,7 @@ export default function Employees() {
     };
 
     try {
-      await axios.post(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/experience`, experienceData, {
+      await axios.post(`/api/hr/employees/${activeEmployee.id}/experience`, experienceData, {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchEmployeeExperience(activeEmployee.id);
@@ -926,7 +906,7 @@ export default function Employees() {
 
   const downloadDocument = async (doc: EmployeeDocument) => {
     try {
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${activeEmployee?.id}/documents/${doc.id}/download`, {
+      const response = await axios.get(`/api/hr/employees/${activeEmployee?.id}/documents/${doc.id}/download`, {
         headers: { Authorization: `Bearer ${token}` },
         responseType: 'blob',
       });
@@ -947,7 +927,7 @@ export default function Employees() {
   // Allowances and Deductions functions
   const fetchAllowancesDeductions = async (employeeId: number) => {
     try {
-      const response = await axios.get(`http://localhost:8000/api/hr/employees/${employeeId}/allowances-deductions`, {
+      const response = await axios.get(`/api/hr/employees/${employeeId}/allowances-deductions`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setAllowancesDeductions(response.data);
@@ -970,12 +950,12 @@ export default function Employees() {
 
     try {
       if (editingAllowanceDeduction) {
-        await axios.put(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/allowances-deductions/${editingAllowanceDeduction.id}`, allowanceDeductionData, {
+        await axios.put(`/api/hr/employees/${activeEmployee.id}/allowances-deductions/${editingAllowanceDeduction.id}`, allowanceDeductionData, {
           headers: { Authorization: `Bearer ${token}` },
         });
         showNotice('Success', 'Allowance/Deduction updated successfully!', 'success');
       } else {
-        await axios.post(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/allowances-deductions`, allowanceDeductionData, {
+        await axios.post(`/api/hr/employees/${activeEmployee.id}/allowances-deductions`, allowanceDeductionData, {
           headers: { Authorization: `Bearer ${token}` },
         });
         showNotice('Success', 'Allowance/Deduction added successfully!', 'success');
@@ -999,7 +979,7 @@ export default function Employees() {
   const handleDeleteAllowanceDeduction = async (allowanceDeduction: EmployeeAllowanceDeduction) => {
     if (!activeEmployee) return;
     try {
-      await axios.delete(`http://localhost:8000/api/hr/employees/${activeEmployee.id}/allowances-deductions/${allowanceDeduction.id}`, {
+      await axios.delete(`/api/hr/employees/${activeEmployee.id}/allowances-deductions/${allowanceDeduction.id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchAllowancesDeductions(activeEmployee.id);
@@ -1480,15 +1460,35 @@ export default function Employees() {
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Password *
                   </label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
-                    required
-                    minLength={8}
-                    placeholder="Minimum 8 characters"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
+                      required
+                      minLength={8}
+                      placeholder="Minimum 8 characters"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute inset-y-0 right-0 flex items-center px-3 text-gray-500 hover:text-gray-700 focus:outline-none"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? (
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029M6.223 6.223A9.956 9.956 0 0112 5c4.478 0 8.268 2.943 9.543 7a9.956 9.956 0 01-4.043 5.197M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3l18 18" />
+                        </svg>
+                      ) : (
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -1827,9 +1827,9 @@ export default function Employees() {
                     required
                   >
                     <option value="">Select Designation</option>
-                    {designations.map((desig) => (
-                      <option key={desig.id} value={desig.id}>
-                        {desig.name}
+                    {designations.map((role) => (
+                      <option key={role.id} value={role.id}>
+                        {role.name}
                       </option>
                     ))}
                   </select>

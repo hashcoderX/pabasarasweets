@@ -1,11 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
 import axios from 'axios';
 
-export default function Home() {
+function HomeContent() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,7 +31,7 @@ export default function Home() {
     e.preventDefault();
     setLoading(true);
     try {
-      const response = await axios.post('http://localhost:8000/api/login', {
+      const response = await axios.post('/api/login', {
         email,
         password,
       });
@@ -39,7 +39,7 @@ export default function Home() {
       localStorage.setItem('token', nextToken);
 
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${nextToken}` },
         });
 
@@ -214,5 +214,19 @@ export default function Home() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-cyan-50 to-emerald-100 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-600"></div>
+        </div>
+      }
+    >
+      <HomeContent />
+    </Suspense>
   );
 }

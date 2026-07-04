@@ -43,7 +43,7 @@ export default function Dashboard() {
 
     const fetchUserAccess = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -123,16 +123,6 @@ export default function Dashboard() {
       bgColor: 'from-rose-50 to-red-50',
       path: '/dashboard/reports',
       accessKeywords: ['report'],
-    },
-    {
-      id: 'settings',
-      name: 'Settings & System Configuration',
-      icon: '⚙️',
-      color: 'from-slate-500 to-gray-500',
-      bgColor: 'from-slate-50 to-gray-50',
-      path: '/dashboard/company-settings',
-      adminOnly: true,
-      accessKeywords: ['setting', 'config', 'user', 'permission', 'role'],
     },
     {
       id: 'production',

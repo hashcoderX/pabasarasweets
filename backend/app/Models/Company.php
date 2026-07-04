@@ -12,6 +12,8 @@ class Company extends Model
         'email',
         'address',
         'phone',
+        'telephone',
+        'whatsapp_number',
         'website',
         'country',
         'currency',

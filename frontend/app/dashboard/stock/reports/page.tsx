@@ -88,7 +88,7 @@ export default function StockReports() {
   const fetchReportData = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/stock/inventory', {
+      const response = await axios.get('/api/stock/inventory', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 2000 }
       });

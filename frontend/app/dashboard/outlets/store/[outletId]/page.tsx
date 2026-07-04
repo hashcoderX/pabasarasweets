@@ -28,7 +28,7 @@ export default function OutletStorePage() {
   const router = useRouter();
   const params = useParams<{ outletId: string }>();
   const outletId = params?.outletId;
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');

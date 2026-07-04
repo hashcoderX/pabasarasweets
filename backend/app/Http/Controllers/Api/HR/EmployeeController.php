@@ -14,6 +14,36 @@ use Illuminate\Support\Facades\Hash;
 
 class EmployeeController extends Controller
 {
+    private function generateTemporaryNicPassport(): string
+    {
+        $candidate = 'TEMP' . now()->format('YmdHis') . random_int(100, 999);
+
+        while (Employee::withTrashed()->where('nic_passport', $candidate)->exists()) {
+            $candidate = 'TEMP' . now()->format('YmdHis') . random_int(100, 999);
+        }
+
+        return $candidate;
+    }
+
+    private function generateEmployeeCode(): string
+    {
+        $maxNumeric = (int) (Employee::withTrashed()
+            ->whereRaw("employee_code REGEXP '^EMP[0-9]+$'")
+            ->selectRaw("MAX(CAST(SUBSTRING(employee_code, 4) AS UNSIGNED)) as max_code")
+            ->value('max_code') ?? 0);
+
+        $nextNumber = max(1, $maxNumeric + 1);
+        $candidate = 'EMP' . str_pad((string) $nextNumber, 4, '0', STR_PAD_LEFT);
+
+        // Keep incrementing if historical data already consumed the candidate.
+        while (Employee::withTrashed()->where('employee_code', $candidate)->exists()) {
+            $nextNumber++;
+            $candidate = 'EMP' . str_pad((string) $nextNumber, 4, '0', STR_PAD_LEFT);
+        }
+
+        return $candidate;
+    }
+
     private function calculateApit(float $monthlyIncome): array
     {
         $slabs = [
@@ -166,7 +196,7 @@ class EmployeeController extends Controller
             'last_name' => $validated['last_name'],
             'email' => $validated['email'],
             'mobile' => $validated['phone'] ?? '',
-            'nic_passport' => 'TEMP' . time(), // Temporary NIC for demo
+            'nic_passport' => $this->generateTemporaryNicPassport(),
             'address' => $validated['address'] ?? '',
             'photo_path' => $validated['photo_path'] ?? null,
             'date_of_birth' => $validated['date_of_birth'] ?? null,
@@ -192,10 +222,8 @@ class EmployeeController extends Controller
             'status' => $validated['status'] ?? 'active',
         ];
 
-        // Generate employee code
-        $lastEmployee = Employee::orderBy('id', 'desc')->first();
-        $nextNumber = $lastEmployee ? intval(substr($lastEmployee->employee_code, -4)) + 1 : 1;
-        $employeeData['employee_code'] = 'EMP' . str_pad($nextNumber, 4, '0', STR_PAD_LEFT);
+        // Generate collision-safe employee code for mixed historical formats.
+        $employeeData['employee_code'] = $this->generateEmployeeCode();
 
         $employee = Employee::create($employeeData);
 

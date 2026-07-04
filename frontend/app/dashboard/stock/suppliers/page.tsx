@@ -62,7 +62,7 @@ export default function Suppliers() {
   const fetchSuppliers = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/stock/suppliers', {
+      const response = await axios.get('/api/stock/suppliers', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 100 } // Get all suppliers for now
       });
@@ -124,7 +124,7 @@ export default function Suppliers() {
       setSaving(true);
       if (editingSupplier) {
         // Update existing supplier
-        const response = await axios.put(`http://localhost:8000/api/stock/suppliers/${editingSupplier.id}`, formData, {
+        const response = await axios.put(`/api/stock/suppliers/${editingSupplier.id}`, formData, {
           headers: { Authorization: `Bearer ${token}` }
         });
 
@@ -139,7 +139,7 @@ export default function Suppliers() {
         }
       } else {
         // Create new supplier
-        const response = await axios.post('http://localhost:8000/api/stock/suppliers', formData, {
+        const response = await axios.post('/api/stock/suppliers', formData, {
           headers: { Authorization: `Bearer ${token}` }
         });
 
@@ -178,7 +178,7 @@ export default function Suppliers() {
 
   const handleDelete = async (id: number) => {
     try {
-      const response = await axios.delete(`http://localhost:8000/api/stock/suppliers/${id}`, {
+      const response = await axios.delete(`/api/stock/suppliers/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 

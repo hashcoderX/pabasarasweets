@@ -167,7 +167,7 @@ export default function GRNPage() {
 
   const fetchPurchaseOrders = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/purchasing/purchase-orders', {
+      const response = await axios.get('/api/purchasing/purchase-orders', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const orders = response.data.data || response.data || [];
@@ -188,7 +188,7 @@ export default function GRNPage() {
 
   const fetchGRNs = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/purchasing/grn', {
+      const response = await axios.get('/api/purchasing/grn', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const grnData = response.data || [];
@@ -279,7 +279,7 @@ export default function GRNPage() {
     try {
       setPoSaving(true);
       await axios.put(
-        `http://localhost:8000/api/purchasing/purchase-orders/${editingPurchaseOrder.id}`,
+        `/api/purchasing/purchase-orders/${editingPurchaseOrder.id}`,
         {
           supplier_id: Number(poEditFormData.supplier_id),
           order_date: poEditFormData.order_date,
@@ -312,7 +312,7 @@ export default function GRNPage() {
 
     openConfirm('Delete Purchase Order', `Delete purchase order ${order.order_number}?`, async () => {
       try {
-        await axios.delete(`http://localhost:8000/api/purchasing/purchase-orders/${order.id}`, {
+        await axios.delete(`/api/purchasing/purchase-orders/${order.id}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         fetchPurchaseOrders();
@@ -358,7 +358,7 @@ export default function GRNPage() {
 
   const submitGRN = async (grnData: any) => {
     try {
-      const response = await axios.post('http://localhost:8000/api/purchasing/grn', grnData, {
+      const response = await axios.post('/api/purchasing/grn', grnData, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -381,7 +381,7 @@ export default function GRNPage() {
 
   const updateGRN = async (grnData: any) => {
     try {
-      const response = await axios.put(`http://localhost:8000/api/purchasing/grn/${selectedGrn?.id}`, grnData, {
+      const response = await axios.put(`/api/purchasing/grn/${selectedGrn?.id}`, grnData, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -409,7 +409,7 @@ export default function GRNPage() {
       'Are you sure you want to delete this GRN? This will reverse the inventory stock adjustments.',
       async () => {
         try {
-          await axios.delete(`http://localhost:8000/api/purchasing/grn/${grnId}`, {
+          await axios.delete(`/api/purchasing/grn/${grnId}`, {
             headers: { Authorization: `Bearer ${token}` }
           });
 

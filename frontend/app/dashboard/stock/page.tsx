@@ -34,11 +34,11 @@ export default function StockManagement() {
       setLoading(true);
 
       const [inventoryResponse, suppliersResponse] = await Promise.all([
-        axios.get('http://localhost:8000/api/stock/inventory', {
+        axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 1000 }
         }),
-        axios.get('http://localhost:8000/api/stock/suppliers', {
+        axios.get('/api/stock/suppliers', {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 1000 }
         })

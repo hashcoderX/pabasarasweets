@@ -10,6 +10,8 @@ interface CompanyProfile {
   email: string;
   address?: string;
   phone?: string;
+  telephone?: string;
+  whatsapp_number?: string;
   website?: string;
   country?: string;
   currency?: string;
@@ -34,6 +36,33 @@ interface AccountRow {
 
 const PROFILE_ID_KEY = 'company_profile_id';
 const PROFILE_DATA_KEY = 'company_profile_data';
+
+const toSafeStorageUrl = (value: string, apiBase: string): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const baseOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : apiBase || '';
+
+  if (raw.startsWith('/storage/')) {
+    return `${baseOrigin}${raw}`;
+  }
+
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    try {
+      const parsed = new URL(raw);
+      if (parsed.pathname.startsWith('/storage/')) {
+        return `${baseOrigin}${parsed.pathname}${parsed.search || ''}`;
+      }
+    } catch {
+      return raw;
+    }
+  }
+
+  return raw;
+};
 
 export default function CompanySettingsPage() {
   const [token, setToken] = useState('');
@@ -60,6 +89,8 @@ export default function CompanySettingsPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
+  const [telephone, setTelephone] = useState('');
+  const [whatsappNumber, setWhatsappNumber] = useState('');
   const [address, setAddress] = useState('');
   const [website, setWebsite] = useState('');
   const [country, setCountry] = useState('');
@@ -78,7 +109,7 @@ export default function CompanySettingsPage() {
 
   const router = useRouter();
 
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = '';
 
   const normalizeLogoUrl = (company?: CompanyProfile | null): string => {
     if (!company) return '';
@@ -88,18 +119,18 @@ export default function CompanySettingsPage() {
 
     if (rawUrl) {
       if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
-        return rawUrl;
+        return toSafeStorageUrl(rawUrl, API_BASE);
       }
 
       if (rawUrl.startsWith('/')) {
-        return `${API_BASE}${rawUrl}`;
+        return toSafeStorageUrl(`${API_BASE}${rawUrl}`, API_BASE);
       }
 
-      return `${API_BASE}/${rawUrl}`;
+      return toSafeStorageUrl(`${API_BASE}/${rawUrl}`, API_BASE);
     }
 
     if (rawPath) {
-      return `${API_BASE}/storage/${rawPath.replace(/^\/+/, '')}`;
+      return toSafeStorageUrl(`${API_BASE}/storage/${rawPath.replace(/^\/+/, '')}`, API_BASE);
     }
 
     return '';
@@ -130,7 +161,7 @@ export default function CompanySettingsPage() {
 
     const bootstrap = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -183,11 +214,15 @@ export default function CompanySettingsPage() {
 
     try {
       setLoading(true);
-      const res = await axios.get('http://localhost:8000/api/companies', {
+      const res = await axios.get('/api/companies', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 
-      const rows = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      const rowsRaw = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      const rows = rowsRaw.map((company: CompanyProfile) => ({
+        ...company,
+        logo_url: normalizeLogoUrl(company),
+      }));
       setCompanies(rows);
 
       if (rows.length > 0 && !activeProfileId) {
@@ -213,6 +248,8 @@ export default function CompanySettingsPage() {
         activeCompany.name,
         activeCompany.email,
         activeCompany.phone,
+        activeCompany.telephone,
+        activeCompany.whatsapp_number,
         activeCompany.address,
         activeCompany.country,
         activeCompany.currency,
@@ -223,7 +260,7 @@ export default function CompanySettingsPage() {
         activeCompany.cheque_accounts?.length,
       ].filter((value) => Boolean(String(value || '').trim())).length
     : 0;
-  const profileHealth = activeCompany ? Math.round((profileCoverage / 10) * 100) : 0;
+  const profileHealth = activeCompany ? Math.round((profileCoverage / 13) * 100) : 0;
 
   const formatMoney = (value?: number) =>
     Number(value || 0).toLocaleString(undefined, {
@@ -232,9 +269,14 @@ export default function CompanySettingsPage() {
     });
 
   const setActiveCompanyProfile = (company: CompanyProfile) => {
+    const normalizedCompany: CompanyProfile = {
+      ...company,
+      logo_url: normalizeLogoUrl(company),
+    };
+
     setActiveProfileId(company.id);
     localStorage.setItem(PROFILE_ID_KEY, String(company.id));
-    localStorage.setItem(PROFILE_DATA_KEY, JSON.stringify(company));
+    localStorage.setItem(PROFILE_DATA_KEY, JSON.stringify(normalizedCompany));
   };
 
   const resetForm = () => {
@@ -242,6 +284,8 @@ export default function CompanySettingsPage() {
     setName('');
     setEmail('');
     setPhone('');
+    setTelephone('');
+    setWhatsappNumber('');
     setAddress('');
     setWebsite('');
     setCountry('');
@@ -263,6 +307,8 @@ export default function CompanySettingsPage() {
     setName(company.name || '');
     setEmail(company.email || '');
     setPhone(company.phone || '');
+    setTelephone(company.telephone || '');
+    setWhatsappNumber(company.whatsapp_number || '');
     setAddress(company.address || '');
     setWebsite(company.website || '');
     setCountry(company.country || '');
@@ -346,6 +392,8 @@ export default function CompanySettingsPage() {
     payload.append('name', name);
     payload.append('email', email);
     if (phone.trim()) payload.append('phone', phone.trim());
+    if (telephone.trim()) payload.append('telephone', telephone.trim());
+    if (whatsappNumber.trim()) payload.append('whatsapp_number', whatsappNumber.trim());
     if (address.trim()) payload.append('address', address.trim());
     if (website.trim()) payload.append('website', website.trim());
     if (country.trim()) payload.append('country', country.trim());
@@ -377,11 +425,11 @@ export default function CompanySettingsPage() {
 
       if (editingCompanyId) {
         payload.append('_method', 'PUT');
-        await axios.post(`http://localhost:8000/api/companies/${editingCompanyId}`, payload, {
+        await axios.post(`/api/companies/${editingCompanyId}`, payload, {
           headers: { Authorization: `Bearer ${token}` },
         });
       } else {
-        await axios.post('http://localhost:8000/api/companies', payload, {
+        await axios.post('/api/companies', payload, {
           headers: { Authorization: `Bearer ${token}` },
         });
       }
@@ -422,7 +470,7 @@ export default function CompanySettingsPage() {
       setResetStatusType('');
 
       const res = await axios.post(
-        'http://localhost:8000/api/system/reset',
+        '/api/system/reset',
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -545,6 +593,8 @@ export default function CompanySettingsPage() {
                 <p><span className="font-medium">Company:</span> {activeCompany.name}</p>
                 <p><span className="font-medium">Email:</span> {activeCompany.email}</p>
                 <p><span className="font-medium">Phone:</span> {activeCompany.phone || '-'}</p>
+                <p><span className="font-medium">Telephone:</span> {activeCompany.telephone || '-'}</p>
+                <p><span className="font-medium">WhatsApp:</span> {activeCompany.whatsapp_number || '-'}</p>
               </div>
               <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4">
                 <p><span className="font-medium">Address:</span> {activeCompany.address || '-'}</p>
@@ -553,8 +603,8 @@ export default function CompanySettingsPage() {
               </div>
               <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4 md:col-span-2">
                 <p className="font-medium mb-2">Logo:</p>
-                {activeCompany.logo_url ? (
-                  <img src={activeCompany.logo_url} alt="Company logo" className="h-16 w-auto object-contain rounded border border-gray-200 bg-white p-1" />
+                {normalizeLogoUrl(activeCompany) ? (
+                  <img src={normalizeLogoUrl(activeCompany)} alt="Company logo" className="h-16 w-auto object-contain rounded border border-gray-200 bg-white p-1" />
                 ) : (
                   <p className="text-xs text-gray-500">No logo uploaded.</p>
                 )}
@@ -632,9 +682,9 @@ export default function CompanySettingsPage() {
                       <p className="text-sm font-semibold text-gray-900">{company.name}</p>
                       <p className="text-xs text-gray-600">{company.email}</p>
                       <p className="text-xs text-gray-500">{company.address || '-'} {company.country ? `| ${company.country}` : ''}</p>
-                      {company.logo_url && (
+                      {normalizeLogoUrl(company) && (
                         <div className="mt-2">
-                          <img src={company.logo_url} alt={`${company.name} logo`} className="h-8 w-auto object-contain rounded border border-gray-200 bg-white p-1" />
+                          <img src={normalizeLogoUrl(company)} alt={`${company.name} logo`} className="h-8 w-auto object-contain rounded border border-gray-200 bg-white p-1" />
                         </div>
                       )}
                     </div>
@@ -741,6 +791,14 @@ export default function CompanySettingsPage() {
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Phone</label>
                 <input value={phone} onChange={(e) => setPhone(e.target.value)} className="w-full rounded-lg border border-cyan-200 bg-white text-sm text-black px-3 py-2.5 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Telephone</label>
+                <input value={telephone} onChange={(e) => setTelephone(e.target.value)} className="w-full rounded-lg border border-cyan-200 bg-white text-sm text-black px-3 py-2.5 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500" />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">WhatsApp Number</label>
+                <input value={whatsappNumber} onChange={(e) => setWhatsappNumber(e.target.value)} className="w-full rounded-lg border border-cyan-200 bg-white text-sm text-black px-3 py-2.5 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500" />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Country</label>

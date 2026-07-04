@@ -43,7 +43,7 @@ export default function FullStockReportPage() {
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -59,7 +59,7 @@ export default function FullStockReportPage() {
 
     const verifyAccess = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 

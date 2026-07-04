@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
@@ -41,7 +41,7 @@ type DailyBalanceSheet = {
   total_sales_amount: number;
 };
 
-export default function OutletPosDashboardPage() {
+function OutletPosDashboardContent() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [outletName, setOutletName] = useState('');
@@ -59,7 +59,7 @@ export default function OutletPosDashboardPage() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
@@ -649,5 +649,19 @@ export default function OutletPosDashboardPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+export default function OutletPosDashboardPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        </div>
+      }
+    >
+      <OutletPosDashboardContent />
+    </Suspense>
   );
 }

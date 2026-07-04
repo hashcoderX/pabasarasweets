@@ -68,6 +68,7 @@ export default function Inventory() {
     minimum_stock: 0,
     maximum_stock: 0,
     unit_price: 0,
+    sell_price: '',
     supplier_name: '',
     supplier_id: '',
     location: '',
@@ -116,7 +117,7 @@ export default function Inventory() {
 
   const fetchSuppliers = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/stock/suppliers', {
+      const response = await axios.get('/api/stock/suppliers', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 1000 }
       });
@@ -132,7 +133,7 @@ export default function Inventory() {
   const fetchItems = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/stock/inventory', {
+      const response = await axios.get('/api/stock/inventory', {
         headers: { Authorization: `Bearer ${token}` },
         params: { type: activeTab, per_page: 100 }
       });
@@ -233,11 +234,12 @@ export default function Inventory() {
       const submitData = {
         ...formData,
         type: activeTab,
-        supplier_id: formData.supplier_id ? Number(formData.supplier_id) : null
+        supplier_id: formData.supplier_id ? Number(formData.supplier_id) : null,
+        sell_price: formData.sell_price.trim() === '' ? null : Number(formData.sell_price)
       };
 
       if (editingItem) {
-        const response = await axios.put(`http://localhost:8000/api/stock/inventory/${editingItem.id}`, submitData, {
+        const response = await axios.put(`/api/stock/inventory/${editingItem.id}`, submitData, {
           headers: { Authorization: `Bearer ${token}` }
         });
 
@@ -259,7 +261,7 @@ export default function Inventory() {
           throw new Error(response.data.message || 'Failed to update item');
         }
       } else {
-        const response = await axios.post('http://localhost:8000/api/stock/inventory', submitData, {
+        const response = await axios.post('/api/stock/inventory', submitData, {
           headers: { Authorization: `Bearer ${token}` }
         });
 
@@ -305,6 +307,7 @@ export default function Inventory() {
       minimum_stock: item.minimum_stock,
       maximum_stock: item.maximum_stock || 0,
       unit_price: item.unit_price,
+      sell_price: item.sell_price === null || item.sell_price === undefined ? '' : String(item.sell_price),
       supplier_name: item.supplier_name || '',
       supplier_id: item.supplier_id?.toString() || '',
       location: item.location || '',
@@ -321,7 +324,7 @@ export default function Inventory() {
 
   const handleDelete = async (id: number) => {
     try {
-      const response = await axios.delete(`http://localhost:8000/api/stock/inventory/${id}`, {
+      const response = await axios.delete(`/api/stock/inventory/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -350,6 +353,7 @@ export default function Inventory() {
       minimum_stock: 0,
       maximum_stock: 0,
       unit_price: 0,
+      sell_price: '',
       supplier_name: '',
       supplier_id: '',
       location: '',
@@ -1035,6 +1039,16 @@ export default function Inventory() {
                             required
                             value={formData.unit_price}
                             onChange={(e) => setFormData({ ...formData, unit_price: Number(e.target.value) || 0 })}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Sell Price (LKR)</label>
+                          <input
+                            type="text"
+                            value={formData.sell_price}
+                            onChange={(e) => setFormData({ ...formData, sell_price: e.target.value })}
                             className={modalInputClass}
                             placeholder="0.00"
                           />

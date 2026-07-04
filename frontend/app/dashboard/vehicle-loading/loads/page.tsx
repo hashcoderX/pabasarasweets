@@ -379,7 +379,7 @@ export default function LoadsPage() {
   };
 
   const refreshDeliveryCashForLoad = async (loadId?: number) => {
-    const response = await axios.get('http://localhost:8000/api/delivery-cash-transactions', {
+    const response = await axios.get('/api/delivery-cash-transactions', {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -390,7 +390,7 @@ export default function LoadsPage() {
     setDeliveryCashBalance(calculateDeliveryCashBalance(allTransactions));
 
     if (loadId) {
-      const expensesRes = await axios.get(`http://localhost:8000/api/vehicle-loading/loads/${loadId}/expenses`, {
+      const expensesRes = await axios.get(`/api/vehicle-loading/loads/${loadId}/expenses`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -423,7 +423,7 @@ export default function LoadsPage() {
   const fetchLoads = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const response = await axios.get('/api/vehicle-loading/loads', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -438,7 +438,7 @@ export default function LoadsPage() {
 
   const fetchVehicles = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/vehicles', {
+      const response = await axios.get('/api/vehicle-loading/vehicles', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -452,7 +452,7 @@ export default function LoadsPage() {
 
   const fetchDrivers = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/hr/employees', {
+      const response = await axios.get('/api/hr/employees', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -479,7 +479,7 @@ export default function LoadsPage() {
 
   const fetchRoutes = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/routes', {
+      const response = await axios.get('/api/vehicle-loading/routes', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -505,13 +505,13 @@ export default function LoadsPage() {
       };
 
       if (editingLoad) {
-        await axios.put(`http://localhost:8000/api/vehicle-loading/loads/${editingLoad.id}`, payload, {
+        await axios.put(`/api/vehicle-loading/loads/${editingLoad.id}`, payload, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         });
       } else {
-        await axios.post('http://localhost:8000/api/vehicle-loading/loads', payload, {
+        await axios.post('/api/vehicle-loading/loads', payload, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -574,7 +574,7 @@ export default function LoadsPage() {
 
   const handleDelete = async (id: number) => {
     try {
-      await axios.delete(`http://localhost:8000/api/vehicle-loading/loads/${id}`, {
+      await axios.delete(`/api/vehicle-loading/loads/${id}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -596,7 +596,7 @@ export default function LoadsPage() {
       const day = String(effectiveDate.getDate()).padStart(2, '0');
       const deliveryDate = `${year}-${month}-${day}`;
 
-      await axios.put(`http://localhost:8000/api/vehicle-loading/loads/${load.id}`, {
+      await axios.put(`/api/vehicle-loading/loads/${load.id}`, {
         load_number: load.load_number,
         vehicle_id: load.vehicle_id,
         driver_id: load.driver_id,
@@ -724,29 +724,29 @@ export default function LoadsPage() {
       });
 
       const [loadRes, itemsRes, summaryRes, invoicesRes, paymentsRes] = await Promise.all([
-        axios.get(`http://localhost:8000/api/vehicle-loading/loads/${loadId}`, {
+        axios.get(`/api/vehicle-loading/loads/${loadId}`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         }),
-        axios.get('http://localhost:8000/api/vehicle-loading/load-items', {
+        axios.get('/api/vehicle-loading/load-items', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
           params: { load_id: loadId },
         }),
-        axios.get(`http://localhost:8000/api/vehicle-loading/loads/${loadId}/delivery-summary`, {
+        axios.get(`/api/vehicle-loading/loads/${loadId}/delivery-summary`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         }).catch(() => null),
-        axios.get<DistributionInvoiceListResponse>('http://localhost:8000/api/distribution/invoices', {
+        axios.get<DistributionInvoiceListResponse>('/api/distribution/invoices', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
           params: { per_page: 1000 },
         }).catch(() => null),
-        axios.get<DistributionPaymentListResponse>('http://localhost:8000/api/distribution/payments', {
+        axios.get<DistributionPaymentListResponse>('/api/distribution/payments', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -806,7 +806,7 @@ export default function LoadsPage() {
       setExpenseError('');
       setExpenseSuccess('');
 
-      await axios.post(`http://localhost:8000/api/vehicle-loading/loads/${selectedLoadDetails.id}/expenses`, {
+      await axios.post(`/api/vehicle-loading/loads/${selectedLoadDetails.id}/expenses`, {
         expense_date: expenseForm.date,
         expense_type: expenseForm.category,
         amount,

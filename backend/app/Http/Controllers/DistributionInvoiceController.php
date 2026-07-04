@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\DistributionInvoice;
 use App\Models\DistributionInvoiceItem;
+use App\Models\DistributionPayment;
 use App\Models\InventoryItem;
 use App\Models\Load;
 use App\Models\LoadItem;
@@ -297,7 +298,7 @@ class DistributionInvoiceController extends Controller
 
     public function destroy(string $id): JsonResponse
     {
-        $invoice = DistributionInvoice::find($id);
+        $invoice = DistributionInvoice::with(['items', 'payments', 'customer'])->find($id);
 
         if (!$invoice) {
             return response()->json([
@@ -306,11 +307,103 @@ class DistributionInvoiceController extends Controller
             ], 404);
         }
 
-        $invoice->delete();
+        $result = DB::transaction(function () use ($invoice) {
+            $restoredToLoadQty = 0;
+            $restoredToInventoryQty = 0;
+
+            foreach ($invoice->items as $item) {
+                $quantity = (float) $item->quantity;
+                if ($quantity <= 0) {
+                    continue;
+                }
+
+                $lineLoadId = $item->load_id ?: $invoice->load_id;
+                $restored = false;
+
+                if (!empty($lineLoadId)) {
+                    $loadItem = LoadItem::where('load_id', $lineLoadId)
+                        ->where('product_code', $item->item_code)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($loadItem) {
+                        $loadItem->qty = (float) $loadItem->qty + $quantity;
+                        $loadItem->save();
+                    } else {
+                        $inventoryForDefaults = null;
+
+                        if (!empty($item->inventory_item_id)) {
+                            $inventoryForDefaults = InventoryItem::lockForUpdate()->find($item->inventory_item_id);
+                        }
+
+                        if (!$inventoryForDefaults) {
+                            $inventoryForDefaults = InventoryItem::where('code', $item->item_code)
+                                ->lockForUpdate()
+                                ->first();
+                        }
+
+                        $mappedType = $inventoryForDefaults?->type === 'raw_material' ? 'raw_material' : 'finished_product';
+
+                        LoadItem::create([
+                            'load_id' => $lineLoadId,
+                            'product_code' => $item->item_code,
+                            'name' => $item->item_name,
+                            'type' => $mappedType,
+                            'out_price' => (float) ($inventoryForDefaults?->purchase_price ?? $inventoryForDefaults?->unit_price ?? $item->unit_price ?? 0),
+                            'sell_price' => (float) ($inventoryForDefaults?->sell_price ?? $item->unit_price ?? 0),
+                            'qty' => $quantity,
+                        ]);
+                    }
+
+                    $restored = true;
+                    $restoredToLoadQty += $quantity;
+                }
+
+                if (!$restored) {
+                    $inventory = null;
+
+                    if (!empty($item->inventory_item_id)) {
+                        $inventory = InventoryItem::lockForUpdate()->find($item->inventory_item_id);
+                    }
+
+                    if (!$inventory) {
+                        $inventory = InventoryItem::where('code', $item->item_code)
+                            ->lockForUpdate()
+                            ->first();
+                    }
+
+                    if ($inventory) {
+                        $inventory->current_stock = (float) $inventory->current_stock + $quantity;
+                        $inventory->save();
+                        $restoredToInventoryQty += $quantity;
+                    }
+                }
+            }
+
+            $pendingAmount = max(0, (float) $invoice->total - (float) $invoice->paid_amount);
+
+            if ($invoice->customer) {
+                $currentOutstanding = (float) ($invoice->customer->outstanding ?? 0);
+                $invoice->customer->outstanding = max(0, $currentOutstanding - $pendingAmount);
+                $invoice->customer->save();
+            }
+
+            $deletedPayments = DistributionPayment::where('distribution_invoice_id', $invoice->id)->delete();
+
+            $invoice->delete();
+
+            return [
+                'restored_to_load_qty' => round($restoredToLoadQty, 2),
+                'restored_to_inventory_qty' => round($restoredToInventoryQty, 2),
+                'deleted_payments' => $deletedPayments,
+                'outstanding_reduced_by' => round($pendingAmount, 2),
+            ];
+        });
 
         return response()->json([
             'success' => true,
-            'message' => 'Distribution invoice deleted successfully',
+            'data' => $result,
+            'message' => 'Distribution invoice deleted and stock/outstanding rolled back successfully',
         ]);
     }
 }

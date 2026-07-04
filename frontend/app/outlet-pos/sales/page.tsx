@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
@@ -44,7 +44,7 @@ const initialFilters: SalesFilters = {
   maxAmount: '',
 };
 
-export default function OutletPosSalesPage() {
+function OutletPosSalesContent() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<SaleRow[]>([]);
@@ -60,7 +60,7 @@ export default function OutletPosSalesPage() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const formInputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
 
@@ -433,5 +433,19 @@ export default function OutletPosSalesPage() {
         </section>
       </main>
     </div>
+  );
+}
+
+export default function OutletPosSalesPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        </div>
+      }
+    >
+      <OutletPosSalesContent />
+    </Suspense>
   );
 }

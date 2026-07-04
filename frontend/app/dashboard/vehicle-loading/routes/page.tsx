@@ -64,7 +64,7 @@ export default function RoutesPage() {
       setLoading(true);
       setMessage('');
 
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/routes', {
+      const response = await axios.get('/api/vehicle-loading/routes', {
         headers: { Authorization: `Bearer ${authToken}` },
         validateStatus: () => true,
       });
@@ -150,11 +150,11 @@ export default function RoutesPage() {
       };
 
       if (editingRoute) {
-        await axios.put(`http://localhost:8000/api/vehicle-loading/routes/${editingRoute.id}`, routeData, {
+        await axios.put(`/api/vehicle-loading/routes/${editingRoute.id}`, routeData, {
           headers: { Authorization: `Bearer ${token}` },
         });
       } else {
-        await axios.post('http://localhost:8000/api/vehicle-loading/routes', routeData, {
+        await axios.post('/api/vehicle-loading/routes', routeData, {
           headers: { Authorization: `Bearer ${token}` },
         });
       }
@@ -182,7 +182,7 @@ export default function RoutesPage() {
     if (!confirm('Are you sure you want to delete this route?')) return;
 
     try {
-      await axios.delete(`http://localhost:8000/api/vehicle-loading/routes/${id}`, {
+      await axios.delete(`/api/vehicle-loading/routes/${id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       await fetchRoutes(token);

@@ -47,7 +47,7 @@ export default function BackupRestoreSettingsPage() {
 
     const bootstrap = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -94,7 +94,7 @@ export default function BackupRestoreSettingsPage() {
 
     try {
       setLoading(true);
-      const res = await axios.get('http://localhost:8000/api/backup-settings', {
+      const res = await axios.get('/api/backup-settings', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 
@@ -117,7 +117,7 @@ export default function BackupRestoreSettingsPage() {
   const saveSettings = async () => {
     try {
       setSaving(true);
-      await axios.put('http://localhost:8000/api/backup-settings', settings, {
+      await axios.put('/api/backup-settings', settings, {
         headers: { Authorization: `Bearer ${token}` },
       });
       alert('Backup settings saved successfully.');

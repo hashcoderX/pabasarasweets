@@ -1,9 +1,11 @@
 'use client';
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import axios from 'axios';
+import { jsPDF } from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const COMPANY_PROFILE_ID_KEY = 'company_profile_id';
 const LOYALTY_POINT_RATE = 0.01;
@@ -12,21 +14,19 @@ const normalizePhone = (value: string): string => String(value || '').replace(/\
 const isLikelyPhone = (value: string): boolean => normalizePhone(value).length >= 7;
 
 const normalizeCompanyLogoUrl = (rawUrl?: string, rawPath?: string): string => {
-  const logoPath = String(rawPath || '').trim();
-  if (logoPath) {
-    return `http://localhost:8000/storage/${logoPath.replace(/^\/+/, '')}`;
+  const url = String(rawUrl || '').trim();
+  if (/^https?:\/\//i.test(url)) {
+    return url;
   }
 
-  const url = String(rawUrl || '').trim();
+  const logoPath = String(rawPath || '').trim();
+  if (logoPath) {
+    return `/storage/${logoPath.replace(/^\/+/, '')}`;
+  }
   if (!url) return '';
 
   if (url.startsWith('/storage/')) {
-    return `http://localhost:8000${url}`;
-  }
-
-  if (url.startsWith('http://localhost/storage/') || url.startsWith('https://localhost/storage/')) {
-    return url.replace('http://localhost/storage/', 'http://localhost:8000/storage/')
-      .replace('https://localhost/storage/', 'http://localhost:8000/storage/');
+    return url;
   }
 
   return url;
@@ -43,6 +43,32 @@ type StockLine = {
   available_qty: number;
 };
 
+type LoadRecord = {
+  id: number;
+  load_number: string;
+  status?: string | null;
+  load_date?: string | null;
+  delivery_date?: string | null;
+  route?: {
+    id?: number;
+    route_name?: string | null;
+    name?: string | null;
+    code?: string | null;
+  } | null;
+  vehicle?: {
+    id?: number;
+    vehicle_no?: string | null;
+    vehicle_number?: string | null;
+    registration_number?: string | null;
+  } | null;
+  driver?: {
+    id?: number;
+    first_name?: string | null;
+    last_name?: string | null;
+    name?: string | null;
+  } | null;
+};
+
 type SaleItem = {
   id: number;
   item_code: string;
@@ -57,6 +83,11 @@ type SaleItem = {
 type SaleRow = {
   id: number;
   sale_number: string;
+  do_number?: string | null;
+  status?: string | null;
+  delivery_employee_id?: number | null;
+  delivery_employee_name?: string | null;
+  load_id?: number | null;
   sale_date: string;
   customer_name?: string;
   total_quantity: number;
@@ -90,6 +121,11 @@ type OutletProfile = {
 type CreatedSale = {
   id: number;
   sale_number: string;
+  do_number?: string | null;
+  status?: string | null;
+  delivery_employee_id?: number | null;
+  delivery_employee_name?: string | null;
+  load_id?: number | null;
   sale_date: string;
   customer_name?: string | null;
   notes?: string | null;
@@ -116,12 +152,33 @@ type LoyaltyCustomer = {
   status?: string;
 };
 
+type DistributionCustomer = {
+  id: number;
+  customer_code: string;
+  shop_name: string;
+  owner_name?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  status?: string;
+};
+
+type CustomerSuggestion = {
+  source: 'distribution' | 'loyalty';
+  id: number;
+  code: string;
+  name: string;
+  phone: string;
+  email?: string | null;
+};
+
 type CashierSessionStatus = {
   is_open: boolean;
   is_closed: boolean;
   needs_open: boolean;
   session_date?: string;
 };
+
+type SaleMode = 'order' | 'exact_invoice';
 
 const ISSUE_TYPE_OPTIONS: Array<{ value: 'free' | 'sample' | 'retail' | 'wholesale' | 'van_sale'; label: string }> = [
   { value: 'retail', label: 'Retail' },
@@ -153,7 +210,7 @@ const computeEffectiveUnitPrice = (
   return Math.max(safeBase - safeDiscount, 0);
 };
 
-export default function OutletPosPage() {
+function OutletPosContent() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -178,8 +235,13 @@ export default function OutletPosPage() {
   const [selectedPrice, setSelectedPrice] = useState<string>('0');
   const [selectedIssueType, setSelectedIssueType] = useState<'free' | 'sample' | 'retail' | 'wholesale' | 'van_sale'>('retail');
   const [selectedLineDiscount, setSelectedLineDiscount] = useState<string>('0');
+  const [saleMode, setSaleMode] = useState<SaleMode>('order');
   const [lastCreatedSale, setLastCreatedSale] = useState<CreatedSale | null>(null);
+    const [loads, setLoads] = useState<LoadRecord[]>([]);
+    const [selectedLoadId, setSelectedLoadId] = useState<number>(0);
   const [loyaltyCustomers, setLoyaltyCustomers] = useState<LoyaltyCustomer[]>([]);
+  const [distributionCustomers, setDistributionCustomers] = useState<DistributionCustomer[]>([]);
+  const [showCustomerSuggestions, setShowCustomerSuggestions] = useState(false);
   const [loyaltySearch, setLoyaltySearch] = useState('');
   const [selectedLoyaltyCustomerId, setSelectedLoyaltyCustomerId] = useState<number>(0);
   const [showLoyaltySuggestions, setShowLoyaltySuggestions] = useState(false);
@@ -203,7 +265,7 @@ export default function OutletPosPage() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const formInputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
   const formInputClassCompact =
@@ -302,9 +364,84 @@ export default function OutletPosPage() {
   };
 
   const fetchLoyaltyCustomers = async (authToken: string, outletIdValue: number): Promise<boolean> => {
-    const res = await axios.get(`${API_URL}/api/outlet-pos/loyalty-customers`, {
+    const allRows: LoyaltyCustomer[] = [];
+    const perPage = 200;
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      const res = await axios.get(`${API_URL}/api/outlet-pos/loyalty-customers`, {
+        headers: authHeaders(authToken),
+        params: { outlet_id: outletIdValue, per_page: perPage, page },
+        validateStatus: () => true,
+      });
+
+      if (res.status === 401) {
+        redirectToLoginWithNext();
+        return false;
+      }
+
+      if (res.status >= 400) {
+        setLoyaltyCustomers([]);
+        return false;
+      }
+
+      const payload = res.data?.data;
+      const rows = Array.isArray(payload?.data) ? payload.data : [];
+      allRows.push(...rows);
+
+      const apiLastPage = Number(payload?.last_page || 0);
+      totalPages = apiLastPage > 0 ? apiLastPage : 1;
+
+      if (apiLastPage <= 0 && rows.length < perPage) break;
+      page += 1;
+    }
+
+    setLoyaltyCustomers(allRows);
+    return true;
+  };
+
+  const fetchDistributionCustomers = async (authToken: string): Promise<boolean> => {
+    const allRows: DistributionCustomer[] = [];
+    const perPage = 200;
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      const res = await axios.get(`${API_URL}/api/distribution/customers`, {
+        headers: authHeaders(authToken),
+        params: { per_page: perPage, page, status: 'active' },
+        validateStatus: () => true,
+      });
+
+      if (res.status === 401) {
+        redirectToLoginWithNext();
+        return false;
+      }
+
+      if (res.status >= 400) {
+        setDistributionCustomers([]);
+        return false;
+      }
+
+      const payload = res.data?.data;
+      const rows = Array.isArray(payload?.data) ? payload.data : [];
+      allRows.push(...rows);
+
+      const apiLastPage = Number(payload?.last_page || 0);
+      totalPages = apiLastPage > 0 ? apiLastPage : 1;
+
+      if (apiLastPage <= 0 && rows.length < perPage) break;
+      page += 1;
+    }
+
+    setDistributionCustomers(allRows);
+    return true;
+  };
+
+  const fetchLoads = async (authToken: string): Promise<boolean> => {
+    const res = await axios.get(`${API_URL}/api/vehicle-loading/loads`, {
       headers: authHeaders(authToken),
-      params: { outlet_id: outletIdValue, per_page: 200 },
       validateStatus: () => true,
     });
 
@@ -314,12 +451,29 @@ export default function OutletPosPage() {
     }
 
     if (res.status >= 400) {
-      setLoyaltyCustomers([]);
+      setLoads([]);
       return false;
     }
 
-    const rows = res.data?.data?.data || [];
-    setLoyaltyCustomers(Array.isArray(rows) ? rows : []);
+    const payload = res.data;
+    const rows: any[] = Array.isArray(payload)
+      ? payload
+      : (payload?.data?.data || payload?.data || []);
+
+    const normalizedLoads = rows
+      .map((row) => ({
+        id: Number(row?.id || 0),
+        load_number: String(row?.load_number || ''),
+        status: row?.status ?? null,
+        load_date: row?.load_date ?? null,
+        delivery_date: row?.delivery_date ?? null,
+        route: row?.route ?? null,
+        vehicle: row?.vehicle ?? null,
+        driver: row?.driver ?? null,
+      }) as LoadRecord)
+      .filter((row) => row.id > 0 && row.load_number);
+
+    setLoads(normalizedLoads);
     return true;
   };
 
@@ -350,9 +504,26 @@ export default function OutletPosPage() {
       await fetchLoyaltyCustomers(authToken, outletIdValue);
     }
 
+    await fetchDistributionCustomers(authToken);
+    await fetchLoads(authToken);
+
     const salesOk = await fetchOutletSales(authToken);
     return salesOk;
   };
+
+  useEffect(() => {
+    if (selectedLoadId === 0) return;
+    const exists = loads.some((row) => row.id === selectedLoadId);
+    if (!exists) {
+      setSelectedLoadId(0);
+    }
+  }, [loads, selectedLoadId]);
+
+  useEffect(() => {
+    if (saleMode === 'exact_invoice' && selectedLoadId !== 0) {
+      setSelectedLoadId(0);
+    }
+  }, [saleMode, selectedLoadId]);
 
   useEffect(() => {
     if (!token) return;
@@ -431,7 +602,7 @@ export default function OutletPosPage() {
         const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
         if (profileId <= 0) return;
 
-        const res = await axios.get(`http://localhost:8000/api/companies/${profileId}`, {
+        const res = await axios.get(`/api/companies/${profileId}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -550,15 +721,55 @@ export default function OutletPosPage() {
       .slice(0, 12);
   }, [loyaltyCustomers, loyaltySearch]);
 
+  const customerSuggestions = useMemo<CustomerSuggestion[]>(() => {
+    const distributionRows = distributionCustomers.map((customer) => ({
+      source: 'distribution' as const,
+      id: customer.id,
+      code: String(customer.customer_code || '-'),
+      name: String(customer.shop_name || customer.owner_name || 'Unknown Customer').trim(),
+      phone: String(customer.phone || '').trim(),
+      email: customer.email || null,
+    }));
+
+    const loyaltyRows = loyaltyCustomers.map((customer) => ({
+      source: 'loyalty' as const,
+      id: customer.id,
+      code: String(customer.customer_code || '-'),
+      name: String(customer.name || 'Unknown Customer').trim(),
+      phone: String(customer.phone || '').trim(),
+      email: customer.email || null,
+    }));
+
+    if (saleMode === 'order') {
+      return distributionRows;
+    }
+
+    return [...distributionRows, ...loyaltyRows];
+  }, [distributionCustomers, loyaltyCustomers, saleMode]);
+
+  const filteredCustomerSuggestions = useMemo(() => {
+    const term = customerName.trim().toLowerCase();
+    if (!term) return customerSuggestions.slice(0, 12);
+
+    return customerSuggestions
+      .filter((customer) => (`${customer.code} ${customer.name} ${customer.phone} ${customer.email || ''}`).toLowerCase().includes(term))
+      .slice(0, 12);
+  }, [customerName, customerSuggestions]);
+
   const matchedLoyaltyByCustomerPhone = useMemo(() => {
+    if (saleMode !== 'exact_invoice') return null;
     if (!isLikelyPhone(customerName)) return null;
     const phoneDigits = normalizePhone(customerName);
     return loyaltyCustomers.find((c) => normalizePhone(c.phone) === phoneDigits) || null;
-  }, [customerName, loyaltyCustomers]);
+  }, [saleMode, customerName, loyaltyCustomers]);
 
   const selectedLoyaltyCustomer = useMemo(() => {
     return loyaltyCustomers.find((c) => c.id === selectedLoyaltyCustomerId) || null;
   }, [loyaltyCustomers, selectedLoyaltyCustomerId]);
+
+  const selectedLoad = useMemo(() => {
+    return loads.find((row) => row.id === selectedLoadId) || null;
+  }, [loads, selectedLoadId]);
 
   const loyaltyPointsPreview = useMemo(() => {
     if (!selectedLoyaltyCustomerId) return 0;
@@ -567,15 +778,29 @@ export default function OutletPosPage() {
 
   const canQuickCreateLoyaltyFromCustomerPhone = useMemo(() => {
     return Boolean(
+      saleMode === 'exact_invoice' &&
       token &&
       outletId &&
       customerName.trim() &&
       isLikelyPhone(customerName) &&
       !matchedLoyaltyByCustomerPhone
     );
-  }, [token, outletId, customerName, matchedLoyaltyByCustomerPhone]);
+  }, [saleMode, token, outletId, customerName, matchedLoyaltyByCustomerPhone]);
 
   useEffect(() => {
+    if (saleMode !== 'exact_invoice') {
+      if (selectedLoyaltyCustomerId !== 0) {
+        setSelectedLoyaltyCustomerId(0);
+      }
+      if (loyaltySearch) {
+        setLoyaltySearch('');
+      }
+      if (showLoyaltySuggestions) {
+        setShowLoyaltySuggestions(false);
+      }
+      return;
+    }
+
     const raw = customerName.trim();
     if (!raw) {
       if (selectedLoyaltyCustomerId !== 0) {
@@ -591,7 +816,7 @@ export default function OutletPosPage() {
       setSelectedLoyaltyCustomerId(matchedLoyaltyByCustomerPhone.id);
       setLoyaltySearch(`${matchedLoyaltyByCustomerPhone.customer_code} - ${matchedLoyaltyByCustomerPhone.name}`);
     }
-  }, [customerName, matchedLoyaltyByCustomerPhone, selectedLoyaltyCustomerId]);
+  }, [saleMode, customerName, matchedLoyaltyByCustomerPhone, selectedLoyaltyCustomerId, loyaltySearch, showLoyaltySuggestions]);
 
   useEffect(() => {
     if (!showItemSuggestions) {
@@ -776,8 +1001,41 @@ export default function OutletPosPage() {
   const handleCustomerInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
+
+    if (showCustomerSuggestions && filteredCustomerSuggestions.length > 0) {
+      const first = filteredCustomerSuggestions[0];
+      if (first) {
+        setCustomerName(first.name);
+        if (saleMode === 'exact_invoice' && first.source === 'loyalty') {
+          const selected = loyaltyCustomers.find((customer) => customer.id === first.id);
+          if (selected) {
+            setSelectedLoyaltyCustomerId(selected.id);
+            setLoyaltySearch(`${selected.customer_code} - ${selected.name}`);
+          }
+        } else {
+          setSelectedLoyaltyCustomerId(0);
+        }
+        setShowCustomerSuggestions(false);
+      }
+    }
+
     itemSearchInputRef.current?.focus();
     setShowItemSuggestions(true);
+  };
+
+  const selectCustomerSuggestion = (customer: CustomerSuggestion) => {
+    setCustomerName(customer.name);
+    if (saleMode === 'exact_invoice' && customer.source === 'loyalty') {
+      const selected = loyaltyCustomers.find((row) => row.id === customer.id);
+      if (selected) {
+        setSelectedLoyaltyCustomerId(selected.id);
+        setLoyaltySearch(`${selected.customer_code} - ${selected.name}`);
+      }
+    } else {
+      setSelectedLoyaltyCustomerId(0);
+    }
+    setShowCustomerSuggestions(false);
+    setTimeout(() => itemSearchInputRef.current?.focus(), 0);
   };
 
   const handleAddToCartKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -869,12 +1127,144 @@ export default function OutletPosPage() {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
 
-  const printCustomerBill = (sale: CreatedSale) => {
-    const printWindow = window.open('', '_blank', 'width=420,height=760');
+  const imageUrlToDataUrl = async (url: string): Promise<string | null> => {
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      return await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : null);
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  const getCompanyProfileForPrint = async (): Promise<{
+    name: string;
+    address: string;
+    phone: string;
+    website: string;
+    email: string;
+    logoUrl: string;
+    logoCandidates: string[];
+  }> => {
+    let profile: {
+      name?: string;
+      logo_url?: string;
+      logo_path?: string;
+      address?: string;
+      phone?: string;
+      email?: string;
+      website?: string;
+    } = {
+      name: companyProfileName,
+      logo_url: companyProfileLogoUrl,
+      address: companyProfileAddress,
+      phone: companyProfilePhone,
+      email: companyProfileEmail,
+      website: companyProfileWebsite,
+    };
+
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.localStorage.getItem('company_profile_data');
+        if (raw) {
+          const localProfile = JSON.parse(raw);
+          profile = { ...profile, ...localProfile };
+        }
+      } catch {
+        // Keep fallback values.
+      }
+    }
+
+    let fetchedCompany: Record<string, any> | null = null;
+
+    try {
+      const profileId = typeof window !== 'undefined'
+        ? Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0)
+        : 0;
+      if (token && profileId > 0) {
+        const res = await axios.get(`/api/companies/${profileId}`, {
+          headers: authHeaders(token),
+          validateStatus: () => true,
+        });
+        if (res.status >= 200 && res.status < 300) {
+          const payload = (res.data?.data && typeof res.data.data === 'object') ? res.data.data : res.data;
+          fetchedCompany = (payload && typeof payload === 'object') ? payload : null;
+        }
+      }
+
+      if (!fetchedCompany && token) {
+        const listRes = await axios.get('/api/companies', {
+          headers: authHeaders(token),
+          params: { per_page: 1 },
+          validateStatus: () => true,
+        });
+
+        if (listRes.status >= 200 && listRes.status < 300) {
+          const rows = Array.isArray(listRes.data)
+            ? listRes.data
+            : (listRes.data?.data || []);
+          const firstCompany = Array.isArray(rows) ? rows[0] : null;
+          if (firstCompany && typeof firstCompany === 'object') {
+            fetchedCompany = firstCompany;
+          }
+        }
+      }
+
+      if (fetchedCompany) {
+        profile = { ...profile, ...fetchedCompany };
+      }
+    } catch {
+      // Keep previously resolved values.
+    }
+
+    const normalizedLogo = normalizeCompanyLogoUrl(profile.logo_url, profile.logo_path);
+    const logoCandidates = Array.from(new Set([
+      normalizedLogo,
+      normalizedLogo && normalizedLogo.startsWith('/') && typeof window !== 'undefined'
+        ? `${window.location.origin}${normalizedLogo}`
+        : '',
+      normalizedLogo && normalizedLogo.startsWith('/')
+        ? `${API_URL.replace(/\/+$/, '')}${normalizedLogo}`
+        : '',
+      String(profile.logo_url || '').trim(),
+    ].filter(Boolean)));
+
+    const preferredLogoUrl = logoCandidates[0] || '';
+
+    return {
+      name: String(profile.name || '').trim() || 'Company',
+      address: String(profile.address || '').trim(),
+      phone: String(profile.phone || '').trim(),
+      website: String(profile.website || '').trim(),
+      email: String(profile.email || '').trim(),
+      logoUrl: preferredLogoUrl,
+      logoCandidates,
+    };
+  };
+
+  const getImageFormatFromDataUrl = (dataUrl: string): 'PNG' | 'JPEG' => {
+    const header = String(dataUrl || '').slice(0, 64).toLowerCase();
+    if (header.includes('image/jpeg') || header.includes('image/jpg')) {
+      return 'JPEG';
+    }
+    return 'PNG';
+  };
+
+  const printCustomerBill = async (sale: CreatedSale, mode: SaleMode) => {
+    const isDoInvoice = mode === 'order' || Boolean(sale.do_number);
+    const printWindow = window.open('', '_blank', isDoInvoice ? 'width=1024,height=900' : 'width=420,height=760');
     if (!printWindow) {
       showNotice('Unable to open print window. Please allow popups.');
       return;
     }
+
+    const company = await getCompanyProfileForPrint();
 
     const lines = Array.isArray(sale.items) ? sale.items : [];
     const lineRows = lines
@@ -898,8 +1288,138 @@ export default function OutletPosPage() {
     const saleDate = sale.sale_date ? new Date(sale.sale_date).toLocaleString() : new Date().toLocaleString();
     const customer = sale.customer_name?.trim() ? sale.customer_name : 'Walk-in Customer';
     const outletDisplay = `${sale.outlet?.name || outletName || 'Outlet'} (${sale.outlet?.code || outletCode || '-'})`;
+    const subtotal = Number(sale.total_amount || 0) + Number(sale.discount_amount || 0);
 
-    printWindow.document.write(`
+    if (isDoInvoice) {
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+
+      let cursorY = 44;
+      let logoDataUrl: string | null = null;
+      for (const candidate of company.logoCandidates) {
+        logoDataUrl = await imageUrlToDataUrl(candidate);
+        if (logoDataUrl) break;
+      }
+      if (logoDataUrl) {
+        try {
+          doc.addImage(logoDataUrl, getImageFormatFromDataUrl(logoDataUrl), 40, cursorY - 4, 56, 56);
+        } catch {
+          // If image type is not PNG or cannot be read, continue without blocking PDF generation.
+        }
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(18);
+      doc.text(company.name, 110, cursorY + 12);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      const companyLines = [
+        company.address,
+        company.phone ? `Tel: ${company.phone}` : '',
+        company.email,
+        company.website,
+      ].filter(Boolean);
+
+      let companyLineY = cursorY + 28;
+      companyLines.slice(0, 4).forEach((line) => {
+        doc.text(line, 110, companyLineY);
+        companyLineY += 13;
+      });
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(20);
+      doc.text('DISPATCH ORDER REPORT', pageWidth - 40, cursorY + 12, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Reference #: ${sale.sale_number || '-'}`, pageWidth - 40, cursorY + 30, { align: 'right' });
+      if (sale.do_number) {
+        doc.text(`Dispatch Order #: ${sale.do_number}`, pageWidth - 40, cursorY + 44, { align: 'right' });
+      }
+      doc.text(`Date: ${saleDate}`, pageWidth - 40, cursorY + 58, { align: 'right' });
+
+      cursorY = 120;
+
+      doc.setFillColor(248, 250, 252);
+      doc.roundedRect(40, cursorY, pageWidth - 80, 68, 6, 6, 'F');
+      doc.setDrawColor(220, 220, 220);
+      doc.roundedRect(40, cursorY, pageWidth - 80, 68, 6, 6, 'S');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.text('Customer / Outlet', 52, cursorY + 18);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Name: ${customer}`, 52, cursorY + 35);
+      doc.text(`Outlet: ${outletDisplay}`, 52, cursorY + 50);
+
+      doc.text(`Payment: ${String(sale.payment_type || 'cash').toUpperCase()}`, pageWidth - 52, cursorY + 35, { align: 'right' });
+      doc.text(`Status: ${String(sale.status || 'completed').toUpperCase()}`, pageWidth - 52, cursorY + 50, { align: 'right' });
+
+      const bodyRows = lines.map((line, index) => [
+        String(index + 1),
+        `${line.item_code || '-'} - ${line.item_name || '-'}`,
+        formatIssueTypeLabel(line.issue_type || 'retail'),
+        Number(line.quantity || 0).toFixed(2),
+        Number(line.unit_price || 0).toFixed(2),
+        Number(line.discount_amount || 0).toFixed(2),
+        Number(line.line_total || Number(line.quantity || 0) * Number(line.unit_price || 0)).toFixed(2),
+      ]);
+
+      autoTable(doc, {
+        startY: cursorY + 82,
+        head: [['#', 'Item', 'Issue', 'Qty', 'Price', 'Discount', 'Amount']],
+        body: bodyRows.length > 0 ? bodyRows : [['', 'No line items', '', '', '', '', '']],
+        theme: 'grid',
+        styles: { fontSize: 9, cellPadding: 4, valign: 'middle' },
+        headStyles: { fillColor: [30, 41, 59], textColor: 255 },
+        columnStyles: {
+          0: { halign: 'center', cellWidth: 22 },
+          2: { halign: 'center', cellWidth: 56 },
+          3: { halign: 'right', cellWidth: 48 },
+          4: { halign: 'right', cellWidth: 58 },
+          5: { halign: 'right', cellWidth: 64 },
+          6: { halign: 'right', cellWidth: 66 },
+        },
+        margin: { left: 40, right: 40 },
+      });
+
+      const finalY = (doc as any).lastAutoTable?.finalY || cursorY + 300;
+      const totalsX = pageWidth - 240;
+      let totalsY = finalY + 18;
+
+      doc.setDrawColor(220, 220, 220);
+      doc.roundedRect(totalsX, totalsY - 14, 200, 106, 6, 6, 'S');
+      doc.setFontSize(10);
+      doc.text('Total Qty', totalsX + 10, totalsY);
+      doc.text(Number(sale.total_quantity || 0).toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+      totalsY += 16;
+      doc.text('Subtotal', totalsX + 10, totalsY);
+      doc.text(subtotal.toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+      totalsY += 16;
+      doc.text('Discount', totalsX + 10, totalsY);
+      doc.text(Number(sale.discount_amount || 0).toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+      totalsY += 16;
+      doc.setFont('helvetica', 'bold');
+      doc.text('Grand Total', totalsX + 10, totalsY);
+      doc.text(Number(sale.total_amount || 0).toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+      totalsY += 16;
+      doc.setFont('helvetica', 'normal');
+      doc.text('Paid', totalsX + 10, totalsY);
+      doc.text(Number(sale.paid_amount || 0).toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+      totalsY += 16;
+      doc.text('Balance', totalsX + 10, totalsY);
+      doc.text(Number(sale.balance_amount || 0).toFixed(2), totalsX + 190, totalsY, { align: 'right' });
+
+      doc.setFontSize(10);
+      doc.text(`Notes: ${(sale.notes || '').trim() || '-'}`, 40, Math.max(totalsY + 22, finalY + 34));
+
+      const pdfUrl = doc.output('bloburl').toString();
+      printWindow.location.href = pdfUrl;
+      return;
+    }
+
+    const html = `
       <html>
         <head>
           <title>Bill ${escapeHtml(sale.sale_number || '')}</title>
@@ -931,18 +1451,19 @@ export default function OutletPosPage() {
         <body>
           <div class="receipt">
             <div class="center">
-              ${companyProfileLogoUrl ? `<div class="logo-wrap"><img src="${escapeHtml(companyProfileLogoUrl)}" alt="Company logo" /></div>` : ''}
-              <h2>${escapeHtml(companyProfileName || 'Company')}</h2>
-              ${companyProfileAddress ? `<div class="muted">${escapeHtml(companyProfileAddress)}</div>` : ''}
-              ${companyProfilePhone ? `<div class="muted">Tel: ${escapeHtml(companyProfilePhone)}</div>` : ''}
-              ${companyProfileEmail ? `<div class="muted">${escapeHtml(companyProfileEmail)}</div>` : ''}
-              ${companyProfileWebsite ? `<div class="muted">${escapeHtml(companyProfileWebsite)}</div>` : ''}
+              ${company.logoUrl ? `<div class="logo-wrap"><img src="${escapeHtml(company.logoUrl)}" alt="Company logo" /></div>` : ''}
+              <h2>${escapeHtml(company.name || 'Company')}</h2>
+              ${company.address ? `<div class="muted">${escapeHtml(company.address)}</div>` : ''}
+              ${company.phone ? `<div class="muted">Tel: ${escapeHtml(company.phone)}</div>` : ''}
+              ${company.email ? `<div class="muted">${escapeHtml(company.email)}</div>` : ''}
+              ${company.website ? `<div class="muted">${escapeHtml(company.website)}</div>` : ''}
             </div>
 
             <div class="line"></div>
 
             <p class="meta"><strong>Outlet:</strong> ${escapeHtml(outletDisplay)}</p>
             <p class="meta"><strong>Bill #:</strong> ${escapeHtml(sale.sale_number || '-')}</p>
+            ${sale.do_number ? `<p class="meta"><strong>DO #:</strong> ${escapeHtml(sale.do_number)}</p>` : ''}
             <p class="meta"><strong>Date:</strong> ${escapeHtml(saleDate)}</p>
             <p class="meta"><strong>Customer:</strong> ${escapeHtml(customer)}</p>
 
@@ -960,7 +1481,7 @@ export default function OutletPosPage() {
                 </tr>
               </thead>
               <tbody>
-                ${lineRows || '<tr><td colspan="4">No line items</td></tr>'}
+                ${lineRows || '<tr><td colspan="6">No line items</td></tr>'}
               </tbody>
             </table>
 
@@ -968,7 +1489,7 @@ export default function OutletPosPage() {
 
             <div class="totals">
               <p><span>Total Qty</span><span>${Number(sale.total_quantity || 0).toFixed(2)}</span></p>
-              <p><span>Subtotal</span><span>${(Number(sale.total_amount || 0) + Number(sale.discount_amount || 0)).toFixed(2)}</span></p>
+              <p><span>Subtotal</span><span>${subtotal.toFixed(2)}</span></p>
               <p><span>Discount</span><span>${Number(sale.discount_amount || 0).toFixed(2)}</span></p>
               <p class="strong"><span>Grand Total</span><span>${Number(sale.total_amount || 0).toFixed(2)}</span></p>
               <p><span>Paid (${escapeHtml(String(sale.payment_type || 'cash').toUpperCase())})</span><span>${Number(sale.paid_amount || 0).toFixed(2)}</span></p>
@@ -980,7 +1501,9 @@ export default function OutletPosPage() {
           </div>
         </body>
       </html>
-    `);
+    `;
+
+    printWindow.document.write(html);
 
     printWindow.document.close();
     printWindow.focus();
@@ -999,6 +1522,11 @@ export default function OutletPosPage() {
       return;
     }
 
+    if (saleMode === 'order' && loads.length > 0 && selectedLoadId === 0) {
+      showNotice('Please select a load record for this DO order.');
+      return;
+    }
+
     if (!Number.isFinite(Number(discountAmount || 0)) || Number(discountAmount || 0) < 0) {
       showNotice('Discount must be zero or greater.');
       return;
@@ -1009,7 +1537,7 @@ export default function OutletPosPage() {
       return;
     }
 
-    if (balanceAmount > 0 && !selectedLoyaltyCustomerId) {
+    if (saleMode === 'exact_invoice' && balanceAmount > 0 && !selectedLoyaltyCustomerId) {
       showNotice('Credit sale is allowed only for loyalty customers. Please select a loyalty customer for this credit balance.', 'Credit Validation');
       return;
     }
@@ -1020,10 +1548,12 @@ export default function OutletPosPage() {
       const response = await axios.post(
         `${API_URL}/api/outlet-pos/sales`,
         {
+          sale_mode: saleMode,
           outlet_id: outletId,
           sale_date: saleDate || null,
           customer_name: customerName || null,
-          loyalty_customer_id: selectedLoyaltyCustomerId || null,
+          loyalty_customer_id: saleMode === 'exact_invoice' ? (selectedLoyaltyCustomerId || null) : null,
+          ...(saleMode === 'order' && selectedLoadId > 0 ? { load_id: selectedLoadId } : {}),
           discount_amount: effectiveDiscountAmount,
           paid_amount: effectivePaidAmount,
           payment_type: paymentType,
@@ -1048,15 +1578,22 @@ export default function OutletPosPage() {
       setDiscountAmount('0.00');
       setPaidAmount('0.00');
       setPaymentType('cash');
+      setSelectedLoadId(0);
       setSelectedLoyaltyCustomerId(0);
       setLoyaltySearch('');
       const awarded = Number(createdSale?.loyalty_points_awarded || 0);
-      setMessage(awarded > 0
-        ? `Sale recorded successfully. ${awarded.toFixed(2)} loyalty points awarded.`
-        : 'Sale recorded successfully. Bill is ready to print.');
+      if (saleMode === 'exact_invoice') {
+        setMessage(awarded > 0
+          ? `Exact invoice created successfully. ${awarded.toFixed(2)} loyalty points awarded.`
+          : 'Exact invoice created successfully. Bill is ready to print.');
+      } else {
+        setMessage(awarded > 0
+          ? `Order created successfully. DO ${createdSale?.do_number || '-'} generated. ${awarded.toFixed(2)} loyalty points awarded.`
+          : `Order created successfully. DO ${createdSale?.do_number || '-'} generated. Bill is ready to print.`);
+      }
       if (createdSale) {
         setLastCreatedSale(createdSale);
-        setTimeout(() => printCustomerBill(createdSale), 120);
+        setTimeout(() => printCustomerBill(createdSale, saleMode), 120);
       }
       await refreshOutletData(token);
       setTimeout(() => {
@@ -1214,7 +1751,25 @@ export default function OutletPosPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <section className="lg:col-span-2 rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Create Sale</h2>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-gray-900">Create Sale</h2>
+              <div className="inline-flex rounded-xl border border-rose-200 bg-rose-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setSaleMode('order')}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'order' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
+                >
+                  Create Order (DO)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSaleMode('exact_invoice')}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'exact_invoice' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
+                >
+                  Exact Invoice
+                </button>
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
               <div>
@@ -1223,11 +1778,39 @@ export default function OutletPosPage() {
                   ref={customerInputRef}
                   type="text"
                   value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
+                  onChange={(e) => {
+                    setCustomerName(e.target.value);
+                    setShowCustomerSuggestions(true);
+                  }}
                   onKeyDown={handleCustomerInputKeyDown}
+                  onFocus={() => setShowCustomerSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowCustomerSuggestions(false), 120)}
                   className={formInputClass}
-                  placeholder="Leave empty for walk-in, or type phone for loyalty"
+                  placeholder="Search distribution or loyalty customers"
                 />
+                {showCustomerSuggestions && (
+                  <div className="relative">
+                    <div className="absolute z-20 mt-2 w-full max-h-56 overflow-auto rounded-xl border border-rose-100 bg-white shadow-xl">
+                      {filteredCustomerSuggestions.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-500">No matching customers found.</div>
+                      ) : (
+                        filteredCustomerSuggestions.map((customer) => (
+                          <button
+                            key={`${customer.source}-${customer.id}`}
+                            type="button"
+                            onClick={() => selectCustomerSuggestion(customer)}
+                            className="w-full text-left px-3 py-2 hover:bg-rose-50 border-b border-gray-100 last:border-b-0"
+                          >
+                            <div className="text-sm text-gray-900 font-medium">{customer.code} - {customer.name}</div>
+                            <div className="text-xs text-gray-600">
+                              {customer.phone || '-'} | {customer.source === 'loyalty' ? 'Loyalty' : 'Distribution'}
+                            </div>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                   {!customerName.trim() && (
                     <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1 text-gray-600">
@@ -1260,6 +1843,32 @@ export default function OutletPosPage() {
                   className={formInputClass}
                 />
               </div>
+              {saleMode === 'order' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">DO Load</label>
+                  <select
+                    value={selectedLoadId}
+                    onChange={(e) => setSelectedLoadId(Number(e.target.value || 0))}
+                    className={formInputClass}
+                  >
+                    <option value={0}>{loads.length > 0 ? 'Select load record' : 'No load records found'}</option>
+                    {loads.map((row) => (
+                      <option key={row.id} value={row.id}>
+                        {row.load_number} ({String(row.status || 'pending').replace(/_/g, ' ')})
+                      </option>
+                    ))}
+                  </select>
+                  {selectedLoad && (
+                    <div className="mt-2 rounded-md border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                      Route: {selectedLoad.route?.route_name || selectedLoad.route?.name || selectedLoad.route?.code || '-'} |
+                      Vehicle: {selectedLoad.vehicle?.vehicle_no || selectedLoad.vehicle?.vehicle_number || selectedLoad.vehicle?.registration_number || '-'} |
+                      Driver: {selectedLoad.driver?.name || `${String(selectedLoad.driver?.first_name || '').trim()} ${String(selectedLoad.driver?.last_name || '').trim()}`.trim() || '-'} |
+                      Load Date: {selectedLoad.load_date ? new Date(selectedLoad.load_date).toLocaleDateString() : '-'}
+                    </div>
+                  )}
+                </div>
+              )}
+              {saleMode === 'exact_invoice' && (
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Loyalty Customer (Optional Manual Search)</label>
                 <div className="relative">
@@ -1305,6 +1914,7 @@ export default function OutletPosPage() {
                   </div>
                 )}
               </div>
+              )}
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
                 <input
@@ -1566,7 +2176,7 @@ export default function OutletPosPage() {
                 {lastCreatedSale && (
                   <button
                     type="button"
-                    onClick={() => printCustomerBill(lastCreatedSale)}
+                    onClick={() => printCustomerBill(lastCreatedSale, lastCreatedSale.do_number ? 'order' : 'exact_invoice')}
                     className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-sm font-medium hover:from-emerald-700 hover:to-teal-700"
                   >
                     Print Last Bill
@@ -1578,7 +2188,7 @@ export default function OutletPosPage() {
                   onClick={submitSale}
                   className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md text-sm font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50"
                 >
-                  {saving ? 'Saving...' : 'Complete Sale'}
+                  {saving ? 'Saving...' : saleMode === 'order' ? 'Create Order & Generate DO' : 'Create Exact Invoice'}
                 </button>
               </div>
             </div>
@@ -1605,5 +2215,19 @@ export default function OutletPosPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function OutletPosPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        </div>
+      }
+    >
+      <OutletPosContent />
+    </Suspense>
   );
 }

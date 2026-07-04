@@ -53,7 +53,7 @@ export default function VehicleLoading() {
       setLoading(true);
 
       // Fetch vehicles data
-      const vehiclesResponse = await axios.get('http://localhost:8000/api/vehicle-loading/vehicles', {
+      const vehiclesResponse = await axios.get('/api/vehicle-loading/vehicles', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const vehicles = vehiclesResponse.data || [];
@@ -62,7 +62,7 @@ export default function VehicleLoading() {
       const totalCapacity = vehicles.reduce((sum: number, v: any) => sum + (v.capacity_kg || 0), 0);
 
       // Fetch loads data
-      const loadsResponse = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const loadsResponse = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const loads = loadsResponse.data || [];
@@ -71,14 +71,14 @@ export default function VehicleLoading() {
       const completedLoads = loads.filter((l: any) => l.status === 'delivered').length;
 
       // Fetch routes data
-      const routesResponse = await axios.get('http://localhost:8000/api/vehicle-loading/routes', {
+      const routesResponse = await axios.get('/api/vehicle-loading/routes', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const routes = routesResponse.data || [];
       const activeRoutes = routes.length; // Assuming all routes are active
 
       // Fetch drivers data (employees with Driver designation)
-      const employeesResponse = await axios.get('http://localhost:8000/api/hr/employees', {
+      const employeesResponse = await axios.get('/api/hr/employees', {
         headers: { Authorization: `Bearer ${token}` }
       });
       const employees = employeesResponse.data.data || employeesResponse.data || [];
@@ -104,7 +104,7 @@ export default function VehicleLoading() {
       setSelectedLoad(load);
       setSelectedLoadItems([]);
 
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/load-items', {
+      const response = await axios.get('/api/vehicle-loading/load-items', {
         headers: { Authorization: `Bearer ${token}` },
         params: { load_id: load.id }
       });

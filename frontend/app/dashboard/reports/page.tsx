@@ -44,7 +44,7 @@ export default function ReportsPage() {
 
     const fetchAccessProfile = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -164,6 +164,7 @@ export default function ReportsPage() {
           { name: 'Delivery Balance Sheet', description: 'Delivery-wise net sales, returns and outstanding', icon: '📚', path: '/dashboard/reports/distribution/delivery-balance' },
           { name: 'Collection Report', description: 'Collections by customer and date', icon: '💵', path: '/dashboard/reports/distribution/collection' },
           { name: 'Returns Report', description: 'Product returns and settlement summary', icon: '↩️', path: '/dashboard/reports/distribution/returns' },
+          { name: 'Discount Report', description: 'Sold qty by item grouped by discount percent', icon: '🏷️', path: '/dashboard/reports/distribution/discount' },
           { name: 'Payment History Report', description: 'Payment timeline and mode analytics', icon: '📚', path: '/dashboard/reports/distribution/payment-history' },
         ],
       },

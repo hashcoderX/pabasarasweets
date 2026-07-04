@@ -54,7 +54,7 @@ export default function AttendanceReportPage() {
 
     const verifyAccess = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -122,7 +122,7 @@ export default function AttendanceReportPage() {
       if (startDate) params.start_date = startDate;
       if (endDate) params.end_date = endDate;
 
-      const response = await axios.get('http://localhost:8000/api/hr/attendance', {
+      const response = await axios.get('/api/hr/attendance', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
         params,
       });

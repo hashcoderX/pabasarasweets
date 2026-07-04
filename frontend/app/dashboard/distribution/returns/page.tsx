@@ -43,10 +43,10 @@ export default function DistributionReturnsPage() {
     try {
       setLoading(true);
       const [returnsRes, customersRes, invoicesRes, inventoryRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/distribution/returns', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
-        axios.get('http://localhost:8000/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('http://localhost:8000/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('http://localhost:8000/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/distribution/returns', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
+        axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
       ]);
 
       setReturns(returnsRes.data?.data?.data || []);
@@ -66,7 +66,7 @@ export default function DistributionReturnsPage() {
     e.preventDefault();
     try {
       setSaving(true);
-      await axios.post('http://localhost:8000/api/distribution/returns', {
+      await axios.post('/api/distribution/returns', {
         ...form,
         customer_id: Number(form.customer_id),
         distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,

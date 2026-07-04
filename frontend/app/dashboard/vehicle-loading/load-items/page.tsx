@@ -53,6 +53,9 @@ interface InventoryItem {
   code: string;
   type: 'raw_material' | 'finished_good';
   unit_price: number;
+  sell_price?: number | null;
+  purchase_price?: number | null;
+  out_price?: number | null;
   current_stock: number;
   unit: string;
 }
@@ -120,6 +123,35 @@ export default function LoadItemsPage() {
     }
   }, [selectedLoad]);
 
+  const toSafeNumber = (value: unknown): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const resolveOutPrice = (item: InventoryItem): number => {
+    const explicitOutPrice = toSafeNumber(item.out_price);
+    const purchasePrice = toSafeNumber(item.purchase_price);
+    const unitPrice = toSafeNumber(item.unit_price);
+    const sellPrice = toSafeNumber(item.sell_price);
+
+    if (explicitOutPrice > 0) return explicitOutPrice;
+    if (purchasePrice > 0) return purchasePrice;
+    if (unitPrice > 0) return unitPrice;
+    if (sellPrice > 0) return sellPrice;
+    return explicitOutPrice || purchasePrice || unitPrice || sellPrice || 0;
+  };
+
+  const resolveSellPrice = (item: InventoryItem): number => {
+    const sellPrice = toSafeNumber(item.sell_price);
+    const unitPrice = toSafeNumber(item.unit_price);
+    const outPrice = toSafeNumber(item.out_price);
+
+    if (sellPrice > 0) return sellPrice;
+    if (unitPrice > 0) return unitPrice;
+    if (outPrice > 0) return outPrice;
+    return sellPrice || unitPrice || outPrice || 0;
+  };
+
   // Handle clicking outside to close suggestions
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -146,7 +178,7 @@ export default function LoadItemsPage() {
 
   const fetchLoads = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const response = await axios.get('/api/vehicle-loading/loads', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -164,7 +196,7 @@ export default function LoadItemsPage() {
     if (!selectedLoad) return;
 
     try {
-      const response = await axios.get(`http://localhost:8000/api/vehicle-loading/load-items?load_id=${selectedLoad.id}`, {
+      const response = await axios.get(`/api/vehicle-loading/load-items?load_id=${selectedLoad.id}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -178,7 +210,7 @@ export default function LoadItemsPage() {
 
   const fetchInventoryItems = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/stock/inventory?status=active&per_page=1000', {
+      const response = await axios.get('/api/stock/inventory?status=active&per_page=1000', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -200,7 +232,20 @@ export default function LoadItemsPage() {
         items = [];
       }
 
-      setInventoryItems(items);
+      const normalized: InventoryItem[] = items.map((item: any) => ({
+        id: Number(item?.id) || 0,
+        name: String(item?.name || ''),
+        code: String(item?.code || ''),
+        type: (item?.type === 'raw_material' ? 'raw_material' : 'finished_good') as 'raw_material' | 'finished_good',
+        unit_price: toSafeNumber(item?.unit_price),
+        sell_price: toSafeNumber(item?.sell_price),
+        purchase_price: toSafeNumber(item?.purchase_price),
+        out_price: toSafeNumber(item?.out_price),
+        current_stock: toSafeNumber(item?.current_stock),
+        unit: String(item?.unit || ''),
+      })).filter((item) => item.id > 0);
+
+      setInventoryItems(normalized);
     } catch (error) {
       console.error('Error fetching inventory items:', error);
       setInventoryItems([]);
@@ -208,13 +253,16 @@ export default function LoadItemsPage() {
   };
 
   const selectInventoryItem = (item: InventoryItem) => {
+    const outPrice = resolveOutPrice(item);
+    const sellPrice = resolveSellPrice(item);
+
     setFormData((prev) => ({
       ...prev,
       product_code: item.code,
       name: item.name,
       type: item.type === 'finished_good' ? 'finished_product' : 'raw_material',
-      out_price: item.unit_price.toString(),
-      sell_price: item.unit_price.toString()
+      out_price: outPrice.toFixed(2),
+      sell_price: sellPrice.toFixed(2)
     }));
     setItemSearch(`${item.code} - ${item.name}`);
     setShowItemDropdown(false);
@@ -300,13 +348,13 @@ export default function LoadItemsPage() {
       };
 
       if (editingItem) {
-        await axios.put(`http://localhost:8000/api/vehicle-loading/load-items/${editingItem.id}`, payload, {
+        await axios.put(`/api/vehicle-loading/load-items/${editingItem.id}`, payload, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
         });
       } else {
-        await axios.post('http://localhost:8000/api/vehicle-loading/load-items', payload, {
+        await axios.post('/api/vehicle-loading/load-items', payload, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
@@ -348,7 +396,7 @@ export default function LoadItemsPage() {
       confirmText: 'Delete',
       onConfirm: async () => {
         try {
-          await axios.delete(`http://localhost:8000/api/vehicle-loading/load-items/${id}`, {
+          await axios.delete(`/api/vehicle-loading/load-items/${id}`, {
             headers: {
               Authorization: `Bearer ${token}`,
             },
@@ -379,7 +427,7 @@ export default function LoadItemsPage() {
     formDataCsv.append('load_id', selectedLoad.id.toString());
 
     try {
-      const response = await axios.post('http://localhost:8000/api/vehicle-loading/load-items/upload-csv', formDataCsv, {
+      const response = await axios.post('/api/vehicle-loading/load-items/upload-csv', formDataCsv, {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'multipart/form-data',
@@ -488,7 +536,7 @@ export default function LoadItemsPage() {
       onConfirm: async () => {
         try {
           setConfirmingLoad(true);
-          await axios.put(`http://localhost:8000/api/vehicle-loading/loads/${selectedLoad.id}`, {
+          await axios.put(`/api/vehicle-loading/loads/${selectedLoad.id}`, {
             load_number: selectedLoad.load_number,
             vehicle_id: selectedLoad.vehicle_id,
             driver_id: selectedLoad.driver_id,
@@ -643,7 +691,7 @@ export default function LoadItemsPage() {
                       onChange={(e) => {
                         setItemSearch(e.target.value);
                         if (!e.target.value.trim()) {
-                          setFormData({ ...formData, product_code: '', name: '' });
+                          setFormData({ ...formData, product_code: '', name: '', out_price: '', sell_price: '' });
                         }
                         setShowItemDropdown(true);
                         setHighlightedItemIndex(-1);

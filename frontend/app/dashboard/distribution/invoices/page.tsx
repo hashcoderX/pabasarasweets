@@ -18,7 +18,7 @@ interface LoadItemInfo {
 
 interface LoadItemSuggestion {
   load_item_id: number;
-  inventory_item_id: number;
+  inventory_item_id: number | null;
   item_code: string;
   item_name: string;
   unit: string;
@@ -51,12 +51,27 @@ interface InvoiceRecord {
   total: number;
   status: string;
   items: InvoiceItem[];
-  notes?: string;
+  notes?: string | null;
+}
+
+interface DeliveryOrderRecord {
+  id: number;
+  sale_number: string;
+  do_number?: string | null;
+  load_id?: number | null;
+  sale_date: string;
+  customer_name?: string | null;
+  total_amount: number;
+  status?: string | null;
+  outlet?: {
+    name?: string;
+    code?: string;
+  } | null;
 }
 
 interface InvoiceLine {
   line_id: string;
-  inventory_item_id: number;
+  inventory_item_id: number | null;
   item_code: string;
   item_name: string;
   unit: string;
@@ -137,19 +152,25 @@ const COMPANY_PROFILE_ID_KEY = 'company_profile_id';
 const normalizeCompanyLogoUrl = (rawUrl?: string, rawPath?: string): string => {
   const logoPath = String(rawPath || '').trim();
   if (logoPath) {
-    return `http://localhost:8000/storage/${logoPath.replace(/^\/+/, '')}`;
+    return `/storage/${logoPath.replace(/^\/+/, '')}`;
   }
 
   const url = String(rawUrl || '').trim();
   if (!url) return '';
 
   if (url.startsWith('/storage/')) {
-    return `http://localhost:8000${url}`;
+    return url;
   }
 
-  if (url.startsWith('http://localhost/storage/') || url.startsWith('https://localhost/storage/')) {
-    return url.replace('http://localhost/storage/', 'http://localhost:8000/storage/')
-      .replace('https://localhost/storage/', 'http://localhost:8000/storage/');
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith('/storage/')) {
+        return `${parsed.pathname}${parsed.search || ''}`;
+      }
+    } catch {
+      return url;
+    }
   }
 
   return url;
@@ -171,6 +192,7 @@ export default function DistributionInvoicesPage() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
+  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRecord[]>([]);
 
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [customerId, setCustomerId] = useState('');
@@ -206,6 +228,7 @@ export default function DistributionInvoicesPage() {
   const [returnLines, setReturnLines] = useState<ReturnLine[]>([]);
 
   const [lineFreeQty, setLineFreeQty] = useState('');
+  const [lineItemDiscountType, setLineItemDiscountType] = useState<'percentage' | 'amount'>('percentage');
   const [lineItemDiscount, setLineItemDiscount] = useState('');
 
   const [addPayment, setAddPayment] = useState(false);
@@ -303,14 +326,7 @@ export default function DistributionInvoicesPage() {
 
     const hydrateCompanyHeader = async () => {
       try {
-        const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
-        if (profileId <= 0) return;
-
-        const res = await axios.get(`http://localhost:8000/api/companies/${profileId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        const company = (res?.data || {}) as {
+        const applyCompanyHeader = (company: {
           name?: string;
           logo_url?: string;
           logo_path?: string;
@@ -318,28 +334,73 @@ export default function DistributionInvoicesPage() {
           phone?: string;
           email?: string;
           website?: string;
+        }) => {
+          const latestName = String(company?.name || '').trim();
+          if (latestName) {
+            setCompanyProfileName(latestName);
+          }
+
+          const latestLogoUrl = normalizeCompanyLogoUrl(company?.logo_url, company?.logo_path);
+          setCompanyProfileLogoUrl(latestLogoUrl);
+          setCompanyProfileAddress(String(company?.address || '').trim());
+          setCompanyProfilePhone(String(company?.phone || '').trim());
+          setCompanyProfileEmail(String(company?.email || '').trim());
+          setCompanyProfileWebsite(String(company?.website || '').trim());
+
+          const currentRaw = window.localStorage.getItem('company_profile_data');
+          const current = currentRaw ? JSON.parse(currentRaw) : {};
+          const merged = {
+            ...current,
+            ...company,
+            logo_url: latestLogoUrl,
+          };
+          window.localStorage.setItem('company_profile_data', JSON.stringify(merged));
         };
 
-        const latestName = String(company?.name || '').trim();
-        if (latestName) {
-          setCompanyProfileName(latestName);
+        const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
+        if (profileId > 0) {
+          const byIdRes = await axios.get(`/api/companies/${profileId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          const companyById = (byIdRes?.data || {}) as {
+            name?: string;
+            logo_url?: string;
+            logo_path?: string;
+            address?: string;
+            phone?: string;
+            email?: string;
+            website?: string;
+          };
+
+          applyCompanyHeader(companyById);
+          return;
         }
 
-        const latestLogoUrl = normalizeCompanyLogoUrl(company?.logo_url, company?.logo_path);
-        setCompanyProfileLogoUrl(latestLogoUrl);
-        setCompanyProfileAddress(String(company?.address || '').trim());
-        setCompanyProfilePhone(String(company?.phone || '').trim());
-        setCompanyProfileEmail(String(company?.email || '').trim());
-        setCompanyProfileWebsite(String(company?.website || '').trim());
+        // Fallback to first company from companies table when no local profile id exists.
+        const listRes = await axios.get('/api/companies', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 1 },
+        });
 
-        const currentRaw = window.localStorage.getItem('company_profile_data');
-        const current = currentRaw ? JSON.parse(currentRaw) : {};
-        const merged = {
-          ...current,
-          ...company,
-          logo_url: latestLogoUrl,
-        };
-        window.localStorage.setItem('company_profile_data', JSON.stringify(merged));
+        const rows = Array.isArray(listRes?.data)
+          ? listRes.data
+          : (listRes?.data?.data || []);
+        const firstCompany = (Array.isArray(rows) ? rows[0] : null) as
+          | {
+              name?: string;
+              logo_url?: string;
+              logo_path?: string;
+              address?: string;
+              phone?: string;
+              email?: string;
+              website?: string;
+            }
+          | null;
+
+        if (firstCompany) {
+          applyCompanyHeader(firstCompany);
+        }
       } catch (error) {
         console.error('Failed to refresh company profile for print header:', error);
       }
@@ -403,7 +464,7 @@ export default function DistributionInvoicesPage() {
     }
 
     try {
-      const userRes = await axios.get('http://localhost:8000/api/user', {
+      const userRes = await axios.get('/api/user', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -416,7 +477,7 @@ export default function DistributionInvoicesPage() {
       const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
       setIsAdmin(adminUser);
 
-      const loadsRes = await axios.get('http://localhost:8000/api/vehicle-loading/loads', {
+      const loadsRes = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -454,12 +515,18 @@ export default function DistributionInvoicesPage() {
         const loadId = String(assignedLoad.id);
         setActiveLoadId(loadId);
         localStorage.setItem('distribution_active_load_id', loadId);
+      } else if (!loadFromQuery) {
+        setActiveLoadId('');
+        localStorage.removeItem('distribution_active_load_id');
       }
 
       if (assignedLoad?.route_id) {
         const routeId = String(assignedLoad.route_id);
         setAssignedRouteId(routeId);
         localStorage.setItem('distribution_assigned_route_id', routeId);
+      } else if (!routeFromQuery) {
+        setAssignedRouteId('');
+        localStorage.removeItem('distribution_assigned_route_id');
       }
     } catch (error) {
       console.error('Error resolving assigned route on invoices page:', error);
@@ -517,7 +584,7 @@ export default function DistributionInvoicesPage() {
       for (const entry of pendingOfflineInvoices) {
         const inv = entry.payload;
         try {
-          const invoiceRes = await axios.post('http://localhost:8000/api/distribution/invoices', {
+          const invoiceRes = await axios.post('/api/distribution/invoices', {
             load_id: inv.load_id ?? (activeLoadId ? Number(activeLoadId) : (isAdmin && selectedLoadFilter ? Number(selectedLoadFilter) : null)),
             invoice_number: inv.invoice_number,
             customer_id: inv.customer_id,
@@ -540,7 +607,7 @@ export default function DistributionInvoicesPage() {
                 throw new Error('Missing target invoice for bill-to-bill sync.');
               }
 
-              await axios.post('http://localhost:8000/api/distribution/payments', {
+              await axios.post('/api/distribution/payments', {
                 payment_number: generatePaymentNumber(),
                 distribution_invoice_id: targetInvoiceId,
                 load_id: createdInvoice.load_id ?? inv.load_id ?? (activeLoadId ? Number(activeLoadId) : (isAdmin && selectedLoadFilter ? Number(selectedLoadFilter) : null)),
@@ -564,7 +631,7 @@ export default function DistributionInvoicesPage() {
           if (entry.payload.returnPayload && createdInvoice?.id) {
             try {
               const rp = entry.payload.returnPayload;
-              await axios.post('http://localhost:8000/api/distribution/returns', {
+              await axios.post('/api/distribution/returns', {
                 return_number: rp.return_number,
                 distribution_invoice_id: createdInvoice.id,
                 customer_id: createdInvoice.customer_id ?? inv.customer_id,
@@ -604,7 +671,7 @@ export default function DistributionInvoicesPage() {
   const fetchLoadItems = async (loadId: string) => {
     if (!loadId) return;
     try {
-      const response = await axios.get('http://localhost:8000/api/vehicle-loading/load-items', {
+      const response = await axios.get('/api/vehicle-loading/load-items', {
         headers: { Authorization: `Bearer ${token}` },
         params: { load_id: loadId },
       });
@@ -628,9 +695,9 @@ export default function DistributionInvoicesPage() {
     try {
       setLoading(true);
       const [customersRes, inventoryRes, invoicesRes] = await Promise.all([
-        axios.get('http://localhost:8000/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('http://localhost:8000/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('http://localhost:8000/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 50 } }),
+        axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 50 } }),
       ]);
 
       setCustomers(customersRes.data?.data?.data || []);
@@ -645,12 +712,41 @@ export default function DistributionInvoicesPage() {
       })));
       setInvoices(invoicesRes.data?.data?.data || []);
 
+      try {
+        const doRes = await axios.get('/api/outlet-pos/sales', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 200, do_only: 1 },
+        });
+
+        const rows = doRes.data?.data?.data || [];
+        const mapped: DeliveryOrderRecord[] = rows.map((row: any) => ({
+          id: Number(row.id),
+          sale_number: String(row.sale_number || ''),
+          do_number: row.do_number || null,
+          load_id: row.load_id ? Number(row.load_id) : null,
+          sale_date: String(row.sale_date || ''),
+          customer_name: row.customer_name || null,
+          total_amount: Number(row.total_amount || 0),
+          status: row.status || null,
+          outlet: row.outlet || null,
+        }));
+
+        setDeliveryOrders(mapped.filter((row) => !!row.do_number));
+      } catch (error: any) {
+        const status = error?.response?.status;
+        if (status !== 401 && status !== 403) {
+          console.error('Error loading delivery orders for invoices page:', error);
+        }
+        setDeliveryOrders([]);
+      }
+
       setInvoiceNumber(generateInvoiceNumber());
     } catch (error) {
       console.error('Error loading invoices page data:', error);
       setCustomers([]);
       setItems([]);
       setInvoices([]);
+      setDeliveryOrders([]);
     } finally {
       setLoading(false);
     }
@@ -690,13 +786,24 @@ export default function DistributionInvoicesPage() {
     const selectedLoadEntry = selectedLoadItemId
       ? loadItems.find((li) => String(li.id) === String(selectedLoadItemId))
       : null;
-    const selectedCode = selectedLoadEntry?.product_code || selectedInventory?.code;
-    const selected = selectedCode
-      ? items.find((item) => item.code === selectedCode) || selectedInventory
+    const selectedCode = selectedLoadEntry?.product_code || selectedInventory?.code || '';
+    const inventoryByCode = selectedCode
+      ? items.find((item) => item.code === selectedCode) || null
+      : null;
+    const selected = selectedLoadEntry
+      ? {
+          id: inventoryByCode?.id || selectedInventory?.id || 0,
+          name: selectedLoadEntry.name || inventoryByCode?.name || selectedCode,
+          code: selectedCode,
+          unit: inventoryByCode?.unit || 'qty',
+          sell_price: selectedLoadEntry.sell_price > 0
+            ? selectedLoadEntry.sell_price
+            : (inventoryByCode?.sell_price || selectedInventory?.sell_price || 0),
+          current_stock: Number(selectedLoadEntry.qty) || Number(inventoryByCode?.current_stock || 0),
+        }
       : selectedInventory;
     const paidQty = Number(lineQty);
     const freeQty = Number(lineFreeQty) || 0;
-    const discountPerUnit = Number(lineItemDiscount) || 0;
     if (!selected) {
       setQtyWarningMessage('Please select an item from the list.');
       setQtyWarningOpen(true);
@@ -750,6 +857,12 @@ export default function DistributionInvoicesPage() {
     const basePrice = matchingLoad && matchingLoad.sell_price > 0
       ? matchingLoad.sell_price
       : selected.sell_price;
+    const rawDiscount = Math.max(0, Number(lineItemDiscount) || 0);
+    const discountPerUnit = basePrice > 0
+      ? lineItemDiscountType === 'percentage'
+        ? Math.round(((Math.min(100, rawDiscount) * basePrice) / 100) * 100) / 100
+        : Math.min(basePrice, rawDiscount)
+      : 0;
     const effectivePaidUnitPrice = Math.max(0, basePrice - discountPerUnit);
 
     setLines((prev) => {
@@ -782,7 +895,7 @@ export default function DistributionInvoicesPage() {
         ...prev,
         {
           line_id: createLineId(),
-          inventory_item_id: selected.id,
+          inventory_item_id: selected.id > 0 ? selected.id : null,
           item_code: selected.code,
           item_name: selected.name,
           unit: selected.unit,
@@ -886,14 +999,26 @@ export default function DistributionInvoicesPage() {
     });
   };
 
-  const updateLineDiscount = (lineId: string, newDiscount: number) => {
+  const getLineBasePrice = (line: InvoiceLine) =>
+    typeof line.base_unit_price === 'number'
+      ? line.base_unit_price
+      : line.unit_price + (line.item_discount || 0);
+
+  const getLineDiscountPercent = (line: InvoiceLine) => {
+    const base = getLineBasePrice(line);
+    const disc = line.item_discount || 0;
+    if (base <= 0) return 0;
+    return Math.round((disc / base) * 10000) / 100;
+  };
+
+  const updateLineDiscountPercent = (lineId: string, percent: number) => {
     setLines((prev) =>
       prev.map((line) => {
         if (line.line_id !== lineId) return line;
-        const base =
-          typeof line.base_unit_price === 'number'
-            ? line.base_unit_price
-            : line.unit_price + (line.item_discount || 0);
+        const base = getLineBasePrice(line);
+        const clampedPercent = Math.min(100, Math.max(0, percent));
+        const newDiscount =
+          base > 0 ? Math.round(((base * clampedPercent) / 100) * 100) / 100 : 0;
         const effectivePaidUnitPrice = Math.max(0, base - newDiscount);
         return {
           ...line,
@@ -948,8 +1073,13 @@ export default function DistributionInvoicesPage() {
   };
   const scopedCustomers = useMemo(() => {
     if (!assignedRouteId) return customers;
-    return customers.filter((customer) => String(customer.route_id || '') === assignedRouteId);
-  }, [customers, assignedRouteId]);
+    const matched = customers.filter((customer) => String(customer.route_id || '') === assignedRouteId);
+    // If there is no active load and cached route is stale, avoid blocking shop selection.
+    if (matched.length === 0 && !activeLoadId) {
+      return customers;
+    }
+    return matched;
+  }, [customers, assignedRouteId, activeLoadId]);
 
   const selectedCustomer = useMemo(
     () => scopedCustomers.find((customer) => customer.id === Number(customerId)) || null,
@@ -984,6 +1114,11 @@ export default function DistributionInvoicesPage() {
     if (!assignedRouteId) return invoices;
     return invoices.filter((invoice) => scopedCustomerIdSet.has(invoice.customer_id));
   }, [invoices, scopedCustomerIdSet, assignedRouteId]);
+
+  const effectiveLoadFilter = useMemo(
+    () => (isAdmin ? selectedLoadFilter : activeLoadId),
+    [isAdmin, selectedLoadFilter, activeLoadId]
+  );
 
   const filteredInvoices = useMemo(() => {
     const searchTerm = invoiceSearch.trim().toLowerCase();
@@ -1028,6 +1163,40 @@ export default function DistributionInvoicesPage() {
     customerNameById,
   ]);
 
+  const filteredDeliveryOrders = useMemo(() => {
+    const searchTerm = invoiceSearch.trim().toLowerCase();
+    const customerTerm = customerSearch.trim().toLowerCase();
+
+    return deliveryOrders.filter((record) => {
+      if (effectiveLoadFilter && String(record.load_id || '') !== effectiveLoadFilter) {
+        return false;
+      }
+
+      if (invoiceDateFilter) {
+        const saleDateValue = String(record.sale_date || '').slice(0, 10);
+        if (saleDateValue !== invoiceDateFilter) return false;
+      }
+
+      if (searchTerm) {
+        const doNumber = String(record.do_number || '').toLowerCase();
+        const saleNumber = String(record.sale_number || '').toLowerCase();
+        const saleIdText = String(record.id || '').toLowerCase();
+        if (!doNumber.includes(searchTerm) && !saleNumber.includes(searchTerm) && !saleIdText.includes(searchTerm)) {
+          return false;
+        }
+      }
+
+      if (customerTerm) {
+        const customerName = String(record.customer_name || '').toLowerCase();
+        if (!customerName.includes(customerTerm)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [deliveryOrders, effectiveLoadFilter, invoiceDateFilter, invoiceSearch, customerSearch]);
+
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(filteredInvoices.length / pageSize)),
     [filteredInvoices.length, pageSize]
@@ -1055,20 +1224,18 @@ export default function DistributionInvoicesPage() {
       .filter((loadItem) => !activeLoadId || String(loadItem.load_id) === String(activeLoadId))
       .map((loadItem) => {
         const matchedInventory = inventoryByCode.get(loadItem.product_code);
-        if (!matchedInventory) return null;
 
         return {
           load_item_id: loadItem.id,
-          inventory_item_id: matchedInventory.id,
-          item_code: matchedInventory.code,
-          item_name: loadItem.name || matchedInventory.name,
-          unit: matchedInventory.unit,
+          inventory_item_id: matchedInventory?.id || null,
+          item_code: loadItem.product_code,
+          item_name: loadItem.name || matchedInventory?.name || loadItem.product_code,
+          unit: matchedInventory?.unit || 'qty',
           load_qty: Number(loadItem.qty) || 0,
-          sell_price: loadItem.sell_price > 0 ? loadItem.sell_price : matchedInventory.sell_price,
-          warehouse_stock: Number(matchedInventory.current_stock) || 0,
+          sell_price: loadItem.sell_price > 0 ? loadItem.sell_price : Number(matchedInventory?.sell_price || 0),
+          warehouse_stock: Number(matchedInventory?.current_stock || 0),
         } as LoadItemSuggestion;
       })
-      .filter((item): item is LoadItemSuggestion => item !== null)
       .filter((item) =>
         item.item_code.toLowerCase().includes(search) || item.item_name.toLowerCase().includes(search)
       )
@@ -1079,14 +1246,14 @@ export default function DistributionInvoicesPage() {
       const selectedLoadRow = loadItems.find((li) => String(li.id) === String(selectedLoadItemId));
       if (selectedLoadRow) {
         const matchedInventory = items.find((item) => item.code === selectedLoadRow.product_code);
-        if (matchedInventory) {
-          return {
-            ...matchedInventory,
-            name: selectedLoadRow.name || matchedInventory.name,
-            sell_price: selectedLoadRow.sell_price > 0 ? selectedLoadRow.sell_price : matchedInventory.sell_price,
-            current_stock: Number(selectedLoadRow.qty) || 0,
-          } as Item;
-        }
+        return {
+          id: matchedInventory?.id || 0,
+          name: selectedLoadRow.name || matchedInventory?.name || selectedLoadRow.product_code,
+          code: selectedLoadRow.product_code,
+          unit: matchedInventory?.unit || 'qty',
+          sell_price: selectedLoadRow.sell_price > 0 ? selectedLoadRow.sell_price : Number(matchedInventory?.sell_price || 0),
+          current_stock: Number(selectedLoadRow.qty) || Number(matchedInventory?.current_stock || 0),
+        } as Item;
       }
     }
 
@@ -1147,6 +1314,7 @@ export default function DistributionInvoicesPage() {
     setHighlightedItemIndex(-1);
     setLineQty('');
     setLineFreeQty('');
+    setLineItemDiscountType('percentage');
     setLineItemDiscount('');
     setLines([]);
     setReturnSearch('');
@@ -1165,14 +1333,127 @@ export default function DistributionInvoicesPage() {
     setPaymentBankName('');
   };
 
-  const handlePosPrint = (invoice: InvoiceRecord) => {
+  const refreshCompanyHeaderForPrint = async () => {
+    if (!token || typeof window === 'undefined') return;
+
+    try {
+      const applyCompanyHeader = (company: {
+        name?: string;
+        logo_url?: string;
+        logo_path?: string;
+        address?: string;
+        phone?: string;
+        email?: string;
+        website?: string;
+      }) => {
+        const latestName = String(company?.name || '').trim();
+        if (latestName) {
+          setCompanyProfileName(latestName);
+        }
+
+        const latestLogoUrl = normalizeCompanyLogoUrl(company?.logo_url, company?.logo_path);
+        setCompanyProfileLogoUrl(latestLogoUrl);
+        setCompanyProfileAddress(String(company?.address || '').trim());
+        setCompanyProfilePhone(String(company?.phone || '').trim());
+        setCompanyProfileEmail(String(company?.email || '').trim());
+        setCompanyProfileWebsite(String(company?.website || '').trim());
+
+        const currentRaw = window.localStorage.getItem('company_profile_data');
+        const current = currentRaw ? JSON.parse(currentRaw) : {};
+        const merged = {
+          ...current,
+          ...company,
+          logo_url: latestLogoUrl,
+        };
+        window.localStorage.setItem('company_profile_data', JSON.stringify(merged));
+      };
+
+      const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
+      if (profileId > 0) {
+        const byIdRes = await axios.get(`/api/companies/${profileId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const companyById = (byIdRes?.data || {}) as {
+          name?: string;
+          logo_url?: string;
+          logo_path?: string;
+          address?: string;
+          phone?: string;
+          email?: string;
+          website?: string;
+        };
+
+        applyCompanyHeader(companyById);
+        return;
+      }
+
+      const listRes = await axios.get('/api/companies', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { per_page: 50 },
+      });
+
+      const rows = Array.isArray(listRes?.data)
+        ? listRes.data
+        : (listRes?.data?.data || []);
+
+      const companies = Array.isArray(rows) ? rows : [];
+      const companyWithLogo = companies.find((company: any) => {
+        const logoPath = String(company?.logo_path || '').trim();
+        const logoUrl = String(company?.logo_url || '').trim();
+        return Boolean(logoPath || logoUrl);
+      });
+
+      const firstCompany = (companyWithLogo || companies[0] || null) as
+        | {
+            name?: string;
+            logo_url?: string;
+            logo_path?: string;
+            address?: string;
+            phone?: string;
+            email?: string;
+            website?: string;
+          }
+        | null;
+
+      if (firstCompany) {
+        applyCompanyHeader(firstCompany);
+      }
+    } catch (error) {
+      console.error('Failed to refresh company profile for print header:', error);
+    }
+  };
+
+  const handlePosPrint = async (invoice: InvoiceRecord) => {
+    await refreshCompanyHeaderForPrint();
     setPosPrintInvoice(invoice);
+
     // Allow React to render the print area before triggering print
     setTimeout(() => {
       if (typeof window !== 'undefined') {
-        window.print();
+        const logoImage = posPrintRef.current?.querySelector<HTMLImageElement>('img[alt="Company logo"]') || null;
+        if (!logoImage || !companyProfileLogoUrl) {
+          window.print();
+          return;
+        }
+
+        if (logoImage.complete && logoImage.naturalWidth > 0) {
+          window.print();
+          return;
+        }
+
+        let printed = false;
+        const printNow = () => {
+          if (printed) return;
+          printed = true;
+          window.print();
+        };
+
+        logoImage.addEventListener('load', printNow, { once: true });
+        logoImage.addEventListener('error', printNow, { once: true });
+        setTimeout(printNow, 1500);
       }
-    }, 300);
+    }, 220);
   };
 
   const openViewInvoice = (invoice: InvoiceRecord) => {
@@ -1262,7 +1543,7 @@ export default function DistributionInvoicesPage() {
     if (!deleteConfirmInvoice) return;
 
     try {
-      await axios.delete(`http://localhost:8000/api/distribution/invoices/${deleteConfirmInvoice.id}`, {
+      await axios.delete(`/api/distribution/invoices/${deleteConfirmInvoice.id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -1332,6 +1613,37 @@ export default function DistributionInvoicesPage() {
     document.addEventListener('mousedown', handleDocumentClick);
     return () => document.removeEventListener('mousedown', handleDocumentClick);
   }, [showModal, showCustomerPicker]);
+
+  useEffect(() => {
+    const modalActive = showModal || showReturnModal;
+    if (!modalActive) return;
+
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtmlOverscroll = html.style.overscrollBehaviorY;
+    const prevBodyOverscroll = body.style.overscrollBehaviorY;
+
+    html.style.overscrollBehaviorY = 'none';
+    body.style.overscrollBehaviorY = 'none';
+
+    const preventPullToRefresh = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+
+      const target = event.target as HTMLElement | null;
+      const insideAllowedScroll = target?.closest('.invoice-modal-scroll, .invoice-return-modal-scroll');
+      if (insideAllowedScroll) return;
+
+      event.preventDefault();
+    };
+
+    document.addEventListener('touchmove', preventPullToRefresh, { passive: false });
+
+    return () => {
+      html.style.overscrollBehaviorY = prevHtmlOverscroll;
+      body.style.overscrollBehaviorY = prevBodyOverscroll;
+      document.removeEventListener('touchmove', preventPullToRefresh);
+    };
+  }, [showModal, showReturnModal]);
 
   const submitInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1412,10 +1724,10 @@ export default function DistributionInvoicesPage() {
               typeof line.base_unit_price === 'number'
                 ? line.base_unit_price
                 : line.unit_price + (line.item_discount || 0);
-            const discountPerUnit = line.item_discount || 0;
+            const discountPercent = getLineDiscountPercent(line);
             const paidTotal = paidQty * line.unit_price;
             parts.push(
-              `- ${paidQty.toFixed(2)} paid + ${freeQty.toFixed(2)} free x ${line.item_name} (${line.item_code}) @ base ${base.toFixed(2)}, disc/unit ${discountPerUnit.toFixed(2)}, effective ${line.unit_price.toFixed(2)} => paid total ${paidTotal.toFixed(2)}`
+              `- ${paidQty.toFixed(2)} paid + ${freeQty.toFixed(2)} free x ${line.item_name} (${line.item_code}) @ base ${base.toFixed(2)}, disc ${discountPercent.toFixed(2)}%, effective ${line.unit_price.toFixed(2)} => paid total ${paidTotal.toFixed(2)}`
             );
           });
         }
@@ -1646,7 +1958,7 @@ export default function DistributionInvoicesPage() {
 
       if (isEditing) {
         const updateRes = await axios.put(
-          `http://localhost:8000/api/distribution/invoices/${editingInvoiceId}`,
+          `/api/distribution/invoices/${editingInvoiceId}`,
           {
             customer_id: Number(customerId),
             invoice_date: invoiceDate,
@@ -1660,7 +1972,7 @@ export default function DistributionInvoicesPage() {
         );
         savedInvoice = updateRes.data?.data;
       } else {
-        const invoiceRes = await axios.post('http://localhost:8000/api/distribution/invoices', {
+        const invoiceRes = await axios.post('/api/distribution/invoices', {
           ...baseInvoicePayload,
         }, { headers: { Authorization: `Bearer ${token}` } });
         savedInvoice = invoiceRes.data?.data;
@@ -1676,7 +1988,7 @@ export default function DistributionInvoicesPage() {
             throw new Error('Missing previous invoice for bill to bill settlement.');
           }
 
-          await axios.post('http://localhost:8000/api/distribution/payments', {
+          await axios.post('/api/distribution/payments', {
             payment_number: generatePaymentNumber(),
             distribution_invoice_id: targetInvoiceId,
             load_id: savedInvoice.load_id ?? effectiveLoadId,
@@ -1702,7 +2014,7 @@ export default function DistributionInvoicesPage() {
       if (returnLines.length > 0 && savedInvoice?.id) {
         try {
           const totalReturnQty = returnLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
-          await axios.post('http://localhost:8000/api/distribution/returns', {
+          await axios.post('/api/distribution/returns', {
             return_number: generateReturnNumber(),
             distribution_invoice_id: savedInvoice.id,
             customer_id: savedInvoice.customer_id ?? Number(customerId),
@@ -1846,7 +2158,7 @@ export default function DistributionInvoicesPage() {
 
     try {
       setReturnSaving(true);
-      await axios.post('http://localhost:8000/api/distribution/returns', {
+      await axios.post('/api/distribution/returns', {
         return_number: `RET-${Date.now()}`,
         distribution_invoice_id: returnInvoice.id,
         customer_id: returnInvoice.customer_id,
@@ -2024,6 +2336,57 @@ export default function DistributionInvoicesPage() {
           </div>
         </div>
 
+        <div className="mb-4 rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-emerald-50">
+            <h3 className="text-sm font-semibold text-gray-800">Delivery Orders By Load</h3>
+            <p className="text-xs text-gray-500 mt-0.5">DO records created from Outlet POS orders with assigned loads.</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">DO #</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sale #</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Load</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Outlet</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {filteredDeliveryOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-500">
+                      No DO records found for the current filters.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredDeliveryOrders.map((record) => (
+                    <tr key={record.id} className="hover:bg-cyan-50/40 transition-colors">
+                      <td className="px-4 py-2 text-sm font-semibold text-cyan-700">{record.do_number || '-'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{record.sale_number}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{record.load_id ? `Load #${record.load_id}` : '-'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{record.customer_name || 'Walk-in Customer'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{record.sale_date ? new Date(record.sale_date).toLocaleDateString() : '-'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700 text-right">{Number(record.total_amount || 0).toFixed(2)}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">
+                        {record.outlet?.name || '-'}
+                        {record.outlet?.code ? ` (${record.outlet.code})` : ''}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="px-4 py-2 border-t border-gray-100 text-xs text-gray-500">
+            Showing {filteredDeliveryOrders.length} DO record(s)
+          </div>
+        </div>
+
         <div className="rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
@@ -2183,7 +2546,7 @@ export default function DistributionInvoicesPage() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 md:px-6 pb-4 md:pb-6">
+            <div className="invoice-modal-scroll flex-1 overflow-y-auto overscroll-contain px-4 md:px-6 pb-4 md:pb-6">
               <form onSubmit={submitInvoice} className="space-y-6 pt-4">
                 <section className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50/80 via-white to-cyan-50/50 p-3 shadow-sm sm:p-4">
                   <div className="mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -2476,14 +2839,32 @@ export default function DistributionInvoicesPage() {
                       />
                     </div>
                     <div className="md:col-span-2">
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Item Discount (per unit)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={lineItemDiscount}
-                        onChange={(e) => setLineItemDiscount(e.target.value)}
-                        className="w-full rounded-xl border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
-                      />
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Item Discount</label>
+                      <div className="flex gap-2">
+                        <select
+                          value={lineItemDiscountType}
+                          onChange={(e) => setLineItemDiscountType(e.target.value as 'percentage' | 'amount')}
+                          className="w-1/2 rounded-xl border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                        >
+                          <option value="percentage">%</option>
+                          <option value="amount">Amount</option>
+                        </select>
+                        <input
+                          type="number"
+                          min={0}
+                          max={lineItemDiscountType === 'percentage' ? 100 : undefined}
+                          step="0.01"
+                          placeholder="0"
+                          value={lineItemDiscount}
+                          onChange={(e) => setLineItemDiscount(e.target.value)}
+                          className="w-1/2 rounded-xl border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                        />
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {lineItemDiscountType === 'percentage'
+                          ? 'Percentage discount on base unit price (0-100).'
+                          : 'Fixed discount amount per paid unit.'}
+                      </p>
                     </div>
                     <div className="md:col-span-1">
                       <button
@@ -2513,7 +2894,7 @@ export default function DistributionInvoicesPage() {
                           <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Item</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Qty (Paid)</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Free Qty</th>
-                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Disc/Unit</th>
+                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Disc %</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Unit Price</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Line Total</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Action</th>
@@ -2584,10 +2965,12 @@ export default function DistributionInvoicesPage() {
                                   {isEditing ? (
                                     <input
                                       type="number"
+                                      min={0}
+                                      max={100}
                                       step="0.01"
-                                      value={line.item_discount || 0}
+                                      value={getLineDiscountPercent(line)}
                                       onChange={(e) =>
-                                        updateLineDiscount(
+                                        updateLineDiscountPercent(
                                           line.line_id,
                                           Number(e.target.value) || 0
                                         )
@@ -2595,7 +2978,7 @@ export default function DistributionInvoicesPage() {
                                       className="w-24 rounded-md border border-gray-300 text-right text-sm text-black px-2 py-1"
                                     />
                                   ) : (
-                                    <span>{(line.item_discount || 0).toFixed(2)}</span>
+                                    <span>{getLineDiscountPercent(line).toFixed(2)}%</span>
                                   )}
                                 </td>
                                 <td className="px-4 py-1 text-sm text-gray-700 text-right align-middle">
@@ -2712,7 +3095,7 @@ export default function DistributionInvoicesPage() {
                                 <span className="mx-1">·</span>
                               )}
                               {(line.item_discount || 0) > 0 && (
-                                <span>Disc/Unit: {(line.item_discount || 0).toFixed(2)}</span>
+                                <span>Disc: {getLineDiscountPercent(line).toFixed(2)}%</span>
                               )}
                             </div>
                           )}
@@ -2751,13 +3134,15 @@ export default function DistributionInvoicesPage() {
                                 />
                               </div>
                               <div className="flex items-center justify-between gap-2">
-                                <span className="text-gray-500">Disc/Unit</span>
+                                <span className="text-gray-500">Disc %</span>
                                 <input
                                   type="number"
+                                  min={0}
+                                  max={100}
                                   step="0.01"
-                                  value={line.item_discount || 0}
+                                  value={getLineDiscountPercent(line)}
                                   onChange={(e) =>
-                                    updateLineDiscount(
+                                    updateLineDiscountPercent(
                                       line.line_id,
                                       Number(e.target.value) || 0
                                     )
@@ -3566,7 +3951,7 @@ export default function DistributionInvoicesPage() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 text-sm text-gray-700">
+            <div className="invoice-return-modal-scroll flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 text-sm text-gray-700">
               <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
                 <div>
                   <div className="text-gray-500">Invoice Date</div>
@@ -3737,43 +4122,46 @@ export default function DistributionInvoicesPage() {
               padding: '4px 6px',
               boxSizing: 'border-box',
               fontFamily: `system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`,
-              fontSize: '11px',
+              fontSize: '14px',
             }}
           >
-            <div style={{ textAlign: 'center', marginBottom: '4px' }}>
+            <div style={{ textAlign: 'center', marginBottom: '6px' }}>
               {companyProfileLogoUrl && (
-                <div style={{ marginBottom: '4px' }}>
+                <div style={{ marginBottom: '5px' }}>
                   <img
                     src={companyProfileLogoUrl}
                     alt="Company logo"
                     style={{
-                      maxWidth: '26mm',
-                      maxHeight: '16mm',
+                      width: '42mm',
+                      maxWidth: '100%',
+                      maxHeight: '28mm',
+                      height: 'auto',
                       objectFit: 'contain',
+                      objectPosition: 'center',
                       margin: '0 auto',
                       display: 'block',
                     }}
                   />
                 </div>
               )}
-              <div style={{ fontSize: '14px', fontWeight: 700 }}>{companyProfileName}</div>
+              <div style={{ fontSize: '14px', fontWeight: 800, lineHeight: 1.25 }}>{companyProfileName}</div>
               {companyProfileAddress && (
-                <div style={{ fontSize: '10px', lineHeight: 1.25, marginTop: '2px' }}>{companyProfileAddress}</div>
+                <div style={{ fontSize: '14px', lineHeight: 1.35, marginTop: '2px' }}>{companyProfileAddress}</div>
               )}
               {companyProfilePhone && (
-                <div style={{ fontSize: '10px', lineHeight: 1.25 }}>Tel: {companyProfilePhone}</div>
+                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>Tel: {companyProfilePhone}</div>
               )}
               {companyProfileEmail && (
-                <div style={{ fontSize: '10px', lineHeight: 1.25 }}>{companyProfileEmail}</div>
+                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>{companyProfileEmail}</div>
               )}
               {companyProfileWebsite && (
-                <div style={{ fontSize: '10px', lineHeight: 1.25 }}>{companyProfileWebsite}</div>
+                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>{companyProfileWebsite}</div>
               )}
             </div>
 
             <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
 
-            <div style={{ fontSize: '11px', lineHeight: 1.3 }}>
+            <div style={{ fontSize: '14px', lineHeight: 1.35 }}>
               <div>Invoice: {posPrintInvoice.invoice_number}</div>
               <div>
                 Date:{' '}
@@ -3792,7 +4180,7 @@ export default function DistributionInvoicesPage() {
 
             <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
 
-            <div style={{ fontSize: '10px' }}>
+            <div style={{ fontSize: '14px' }}>
               {posPrintInvoice.items.map((item) => {
                 const qty = Number(item.quantity) || 0;
                 const price = Number(item.unit_price) || 0;
@@ -3851,7 +4239,7 @@ export default function DistributionInvoicesPage() {
               const total = Number(posPrintInvoice.total ?? Math.max(0, subtotal - rawDiscount));
 
               return (
-                <div style={{ fontSize: '11px' }}>
+                <div style={{ fontSize: '14px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span>Subtotal</span>
                     <span>{subtotal.toFixed(2)}</span>
@@ -3908,7 +4296,7 @@ export default function DistributionInvoicesPage() {
               return (
                 <>
                   <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-                  <div style={{ fontSize: '9px' }}>
+                  <div style={{ fontSize: '14px' }}>
                     <div style={{ fontWeight: 600, marginBottom: '1px' }}>Returns in this bill</div>
                     {summaryLines.slice(0, 3).map((l, idx) => (
                       <div key={idx}>{l}</div>
@@ -3941,7 +4329,7 @@ export default function DistributionInvoicesPage() {
               return (
                 <>
                   <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-                  <div style={{ fontSize: '9px' }}>
+                  <div style={{ fontSize: '14px' }}>
                     <div style={{ fontWeight: 600, marginBottom: '1px' }}>Payment Evidence</div>
                     {evidenceLines.map((line, idx) => (
                       <div key={idx}>{line}</div>
@@ -3952,7 +4340,7 @@ export default function DistributionInvoicesPage() {
             })()}
 
             <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-            <div style={{ textAlign: 'center', fontSize: '10px', marginTop: '2px' }}>
+            <div style={{ textAlign: 'center', fontSize: '14px', marginTop: '2px' }}>
               Thank you! Come again.
             </div>
           </div>

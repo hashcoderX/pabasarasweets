@@ -15,6 +15,31 @@ class OutletPosController extends Controller
 {
     private const LOYALTY_POINT_RATE = 0.01; // 1 point per 100 currency units
 
+    private function generateDoNumber(): string
+    {
+        return 'DO' . now()->format('YmdHis') . strtoupper(substr(md5((string) microtime(true)), 0, 3));
+    }
+
+    private function resolveDeliveryEmployeeName(int $deliveryEmployeeId): ?string
+    {
+        if ($deliveryEmployeeId <= 0 || !Schema::hasTable('employees')) {
+            return null;
+        }
+
+        $employee = DB::table('employees')
+            ->where('id', $deliveryEmployeeId)
+            ->select('first_name', 'last_name')
+            ->first();
+
+        if (!$employee) {
+            return null;
+        }
+
+        $firstName = trim((string) ($employee->first_name ?? ''));
+        $lastName = trim((string) ($employee->last_name ?? ''));
+        return trim($firstName . ' ' . $lastName) ?: null;
+    }
+
     private function hasCashDrawerTables(): bool
     {
         return Schema::hasTable('outlet_cash_drawers') && Schema::hasTable('outlet_cash_drawer_sessions');
@@ -866,6 +891,10 @@ class OutletPosController extends Controller
             'outlet:id,name,code',
             'soldByUser:id,name,email',
             'loyaltyCustomer:id,customer_code,name,phone,points_balance',
+            'assignedLoad',
+            'assignedLoad.route',
+            'assignedLoad.vehicle',
+            'assignedLoad.driver',
             'items:id,outlet_sale_id,inventory_item_id,item_code,item_name,unit,issue_type,discount_amount,quantity,unit_price,line_total',
         ]);
 
@@ -913,6 +942,15 @@ class OutletPosController extends Controller
             $query->where('total_amount', '<=', (float) $request->max_amount);
         }
 
+        if ($request->filled('load_id') && Schema::hasColumn('outlet_sales', 'load_id')) {
+            $query->where('load_id', (int) $request->load_id);
+        }
+
+        if ($request->boolean('do_only') && Schema::hasColumn('outlet_sales', 'do_number')) {
+            $query->whereNotNull('do_number')
+                ->where('do_number', '!=', '');
+        }
+
         $sales = $query->orderByDesc('sale_date')->orderByDesc('id')->paginate($request->get('per_page', 20));
 
         return response()->json([
@@ -933,10 +971,13 @@ class OutletPosController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
+            'sale_mode' => 'nullable|in:order,exact_invoice',
             'outlet_id' => 'nullable|exists:outlets,id',
             'sale_date' => 'nullable|date',
             'customer_name' => 'nullable|string|max:255',
             'loyalty_customer_id' => 'nullable|exists:outlet_loyalty_customers,id',
+            'load_id' => 'nullable|exists:loads,id',
+            'delivery_employee_id' => 'nullable|exists:employees,id',
             'discount_amount' => 'nullable|numeric|min:0',
             'paid_amount' => 'nullable|numeric|min:0',
             'payment_type' => 'nullable|in:cash,bank,card,online',
@@ -958,6 +999,8 @@ class OutletPosController extends Controller
         }
 
         $payload = $validator->validated();
+        $saleMode = strtolower((string) ($payload['sale_mode'] ?? 'order'));
+        $isOrderMode = $saleMode === 'order';
         $outletId = $admin ? (int) ($payload['outlet_id'] ?? 0) : (int) $outlet?->id;
 
         if ($admin && $outletId <= 0) {
@@ -983,9 +1026,20 @@ class OutletPosController extends Controller
         }
 
         try {
-            $sale = DB::transaction(function () use ($payload, $activeOutlet, $user) {
+            $sale = DB::transaction(function () use ($payload, $activeOutlet, $user, $saleMode, $isOrderMode) {
+                $salesHasStatus = Schema::hasColumn('outlet_sales', 'status');
+                $salesHasDoNumber = Schema::hasColumn('outlet_sales', 'do_number');
+                $salesHasLoadId = Schema::hasColumn('outlet_sales', 'load_id');
+                $salesHasDeliveryEmployeeId = Schema::hasColumn('outlet_sales', 'delivery_employee_id');
+                $salesHasDeliveryEmployeeName = Schema::hasColumn('outlet_sales', 'delivery_employee_name');
+
                 $stock = $this->stockByOutlet($activeOutlet->id)->keyBy('inventory_item_id');
                 $loyaltyCustomerId = (int) ($payload['loyalty_customer_id'] ?? 0);
+                $loadId = (int) ($payload['load_id'] ?? 0);
+                $deliveryEmployeeId = (int) ($payload['delivery_employee_id'] ?? 0);
+                $deliveryEmployeeName = $deliveryEmployeeId > 0
+                    ? $this->resolveDeliveryEmployeeName($deliveryEmployeeId)
+                    : null;
                 $loyaltyCustomer = null;
 
                 if ($loyaltyCustomerId > 0) {
@@ -1054,7 +1108,7 @@ class OutletPosController extends Controller
                 $balanceAmount = max($netTotalAmount - $paidAmount, 0);
                 $paymentType = $payload['payment_type'] ?? 'cash';
 
-                if ($balanceAmount > 0 && !$loyaltyCustomer) {
+                if ($balanceAmount > 0 && !$isOrderMode && !$loyaltyCustomer) {
                     throw new \RuntimeException('Credit sale is allowed only for loyalty customers. Please select a loyalty customer.');
                 }
 
@@ -1062,7 +1116,7 @@ class OutletPosController extends Controller
                     ? round($netTotalAmount * self::LOYALTY_POINT_RATE, 2)
                     : 0;
 
-                $sale = OutletSale::create([
+                $saleData = [
                     'sale_number' => 'OPS' . now()->format('YmdHis') . strtoupper(substr(md5((string) microtime(true)), 0, 4)),
                     'outlet_id' => $activeOutlet->id,
                     'sold_by' => $user?->id,
@@ -1077,7 +1131,29 @@ class OutletPosController extends Controller
                     'balance_amount' => $balanceAmount,
                     'loyalty_points_awarded' => $pointsAwarded,
                     'notes' => $payload['notes'] ?? null,
-                ]);
+                ];
+
+                if ($salesHasStatus) {
+                    $saleData['status'] = $saleMode === 'exact_invoice' ? 'exact_invoice' : 'ordered';
+                }
+
+                if ($salesHasDoNumber) {
+                    $saleData['do_number'] = $isOrderMode ? $this->generateDoNumber() : null;
+                }
+
+                if ($salesHasLoadId) {
+                    $saleData['load_id'] = ($isOrderMode && $loadId > 0) ? $loadId : null;
+                }
+
+                if ($salesHasDeliveryEmployeeId) {
+                    $saleData['delivery_employee_id'] = $deliveryEmployeeId > 0 ? $deliveryEmployeeId : null;
+                }
+
+                if ($salesHasDeliveryEmployeeName) {
+                    $saleData['delivery_employee_name'] = $deliveryEmployeeName;
+                }
+
+                $sale = OutletSale::create($saleData);
 
                 foreach ($itemsToSave as $line) {
                     $line['outlet_sale_id'] = $sale->id;
@@ -1135,6 +1211,10 @@ class OutletPosController extends Controller
                     'outlet:id,name,code',
                     'soldByUser:id,name,email',
                     'loyaltyCustomer:id,customer_code,name,phone,points_balance',
+                    'assignedLoad',
+                    'assignedLoad.route',
+                    'assignedLoad.vehicle',
+                    'assignedLoad.driver',
                     'items:id,outlet_sale_id,inventory_item_id,item_code,item_name,unit,issue_type,discount_amount,quantity,unit_price,line_total',
                 ]);
             });

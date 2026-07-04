@@ -12,6 +12,33 @@ type CompanyRow = {
   updated_at?: string;
 };
 
+const toSafeStorageUrl = (value: string, apiBase: string): string => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  const baseOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : apiBase || '';
+
+  if (raw.startsWith('/storage/')) {
+    return `${baseOrigin}${raw}`;
+  }
+
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    try {
+      const parsed = new URL(raw);
+      if (parsed.pathname.startsWith('/storage/')) {
+        return `${baseOrigin}${parsed.pathname}${parsed.search || ''}`;
+      }
+    } catch {
+      return raw;
+    }
+  }
+
+  return raw;
+};
+
 export default function SystemSettingsPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
@@ -25,7 +52,7 @@ export default function SystemSettingsPage() {
   const [logoLoading, setLogoLoading] = useState(false);
   const [logoLoadError, setLogoLoadError] = useState(false);
 
-  const API_BASE = 'http://localhost:8000';
+  const API_BASE = '';
 
   const router = useRouter();
 
@@ -44,7 +71,7 @@ export default function SystemSettingsPage() {
 
     const bootstrap = async () => {
       try {
-        const userRes = await axios.get('http://localhost:8000/api/user', {
+        const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -92,7 +119,7 @@ export default function SystemSettingsPage() {
 
     try {
       setLoading(true);
-      const res = await axios.get('http://localhost:8000/api/system-settings', {
+      const res = await axios.get('/api/system-settings', {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
 
@@ -112,23 +139,19 @@ export default function SystemSettingsPage() {
 
     if (rawUrl) {
       if (rawUrl.startsWith('http://') || rawUrl.startsWith('https://')) {
-        const pathIndex = rawUrl.indexOf('/storage/');
-        if (pathIndex >= 0) {
-          return `${API_BASE}${rawUrl.slice(pathIndex)}${cacheSuffix}`;
-        }
-        return `${rawUrl}${cacheSuffix}`;
+        return `${toSafeStorageUrl(rawUrl, API_BASE)}${cacheSuffix}`;
       }
 
       if (rawUrl.startsWith('/')) {
-        return `${API_BASE}${rawUrl}${cacheSuffix}`;
+        return `${toSafeStorageUrl(`${API_BASE}${rawUrl}`, API_BASE)}${cacheSuffix}`;
       }
 
-      return `${API_BASE}/${rawUrl}${cacheSuffix}`;
+      return `${toSafeStorageUrl(`${API_BASE}/${rawUrl}`, API_BASE)}${cacheSuffix}`;
     }
 
     if (logoPath) {
       const normalized = logoPath.replace(/^\/+/, '');
-      return `${API_BASE}/storage/${normalized}${cacheSuffix}`;
+      return `${toSafeStorageUrl(`${API_BASE}/storage/${normalized}`, API_BASE)}${cacheSuffix}`;
     }
 
     return '';
@@ -169,7 +192,7 @@ export default function SystemSettingsPage() {
     try {
       setSaving(true);
       await axios.put(
-        'http://localhost:8000/api/system-settings',
+        '/api/system-settings',
         { system_enabled: systemEnabled },
         { headers: { Authorization: `Bearer ${token}` } }
       );

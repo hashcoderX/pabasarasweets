@@ -35,7 +35,7 @@ export default function RawMaterialStockReportPage() {
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');

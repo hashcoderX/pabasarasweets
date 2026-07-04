@@ -110,7 +110,7 @@ export default function OutletManagementPage() {
   const fetchOutlets = async () => {
     try {
       setLoading(true);
-      const response = await axios.get('http://localhost:8000/api/outlets', {
+      const response = await axios.get('/api/outlets', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 100 }
       });
@@ -183,11 +183,11 @@ export default function OutletManagementPage() {
           address: formData.address,
           status: formData.status,
         };
-        await axios.put(`http://localhost:8000/api/outlets/${editingOutlet.id}`, updatePayload, {
+        await axios.put(`/api/outlets/${editingOutlet.id}`, updatePayload, {
           headers: { Authorization: `Bearer ${token}` }
         });
       } else {
-        const createRes = await axios.post('http://localhost:8000/api/outlets', formData, {
+        const createRes = await axios.post('/api/outlets', formData, {
           headers: { Authorization: `Bearer ${token}` }
         });
 
@@ -222,7 +222,7 @@ export default function OutletManagementPage() {
 
     try {
       setDeleting(true);
-      await axios.delete(`http://localhost:8000/api/outlets/${deleteTarget.id}`, {
+      await axios.delete(`/api/outlets/${deleteTarget.id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setDeleteConfirmOpen(false);
@@ -242,7 +242,7 @@ export default function OutletManagementPage() {
       setStockModalOpen(true);
       setStockLoading(true);
 
-      const response = await axios.get(`http://localhost:8000/api/outlets/${outlet.id}/stock-report`, {
+      const response = await axios.get(`/api/outlets/${outlet.id}/stock-report`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -262,7 +262,7 @@ export default function OutletManagementPage() {
       setSalesModalOpen(true);
       setSalesLoading(true);
 
-      const response = await axios.get(`http://localhost:8000/api/outlet-pos/outlets/${outlet.id}/sales-report`, {
+      const response = await axios.get(`/api/outlet-pos/outlets/${outlet.id}/sales-report`, {
         headers: { Authorization: `Bearer ${token}` },
       });
 

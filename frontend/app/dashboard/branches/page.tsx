@@ -23,7 +23,7 @@ export default function Branches() {
   const [editingCompany, setEditingCompany] = useState<Company | null>(null);
   const router = useRouter();
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
 
   // Form fields
   const [name, setName] = useState('');
