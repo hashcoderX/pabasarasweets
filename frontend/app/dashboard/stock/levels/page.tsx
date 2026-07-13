@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface StockItem {
   id: number;

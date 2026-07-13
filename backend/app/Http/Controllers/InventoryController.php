@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryItem;
+use App\Models\GrnItem;
 use App\Models\Product;
 use App\Models\RawMaterial;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Pagination\LengthAwarePaginator;
 
 class InventoryController extends Controller
 {
@@ -16,6 +18,12 @@ class InventoryController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        $batchView = $request->boolean('batch_view', false);
+
+        if ($batchView && $request->input('type') === 'raw_material') {
+            return $this->indexRawMaterialsByBatch($request);
+        }
+
         $query = InventoryItem::with('supplier');
 
         // Filter by type (raw_material or finished_good)
@@ -60,6 +68,124 @@ class InventoryController extends Controller
         ]);
     }
 
+    private function indexRawMaterialsByBatch(Request $request): JsonResponse
+    {
+        $query = InventoryItem::with('supplier')->where('type', 'raw_material');
+
+        if ($request->has('search') && !empty($request->search)) {
+            $search = $request->search;
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('code', 'like', "%{$search}%")
+                    ->orWhere('description', 'like', "%{$search}%")
+                    ->orWhere('category', 'like', "%{$search}%");
+            });
+        }
+
+        if ($request->has('status') && !empty($request->status)) {
+            $query->where('status', $request->status);
+        }
+
+        if ($request->has('low_stock') && $request->low_stock == 'true') {
+            $query->whereRaw('current_stock <= minimum_stock');
+        }
+
+        if ($request->has('out_of_stock') && $request->out_of_stock == 'true') {
+            $query->where('current_stock', '<=', 0);
+        }
+
+        $inventoryItems = $query->orderBy('created_at', 'desc')->get();
+        $inventoryItemIds = $inventoryItems->pluck('id')->all();
+
+        $grnItems = GrnItem::with([
+            'grn.purchaseOrder.supplier',
+            'purchaseOrderItem:id,inventory_item_id,unit_price',
+        ])
+            ->whereHas('purchaseOrderItem', function ($q) use ($inventoryItemIds) {
+                $q->whereIn('inventory_item_id', $inventoryItemIds);
+            })
+            ->orderBy('id', 'desc')
+            ->get();
+
+        $grnItemsByInventory = $grnItems->groupBy(function (GrnItem $grnItem) {
+            return $grnItem->purchaseOrderItem?->inventory_item_id;
+        });
+
+        $rows = collect();
+
+        foreach ($inventoryItems as $inventoryItem) {
+            $itemGrnRows = $grnItemsByInventory->get($inventoryItem->id, collect());
+
+            if ($itemGrnRows->isEmpty()) {
+                $base = json_decode(json_encode($inventoryItem), true) ?: [];
+                $base['inventory_item_id'] = $inventoryItem->id;
+                $base['grn_item_id'] = null;
+                $base['batch_no'] = 'OPENING';
+                $base['batch_purchase_price'] = $inventoryItem->purchase_price ?? $inventoryItem->unit_price;
+                $base['batch_received_quantity'] = null;
+                $base['batch_accepted_quantity'] = null;
+                $base['batch_rejected_quantity'] = null;
+                $base['batch_received_date'] = null;
+                $base['batch_quality_status'] = null;
+                $base['unit_price'] = $inventoryItem->purchase_price ?? $inventoryItem->unit_price;
+                $base['purchase_price'] = $inventoryItem->purchase_price ?? $inventoryItem->unit_price;
+                $rows->push($base);
+                continue;
+            }
+
+            foreach ($itemGrnRows as $grnItem) {
+                $purchaseOrderItem = $grnItem->purchaseOrderItem;
+                $grn = $grnItem->grn;
+                $supplier = $grn?->purchaseOrder?->supplier;
+                $resolvedPurchasePrice = $grnItem->purchase_price
+                    ?? $purchaseOrderItem?->unit_price
+                    ?? $inventoryItem->purchase_price
+                    ?? $inventoryItem->unit_price;
+
+                $row = json_decode(json_encode($inventoryItem), true) ?: [];
+                $row['id'] = $grnItem->id;
+                $row['inventory_item_id'] = $inventoryItem->id;
+                $row['grn_item_id'] = $grnItem->id;
+                $row['batch_no'] = ($grn?->grn_number ?: 'GRN') . '-I' . $grnItem->id;
+                $row['batch_purchase_price'] = $resolvedPurchasePrice;
+                $row['batch_received_quantity'] = $grnItem->received_quantity;
+                $row['batch_accepted_quantity'] = $grnItem->accepted_quantity;
+                $row['batch_rejected_quantity'] = $grnItem->rejected_quantity;
+                $row['batch_received_date'] = $grn?->received_date;
+                $row['batch_quality_status'] = $grnItem->quality_status;
+                $row['expiry_date'] = $grnItem->expiry_date ?: $inventoryItem->expiry_date;
+                $row['unit_price'] = $resolvedPurchasePrice;
+                $row['purchase_price'] = $resolvedPurchasePrice;
+                $row['sell_price'] = $grnItem->sell_price ?? $inventoryItem->sell_price;
+                $row['supplier_name'] = $supplier?->name ?: ($inventoryItem->supplier_name ?? null);
+                $row['supplier_id'] = $supplier?->id ?: ($inventoryItem->supplier_id ?? null);
+                $rows->push($row);
+            }
+        }
+
+        $perPage = (int) $request->get('per_page', 15);
+        $page = max((int) $request->get('page', 1), 1);
+        $total = $rows->count();
+        $currentPageRows = $rows->forPage($page, $perPage)->values();
+
+        $paginated = new LengthAwarePaginator(
+            $currentPageRows,
+            $total,
+            $perPage,
+            $page,
+            [
+                'path' => $request->url(),
+                'query' => $request->query(),
+            ]
+        );
+
+        return response()->json([
+            'success' => true,
+            'data' => $paginated,
+            'message' => 'Raw material batches retrieved successfully'
+        ]);
+    }
+
     /**
      * Store a newly created resource in storage.
      */
@@ -76,6 +202,7 @@ class InventoryController extends Controller
             'minimum_stock' => 'required|numeric|min:0',
             'maximum_stock' => 'nullable|numeric|min:0',
             'unit_price' => 'required|numeric|min:0',
+            'sell_price' => 'nullable|numeric|min:0',
             'supplier_name' => 'nullable|string|max:255',
             'supplier_id' => 'nullable|exists:suppliers,id',
             'location' => 'nullable|string|max:255',
@@ -103,6 +230,7 @@ class InventoryController extends Controller
                 'minimum_stock' => $request->minimum_stock,
                 'maximum_stock' => $request->maximum_stock,
                 'unit_price' => $request->unit_price,
+                'sell_price' => $request->sell_price,
                 'supplier_name' => $request->supplier_name,
                 'supplier_id' => $request->supplier_id,
                 'location' => $request->location,
@@ -166,6 +294,7 @@ class InventoryController extends Controller
             'minimum_stock' => 'required|numeric|min:0',
             'maximum_stock' => 'nullable|numeric|min:0',
             'unit_price' => 'required|numeric|min:0',
+            'sell_price' => 'nullable|numeric|min:0',
             'supplier_name' => 'nullable|string|max:255',
             'supplier_id' => 'nullable|exists:suppliers,id',
             'location' => 'nullable|string|max:255',
@@ -196,6 +325,7 @@ class InventoryController extends Controller
                 'minimum_stock' => $request->minimum_stock,
                 'maximum_stock' => $request->maximum_stock,
                 'unit_price' => $request->unit_price,
+                'sell_price' => $request->sell_price,
                 'supplier_name' => $request->supplier_name,
                 'supplier_id' => $request->supplier_id,
                 'location' => $request->location,

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type DriverStatus = 'active' | 'inactive' | 'suspended';
 type LicenseType = 'light' | 'heavy' | 'special';

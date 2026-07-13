@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Designation {
   id: number;
@@ -14,7 +14,7 @@ interface Designation {
 
 export default function Designations() {
   const [token, setToken] = useState('');
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const [designations, setDesignations] = useState<Designation[]>([]);
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);

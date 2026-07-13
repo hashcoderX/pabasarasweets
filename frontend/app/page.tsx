@@ -3,7 +3,7 @@
 import { Suspense, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
-import axios from 'axios';
+import { createApiClient } from '@/lib/apiClient';
 
 function HomeContent() {
   const [email, setEmail] = useState('');
@@ -14,6 +14,7 @@ function HomeContent() {
   const [noticeMessage, setNoticeMessage] = useState('');
   const router = useRouter();
   const params = useSearchParams();
+  const apiClient = createApiClient();
 
   const showNotice = (title: string, message: string) => {
     setNoticeTitle(title);
@@ -31,7 +32,7 @@ function HomeContent() {
     e.preventDefault();
     setLoading(true);
     try {
-      const response = await axios.post('/api/login', {
+      const response = await apiClient.post('/login', {
         email,
         password,
       });
@@ -39,7 +40,7 @@ function HomeContent() {
       localStorage.setItem('token', nextToken);
 
       try {
-        const userRes = await axios.get('/api/user', {
+        const userRes = await apiClient.get('/user', {
           headers: { Authorization: `Bearer ${nextToken}` },
         });
 
@@ -139,6 +140,7 @@ function HomeContent() {
                   Email address
                 </label>
                 <input
+                  suppressHydrationWarning
                   id="email"
                   name="email"
                   type="email"
@@ -156,6 +158,7 @@ function HomeContent() {
                   Password
                 </label>
                 <input
+                  suppressHydrationWarning
                   id="password"
                   name="password"
                   type="password"
@@ -169,6 +172,7 @@ function HomeContent() {
               </div>
 
               <button
+                suppressHydrationWarning
                 type="submit"
                 disabled={loading}
                 className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-200/60 hover:from-emerald-700 hover:to-cyan-700 disabled:opacity-60 disabled:cursor-not-allowed transition"

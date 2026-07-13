@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Department {
   id: number;
@@ -14,7 +14,6 @@ interface Department {
 
 export default function Departments() {
   const [token, setToken] = useState('');
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
   const [departments, setDepartments] = useState<Department[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
@@ -77,7 +76,7 @@ export default function Departments() {
     if (!tokenToUse) return;
     
     try {
-      const response = await axios.get(`${API_URL}/api/hr/departments`, {
+      const response = await axios.get('/api/hr/departments', {
         headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
       });
       setDepartments(response.data.data || []);
@@ -111,6 +110,17 @@ export default function Departments() {
   };
 
   const extractApiErrorMessage = (error: any, fallback: string) => {
+    const validationErrors = error?.response?.data?.errors;
+    if (validationErrors && typeof validationErrors === 'object') {
+      const flattenedErrors = Object.values(validationErrors)
+        .flat()
+        .map((item) => String(item))
+        .filter(Boolean);
+      if (flattenedErrors.length > 0) {
+        return flattenedErrors.join(', ');
+      }
+    }
+
     const message =
       error?.response?.data?.message ||
       error?.response?.data?.error ||
@@ -130,20 +140,39 @@ export default function Departments() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedName = name.trim();
+    const normalizedDescription = description.trim();
+
+    if (!normalizedName) {
+      showModalMessage('Save Failed', 'Department name is required.', 'error');
+      return;
+    }
+
+    const hasDuplicateName = departments.some((department) => {
+      const isSameDepartment = editingDepartment && department.id === editingDepartment.id;
+      if (isSameDepartment) return false;
+      return String(department.name || '').trim().toLowerCase() === normalizedName.toLowerCase();
+    });
+
+    if (hasDuplicateName) {
+      showModalMessage('Save Failed', 'A department with this name already exists.', 'error');
+      return;
+    }
+
     setLoading(true);
 
     const departmentData = {
-      name,
-      description,
+      name: normalizedName,
+      description: normalizedDescription || null,
     };
 
     try {
       if (editingDepartment) {
-        await axios.put(`${API_URL}/api/hr/departments/${editingDepartment.id}`, departmentData, {
+        await axios.put(`/api/hr/departments/${editingDepartment.id}`, departmentData, {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
         });
       } else {
-        await axios.post(`${API_URL}/api/hr/departments`, departmentData, {
+        await axios.post('/api/hr/departments', departmentData, {
           headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
         });
       }
@@ -179,7 +208,7 @@ export default function Departments() {
     if (!departmentToDelete) return;
     setDeletingDepartment(true);
     try {
-      await axios.delete(`${API_URL}/api/hr/departments/${departmentToDelete.id}`, {
+      await axios.delete(`/api/hr/departments/${departmentToDelete.id}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
       });
       setShowDeleteModal(false);

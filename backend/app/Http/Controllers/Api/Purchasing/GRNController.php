@@ -52,6 +52,7 @@ class GRNController extends Controller
             'items.*.quality_status' => 'nullable|in:pending,accepted,rejected,partial',
         ]);
 
+        /** @var PurchaseOrder $purchaseOrder */
         $purchaseOrder = PurchaseOrder::with('items')->findOrFail($validated['purchase_order_id']);
         $allowedPoItemIds = $purchaseOrder->items->pluck('id')->all();
         foreach ($validated['items'] as $line) {
@@ -142,6 +143,7 @@ class GRNController extends Controller
 
             $pendingAmount = $this->calculatePendingAmount((float) $amounts['net_amount'], (float) $normalizedPaidAmount);
             $this->syncSupplierOutstandingByPurchaseOrder((int) $validated['purchase_order_id'], 0, $pendingAmount);
+            $this->syncPurchaseOrderStatusAndTotals((int) $validated['purchase_order_id']);
 
             return $grn;
         });
@@ -189,6 +191,7 @@ class GRNController extends Controller
                 $purchaseOrderId = (int) $validated['purchase_order_id'];
             }
 
+            /** @var PurchaseOrder $purchaseOrder */
             $purchaseOrder = PurchaseOrder::with('items')->findOrFail($purchaseOrderId);
             $allowedPoItemIds = $purchaseOrder->items->pluck('id')->all();
             foreach ($validated['items'] as $line) {
@@ -314,6 +317,8 @@ class GRNController extends Controller
                     $this->applyReceiptCommercials($purchaseOrderItem->inventoryItem, $purchaseOrderItem, $newLine);
                 }
             }
+
+            $this->syncPurchaseOrderStatusAndTotals((int) $grn->purchase_order_id);
 
             $grn = $grn->fresh();
         });
@@ -519,6 +524,7 @@ class GRNController extends Controller
             }
 
             $this->syncSupplierOutstandingByPurchaseOrder((int) $grn->purchase_order_id, $pendingAmount, 0);
+            $this->syncPurchaseOrderStatusAndTotals((int) $grn->purchase_order_id);
 
             $grn->delete();
         });
@@ -603,5 +609,77 @@ class GRNController extends Controller
         $currentOutstanding = (float) ($supplier->outstanding_balance ?? 0);
         $supplier->outstanding_balance = max(0, round($currentOutstanding + $delta, 2));
         $supplier->save();
+    }
+
+    private function syncPurchaseOrderStatusAndTotals(int $purchaseOrderId): void
+    {
+        $purchaseOrder = PurchaseOrder::with('items')->find($purchaseOrderId);
+        if (!$purchaseOrder) {
+            return;
+        }
+
+        $allItemsCompleted = true;
+        $hasAnyReceived = false;
+        $calculatedTotalAmount = 0.0;
+
+        foreach ($purchaseOrder->items as $poItem) {
+            $orderedQty = (float) ($poItem->quantity ?? 0);
+
+            $actualReceivedQty = (float) GoodsReceivedNote::query()
+                ->join('grn_items', 'goods_received_notes.id', '=', 'grn_items.grn_id')
+                ->where('goods_received_notes.purchase_order_id', $purchaseOrderId)
+                ->where('grn_items.purchase_order_item_id', $poItem->id)
+                ->sum('grn_items.accepted_quantity');
+
+            $actualReceivedQty = round(max($actualReceivedQty, 0), 2);
+            if ((float) ($poItem->received_quantity ?? 0) !== $actualReceivedQty) {
+                $poItem->received_quantity = $actualReceivedQty;
+            }
+
+            if ($actualReceivedQty > 0) {
+                $hasAnyReceived = true;
+            }
+            if ($orderedQty > 0 && $actualReceivedQty < $orderedQty) {
+                $allItemsCompleted = false;
+            }
+
+            $latestGrnPrice = (float) DB::table('grn_items')
+                ->where('purchase_order_item_id', $poItem->id)
+                ->whereNotNull('purchase_price')
+                ->where('purchase_price', '>', 0)
+                ->orderByDesc('id')
+                ->value('purchase_price');
+
+            $effectiveUnitPrice = (float) ($poItem->unit_price ?? 0);
+            if ($effectiveUnitPrice <= 0 && $latestGrnPrice > 0) {
+                $effectiveUnitPrice = $latestGrnPrice;
+                $poItem->unit_price = $effectiveUnitPrice;
+            }
+
+            $lineTotal = round(max($orderedQty, 0) * max($effectiveUnitPrice, 0), 2);
+            if ((float) ($poItem->total_price ?? 0) !== $lineTotal) {
+                $poItem->total_price = $lineTotal;
+            }
+
+            if ($poItem->isDirty()) {
+                $poItem->save();
+            }
+
+            $calculatedTotalAmount += $lineTotal;
+        }
+
+        $calculatedTotalAmount = round(max($calculatedTotalAmount, 0), 2);
+
+        $nextStatus = (string) ($purchaseOrder->status ?? 'pending');
+        if ($purchaseOrder->items->isNotEmpty() && $allItemsCompleted) {
+            $nextStatus = 'received';
+        } elseif ($hasAnyReceived && in_array($nextStatus, ['pending', 'received'], true)) {
+            $nextStatus = 'approved';
+        }
+
+        $purchaseOrder->update([
+            'status' => $nextStatus,
+            'total_amount' => $calculatedTotalAmount,
+        ]);
     }
 }

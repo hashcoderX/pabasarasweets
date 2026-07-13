@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import { createApiClient } from '@/lib/apiClient';
 
 type DashboardModule = {
   id: string;
@@ -23,6 +23,7 @@ export default function Dashboard() {
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [accessReady, setAccessReady] = useState(false);
   const router = useRouter();
+  const apiClient = createApiClient();
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -43,7 +44,7 @@ export default function Dashboard() {
 
     const fetchUserAccess = async () => {
       try {
-        const userRes = await axios.get('/api/user', {
+        const userRes = await apiClient.get('/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import axios from 'axios';
+import axios from '@/lib/http';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -87,7 +87,7 @@ export default function VehicleLoadingReportPage() {
   const [companyBrand, setCompanyBrand] = useState<CompanyBrand | null>(null);
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');

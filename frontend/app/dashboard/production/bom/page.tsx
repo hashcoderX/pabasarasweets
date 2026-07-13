@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type Product = {
   id: number;
@@ -16,6 +16,14 @@ type Product = {
 
 type InventoryItem = {
   id: number;
+  inventory_item_id?: number;
+  grn_item_id?: number | null;
+  batch_no?: string | null;
+  batch_purchase_price?: number | null;
+  batch_accepted_quantity?: number | null;
+  batch_received_quantity?: number | null;
+  batch_received_date?: string | null;
+  batch_quality_status?: string | null;
   name: string;
   code: string;
   unit: string;
@@ -23,10 +31,26 @@ type InventoryItem = {
   type: string;
 };
 
+type GrnSummary = {
+  id: number;
+  grn_number?: string;
+  received_date?: string;
+};
+
+type GrnItemSummary = {
+  id: number;
+  accepted_quantity?: number;
+  purchase_price?: number;
+  grn?: GrnSummary;
+};
+
 type RawMaterial = {
   id: number;
   inventory_item_id: number;
+  grn_item_id?: number | null;
   status: string;
+  grn_item?: GrnItemSummary;
+  grnItem?: GrnItemSummary;
   inventory_item?: InventoryItem;
   inventoryItem?: InventoryItem;
 };
@@ -131,9 +155,6 @@ export default function BomPage() {
   const [newProductBatchSize, setNewProductBatchSize] = useState('1');
   const [newProductDescription, setNewProductDescription] = useState('');
 
-  const [selectedInventoryMaterialId, setSelectedInventoryMaterialId] = useState<number>(0);
-  const [step2Message, setStep2Message] = useState('');
-  const [step2Error, setStep2Error] = useState('');
 
   const [bomProductId, setBomProductId] = useState<number>(0);
   const [bomVersion, setBomVersion] = useState('v1');
@@ -149,10 +170,10 @@ export default function BomPage() {
   const [startingProduction, setStartingProduction] = useState(false);
   const [activeStep, setActiveStep] = useState<StepKey>('step1');
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const inputClass =
-    'w-full rounded-xl border border-emerald-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 focus:outline-none';
+    'w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -177,7 +198,7 @@ export default function BomPage() {
         axios.get(`${API_URL}/api/production/boms`, { headers: authHeaders(authToken) }),
         axios.get(`${API_URL}/api/stock/inventory`, {
           headers: authHeaders(authToken),
-          params: { type: 'raw_material', per_page: 500 },
+          params: { type: 'raw_material', per_page: 500, batch_view: true },
         }),
       ]);
 
@@ -204,10 +225,41 @@ export default function BomPage() {
   }, [token]);
 
   const selectedBom = useMemo(() => boms.find((bom) => bom.id === selectedBomId) || null, [boms, selectedBomId]);
+  const selectedProductForBom = useMemo(
+    () => products.find((product) => product.id === bomProductId) || null,
+    [products, bomProductId]
+  );
   const selectedBomItems = useMemo(() => {
     const items = (selectedBom as any)?.items;
     return Array.isArray(items) ? items : [];
   }, [selectedBom]);
+  const bomSelectableMaterials = useMemo(() => {
+    const inventoryIdsWithBatch = new Set(
+      rawMaterials
+        .filter((material) => Boolean(material.grn_item_id))
+        .map((material) => Number(material.inventory_item_id))
+    );
+
+    return rawMaterials.filter((material) => {
+      const inv = material.inventoryItem || material.inventory_item;
+      const grnItem = material.grnItem || material.grn_item;
+      const availableQty = material.grn_item_id
+        ? Number(grnItem?.accepted_quantity || 0)
+        : Number(inv?.current_stock || 0);
+
+      if (availableQty <= 0) return false;
+      if (material.grn_item_id) return true;
+      return !inventoryIdsWithBatch.has(Number(material.inventory_item_id));
+    });
+  }, [rawMaterials]);
+
+  useEffect(() => {
+    if (!selectedProductForBom) return;
+    const standardBatchSize = Number(selectedProductForBom.standard_batch_size || 0);
+    if (standardBatchSize > 0) {
+      setBomBatchSize(String(standardBatchSize));
+    }
+  }, [selectedProductForBom]);
   const hasShortage = useMemo(
     () => Boolean(calculation?.requirements?.some((row) => Number(row.shortage) > 0)),
     [calculation]
@@ -215,7 +267,7 @@ export default function BomPage() {
 
   const stepTabs: Array<{ key: StepKey; label: string }> = [
     { key: 'step1', label: 'Step 1: Product' },
-    { key: 'step2', label: 'Step 2: Raw Materials' },
+    { key: 'step2', label: 'Step 2: Raw Material Stock Review' },
     { key: 'step3', label: 'Step 3: BOM Recipe' },
     { key: 'step4', label: 'Step 4: Review BOM' },
     { key: 'step5', label: 'Step 5: Calculator' },
@@ -284,41 +336,6 @@ export default function BomPage() {
     }
   };
 
-  const handleAddRawMaterial = async () => {
-    if (!token) return;
-    if (!selectedInventoryMaterialId) {
-      setErrorMessage('Please select a raw material from inventory.');
-      setStep2Error('Please select a raw material from inventory.');
-      setStep2Message('');
-      return;
-    }
-
-    try {
-      setSaving(true);
-      setErrorMessage('');
-      setStep2Error('');
-      setStep2Message('');
-      await axios.post(
-        `${API_URL}/api/production/raw-materials`,
-        { inventory_item_id: selectedInventoryMaterialId },
-        { headers: authHeaders(token) }
-      );
-      setSelectedInventoryMaterialId(0);
-      setMessage('Raw material added for BOM usage.');
-      setErrorMessage('');
-      setStep2Message('Raw material added successfully.');
-      setStep2Error('');
-      await loadData(token);
-    } catch (error: any) {
-      const apiMessage = error?.response?.data?.message || 'Failed to add raw material.';
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      setErrorMessage(firstError?.[0] || apiMessage);
-      setStep2Error(firstError?.[0] || apiMessage);
-      setStep2Message('');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const handleCreateBom = async () => {
     if (!token) return;
@@ -445,37 +462,38 @@ export default function BomPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.14),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 relative overflow-hidden">
-      <div className="absolute inset-0 opacity-30 pointer-events-none">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-cyan-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
-      </div>
-
-      <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">Formula Management - BOM</h1>
-              <p className="text-xs text-gray-600">Create products, define ingredients, and run batch calculations</p>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.14),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)]">
+      <nav className="relative z-10 border-b border-orange-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="overflow-hidden rounded-3xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
+            <div className="border-b border-orange-100 bg-gradient-to-r from-slate-900 via-orange-900 to-amber-800 px-6 py-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h1 className="text-2xl font-semibold tracking-tight text-white">Formula Management - BOM</h1>
+                  <p className="mt-1 text-sm text-orange-100/90">Create products, define ingredients, and run batch calculations.</p>
+                </div>
+                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] text-white/90">
+                  Production Workspace
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2 bg-gradient-to-r from-orange-50/90 via-amber-50/70 to-orange-50 px-4 py-3">
               <Link
                 href="/dashboard/production"
-                className="px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm font-medium hover:bg-emerald-100"
+                className="rounded-full border border-orange-200 bg-white px-4 py-2 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
               >
                 Back to Production
               </Link>
               <button
                 onClick={handleLogout}
-                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-5 py-2 rounded-full text-sm font-medium"
+                className="rounded-full border border-red-200 bg-red-50 px-5 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
               >
                 Logout
               </button>
@@ -485,22 +503,29 @@ export default function BomPage() {
       </nav>
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-xl border border-sky-100 bg-sky-50/80 px-4 py-3 text-sm text-sky-800 shadow-sm">
+        <section className="rounded-2xl border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-800 shadow-sm">
           <p className="font-semibold">Recommended workflow</p>
-          <p className="mt-1">1) Create product, 2) Add raw materials, 3) Create BOM recipe, 4) Select BOM and calculate, 5) Start production.</p>
+          <p className="mt-1 text-blue-900/90">Follow these steps in order to avoid wrong recipes, wrong stock checks, and incorrect production deductions.</p>
+          <ol className="mt-2 space-y-1.5 text-xs text-blue-900/90">
+            <li><span className="font-semibold">Step 1 - Product:</span> Create the finished product and define its standard batch size.</li>
+            <li><span className="font-semibold">Step 2 - Raw Material Stock Review:</span> Verify available raw-material batches and confirm what is BOM-ready.</li>
+            <li><span className="font-semibold">Step 3 - BOM Recipe:</span> Build the recipe using correct materials/batches with required quantities per batch.</li>
+            <li><span className="font-semibold">Step 4 - Review BOM:</span> Re-check ingredients and quantities before running production calculations.</li>
+            <li><span className="font-semibold">Step 5 - Calculator:</span> Calculate requirements, confirm no shortages, then start production.</li>
+          </ol>
         </section>
 
-        <section className="rounded-xl border border-white/70 bg-white/90 px-3 py-3 shadow-sm">
+        <section className="rounded-2xl border border-orange-100 bg-white px-4 py-3 shadow-[0_16px_55px_-35px_rgba(194,65,12,0.45)]">
           <div className="flex flex-wrap gap-2">
             {stepTabs.map((tab) => (
               <button
                 key={tab.key}
                 type="button"
                 onClick={() => setActiveStep(tab.key)}
-                className={`rounded-lg px-3 py-2 text-xs sm:text-sm font-medium transition ${
+                className={`rounded-full px-3.5 py-2 text-xs sm:text-sm font-semibold transition ${
                   activeStep === tab.key
-                    ? 'bg-emerald-600 text-white shadow'
-                    : 'border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                    ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-sm'
+                    : 'border border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100'
                 }`}
               >
                 {tab.label}
@@ -510,33 +535,33 @@ export default function BomPage() {
         </section>
 
         {message && (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>
         )}
         {errorMessage && (
-          <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>
         )}
 
         <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Finished Products</div>
-            <div className="text-2xl font-bold text-gray-900">{products.length}</div>
+          <div className="rounded-2xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.16em] text-orange-600">Finished Products</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{products.length}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Raw Materials</div>
-            <div className="text-2xl font-bold text-gray-900">{rawMaterials.length}</div>
+          <div className="rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.16em] text-blue-600">Raw Materials</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{rawMaterials.length}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">BOM Recipes</div>
-            <div className="text-2xl font-bold text-gray-900">{boms.length}</div>
+          <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.16em] text-emerald-600">BOM Recipes</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{boms.length}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Inventory Ingredients</div>
-            <div className="text-2xl font-bold text-gray-900">{inventoryRawItems.length}</div>
+          <div className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.16em] text-violet-600">Inventory Ingredients</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{inventoryRawItems.length}</div>
           </div>
         </section>
 
         <div className={`grid grid-cols-1 gap-6 ${activeStep === 'step1' || activeStep === 'step2' ? '' : 'hidden'}`}>
-          <section className={`rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 ${activeStep === 'step1' ? '' : 'hidden'}`}>
+          <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step1' ? '' : 'hidden'}`}>
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 1: Create Finished Product</h2>
             <p className="text-xs text-gray-500 mb-4">Define the product you manufacture before mapping BOM ingredients.</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -594,75 +619,97 @@ export default function BomPage() {
             </button>
           </section>
 
-          <section className={`rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 ${activeStep === 'step2' ? '' : 'hidden'}`}>
-            <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 2: Add Raw Materials</h2>
-            <p className="text-xs text-gray-500 mb-4">Choose inventory items you want available for BOM lines.</p>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
-              <div className="md:col-span-2">
-                <label className="block text-xs font-medium text-gray-600 mb-1">Select From Inventory (Raw Materials)</label>
-                <select
-                  value={selectedInventoryMaterialId}
-                  onChange={(e) => setSelectedInventoryMaterialId(Number(e.target.value))}
-                  className={inputClass}
-                >
-                  <option value={0}>Choose inventory material</option>
-                  {inventoryRawItems.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.code} - {item.name} ({Number(item.current_stock || 0).toFixed(2)} {item.unit})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={handleAddRawMaterial}
-                className="h-[42px] px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 text-white rounded-md text-sm font-medium hover:from-cyan-700 hover:to-blue-700 disabled:opacity-50"
-              >
-                Add Ingredient
-              </button>
-            </div>
+          <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step2' ? '' : 'hidden'}`}>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 2: Raw Material Stock Review</h2>
+            <p className="text-xs text-gray-500 mb-4">Two separate views are shown below to avoid confusion between available stock and BOM-ready ingredients.</p>
 
-            {step2Message && (
-              <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
-                {step2Message}
-              </div>
-            )}
-            {step2Error && (
-              <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-                {step2Error}
-              </div>
-            )}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <section className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-blue-900">A. Available Inventory Batches</h3>
+                  <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-100 px-2.5 py-0.5 text-[11px] font-semibold text-blue-700">
+                    Source Stock
+                  </span>
+                </div>
+                <p className="mb-3 text-xs text-blue-800/80">Use this as reference only. It shows all raw-material batches and quantities currently in inventory.</p>
+                <div className="max-h-64 overflow-auto rounded-xl border border-blue-200 bg-white">
+                  <table className="min-w-full divide-y divide-blue-100">
+                    <thead className="bg-blue-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-blue-700">Material</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-blue-700">Batch</th>
+                        <th className="px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-blue-700">Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-blue-50 bg-white">
+                      {inventoryRawItems.length === 0 ? (
+                        <tr><td colSpan={3} className="px-3 py-4 text-center text-sm text-gray-500">No inventory batches found.</td></tr>
+                      ) : (
+                        inventoryRawItems.map((item) => {
+                          const batchLabel = item.batch_no || (item.grn_item_id ? `GRN Item #${item.grn_item_id}` : 'General');
+                          const qty = Number(item.batch_accepted_quantity ?? item.batch_received_quantity ?? item.current_stock ?? 0).toFixed(2);
+                          return (
+                            <tr key={`${item.inventory_item_id || item.id}-${item.grn_item_id || 'general'}`}>
+                              <td className="px-3 py-2 text-sm text-gray-800">{item.code} - {item.name}</td>
+                              <td className="px-3 py-2 text-sm text-gray-700">{batchLabel}</td>
+                              <td className="px-3 py-2 text-right text-sm text-gray-700">{qty} {item.unit}</td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
 
-            <div className="mt-4 max-h-48 overflow-auto rounded-md border border-gray-200">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
-                    <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase">Stock</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-100">
-                  {rawMaterials.length === 0 ? (
-                    <tr><td colSpan={2} className="px-3 py-4 text-center text-sm text-gray-500">No raw materials mapped yet.</td></tr>
-                  ) : (
-                    rawMaterials.map((mat) => {
-                      const inv = mat.inventoryItem || mat.inventory_item;
-                      return (
-                        <tr key={mat.id}>
-                          <td className="px-3 py-2 text-sm text-gray-800">{inv?.code || '-'} - {inv?.name || '-'}</td>
-                          <td className="px-3 py-2 text-sm text-right text-gray-700">{Number(inv?.current_stock || 0).toFixed(2)} {inv?.unit || ''}</td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
+              <section className="rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-emerald-900">B. BOM-Ready Material List</h3>
+                  <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">
+                    Used in Step 3
+                  </span>
+                </div>
+                <p className="mb-3 text-xs text-emerald-800/80">These are the materials available in the Step 3 recipe dropdown.</p>
+                <div className="max-h-64 overflow-auto rounded-xl border border-emerald-200 bg-white">
+                  <table className="min-w-full divide-y divide-emerald-100">
+                    <thead className="bg-emerald-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-emerald-700">Material</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-emerald-700">Batch</th>
+                        <th className="px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-emerald-700">Stock</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-emerald-50 bg-white">
+                      {bomSelectableMaterials.length === 0 ? (
+                        <tr><td colSpan={3} className="px-3 py-4 text-center text-sm text-gray-500">No raw materials mapped yet.</td></tr>
+                      ) : (
+                        bomSelectableMaterials.map((mat) => {
+                          const inv = mat.inventoryItem || mat.inventory_item;
+                          const grnItem = mat.grnItem || mat.grn_item;
+                          const batchLabel = grnItem?.grn?.grn_number
+                            ? `${grnItem.grn.grn_number}-I${grnItem.id}`
+                            : (mat.grn_item_id ? `GRN Item #${mat.grn_item_id}` : 'General');
+                          const batchQty = Number(grnItem?.accepted_quantity || 0).toFixed(2);
+                          return (
+                            <tr key={mat.id}>
+                              <td className="px-3 py-2 text-sm text-gray-800">{inv?.code || '-'} - {inv?.name || '-'}</td>
+                              <td className="px-3 py-2 text-sm text-gray-700">{batchLabel}</td>
+                              <td className="px-3 py-2 text-right text-sm text-gray-700">
+                                {mat.grn_item_id ? `${batchQty} ${inv?.unit || ''}` : `${Number(inv?.current_stock || 0).toFixed(2)} ${inv?.unit || ''}`}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
             </div>
           </section>
         </div>
 
-        <section className={`rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 ${activeStep === 'step3' ? '' : 'hidden'}`}>
+        <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step3' ? '' : 'hidden'}`}>
           <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 3: Create BOM Recipe</h2>
           <p className="text-xs text-gray-500 mb-4">Set recipe version, base batch size, and ingredient quantities per batch.</p>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
@@ -698,18 +745,25 @@ export default function BomPage() {
                     value={line.material_id}
                     onChange={(e) => {
                       const materialId = Number(e.target.value);
-                      const material = rawMaterials.find((m) => m.id === materialId);
+                      const material = bomSelectableMaterials.find((m) => m.id === materialId);
                       const unit = material?.inventoryItem?.unit || material?.inventory_item?.unit || line.unit;
                       updateBomLine(idx, { material_id: materialId, unit });
                     }}
                     className={inputClass}
                   >
                     <option value={0}>Select ingredient</option>
-                    {rawMaterials.map((mat) => {
+                    {bomSelectableMaterials.map((mat) => {
                       const inv = mat.inventoryItem || mat.inventory_item;
+                      const grnItem = mat.grnItem || mat.grn_item;
+                      const batchLabel = grnItem?.grn?.grn_number
+                        ? ` [${grnItem.grn.grn_number}-I${grnItem.id}]`
+                        : (mat.grn_item_id ? ` [GRN Item #${mat.grn_item_id}]` : '');
+                      const availableQty = mat.grn_item_id
+                        ? Number(grnItem?.accepted_quantity || 0).toFixed(2)
+                        : Number(inv?.current_stock || 0).toFixed(2);
                       return (
                         <option key={mat.id} value={mat.id}>
-                          {inv?.code || '-'} - {inv?.name || '-'}
+                          {inv?.code || '-'} - {inv?.name || '-'}{batchLabel} | Qty: {availableQty} {inv?.unit || ''}
                         </option>
                       );
                     })}
@@ -748,7 +802,7 @@ export default function BomPage() {
         </section>
 
         <div className={`grid grid-cols-1 gap-6 ${activeStep === 'step4' || activeStep === 'step5' ? '' : 'hidden'}`}>
-          <section className={`rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 ${activeStep === 'step4' ? '' : 'hidden'}`}>
+          <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step4' ? '' : 'hidden'}`}>
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 4: Select and Review BOM</h2>
             <p className="text-xs text-gray-500 mb-4">Choose the recipe you want to calculate and run for production.</p>
             <label className="block text-xs font-medium text-gray-600 mb-1">BOM Recipe</label>
@@ -792,7 +846,7 @@ export default function BomPage() {
             </div>
           </section>
 
-          <section className={`rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 ${activeStep === 'step5' ? '' : 'hidden'}`}>
+          <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step5' ? '' : 'hidden'}`}>
             <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 5: Batch Production Calculator</h2>
             <p className="text-xs text-gray-500 mb-4">Calculate required materials first, then start production only when shortages are zero.</p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type SummaryRow = {
   outlet_id: number;
@@ -37,7 +37,7 @@ export default function OutletSalesTrackingPage() {
   const [message, setMessage] = useState('');
   const router = useRouter();
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');

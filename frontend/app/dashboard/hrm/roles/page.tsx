@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Role {
   id: number;
@@ -317,7 +317,7 @@ const inferPermissionSection = (permission: Permission): string => {
 };
 export default function Roles() {
   const [token, setToken] = useState('');
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [userRoles, setUserRoles] = useState<UserRole[]>([]);

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { isAxiosError } from 'axios';
+import { isAxiosError } from '@/lib/http';
 import { createApiClient } from '../../../lib/apiClient';
 
 interface RouteCustomer {

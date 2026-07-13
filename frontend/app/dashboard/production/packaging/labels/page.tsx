@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type PackagingRow = {
   id: number;
@@ -30,7 +30,7 @@ export default function PackagingLabelsPage() {
   const [search, setSearch] = useState('');
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
 

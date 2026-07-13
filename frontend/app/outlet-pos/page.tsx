@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type StockLine = {
   inventory_item_id: number;
@@ -59,7 +59,7 @@ function OutletPosDashboardContent() {
 
   const router = useRouter();
   const params = useSearchParams();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';

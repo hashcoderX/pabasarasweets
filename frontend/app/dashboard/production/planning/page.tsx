@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type Product = {
   id: number;
@@ -79,6 +79,7 @@ export default function ProductionPlanningPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [applyingFilters, setApplyingFilters] = useState(false);
   const [creatingOrderPlanId, setCreatingOrderPlanId] = useState<number | null>(null);
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -113,9 +114,9 @@ export default function ProductionPlanningPage() {
   const [planNotes, setPlanNotes] = useState('');
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const inputClass =
-    'w-full rounded-xl border border-cyan-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 focus:outline-none';
+    'w-full rounded-xl border border-emerald-100 bg-gradient-to-b from-white to-emerald-50/40 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 focus:outline-none';
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
 
@@ -138,13 +139,20 @@ export default function ProductionPlanningPage() {
     setBoms(parseList(bomsRes.data));
   };
 
-  const loadPlans = async (authToken: string) => {
+  const loadPlans = async (
+    authToken: string,
+    filters?: { from_date?: string; to_date?: string; status?: string }
+  ) => {
+    const effectiveFromDate = filters?.from_date ?? fromDate;
+    const effectiveToDate = filters?.to_date ?? toDate;
+    const effectiveStatus = filters?.status ?? statusFilter;
+
     const res = await axios.get(`${API_URL}/api/production/plans`, {
       headers: authHeaders(authToken),
       params: {
-        from_date: fromDate || undefined,
-        to_date: toDate || undefined,
-        status: statusFilter || undefined,
+        from_date: effectiveFromDate || undefined,
+        to_date: effectiveToDate || undefined,
+        status: effectiveStatus || undefined,
         per_page: 200,
       },
     });
@@ -187,10 +195,35 @@ export default function ProductionPlanningPage() {
     return boms.filter((bom) => Number(bom.product_id) === Number(planProductId));
   }, [boms, planProductId]);
 
+  const latestPlanForSelectedProduct = useMemo(() => {
+    if (!planProductId) return null;
+
+    const productPlans = plans.filter((plan) => Number(plan.product_id) === Number(planProductId));
+    if (productPlans.length === 0) return null;
+
+    return productPlans.reduce((latest, current) => {
+      const latestDate = new Date(String(latest.plan_date)).getTime();
+      const currentDate = new Date(String(current.plan_date)).getTime();
+
+      if (currentDate > latestDate) return current;
+      if (currentDate === latestDate && Number(current.id) > Number(latest.id)) return current;
+      return latest;
+    });
+  }, [plans, planProductId]);
+
   const todayPlans = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
     return plans.filter((plan) => String(plan.plan_date).slice(0, 10) === today);
   }, [plans]);
+
+  useEffect(() => {
+    if (!latestPlanForSelectedProduct) return;
+
+    const latestTarget = Number(latestPlanForSelectedProduct.target_quantity || 0);
+    if (latestTarget > 0) {
+      setPlanTargetQuantity(String(latestTarget));
+    }
+  }, [latestPlanForSelectedProduct]);
 
   const createPlan = async () => {
     if (!token) return;
@@ -340,12 +373,26 @@ export default function ProductionPlanningPage() {
 
   const applyFilters = async () => {
     if (!token) return;
+
+    if (fromDate && toDate && fromDate > toDate) {
+      setErrorMessage('From Date cannot be later than To Date.');
+      return;
+    }
+
     try {
+      setApplyingFilters(true);
       setMessage('');
       setErrorMessage('');
-      await loadPlans(token);
+      await loadPlans(token, {
+        from_date: fromDate,
+        to_date: toDate,
+        status: statusFilter,
+      });
+      setMessage('Filters applied.');
     } catch (error: any) {
       setErrorMessage(error?.response?.data?.message || 'Failed to apply filters.');
+    } finally {
+      setApplyingFilters(false);
     }
   };
 
@@ -373,37 +420,38 @@ export default function ProductionPlanningPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-blue-50 to-indigo-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-600"></div>
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.14),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.12),_transparent_28%),linear-gradient(180deg,_#f5fffb_0%,_#ecfeff_46%,_#f0fdf4_100%)] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-blue-50 to-indigo-50 relative overflow-hidden">
-      <div className="absolute inset-0 opacity-30 pointer-events-none">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-cyan-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-blue-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-indigo-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
-      </div>
-
-      <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-cyan-600 to-blue-600 bg-clip-text text-transparent">Production Planning</h1>
-              <p className="text-xs text-gray-600">Schedule production, set targets, and create production orders</p>
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.14),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.12),_transparent_28%),linear-gradient(180deg,_#f5fffb_0%,_#ecfeff_46%,_#f0fdf4_100%)]">
+      <nav className="relative z-10 border-b border-emerald-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="overflow-hidden rounded-3xl border border-emerald-100 bg-white shadow-[0_18px_65px_-35px_rgba(5,150,105,0.45)]">
+            <div className="border-b border-emerald-100 bg-gradient-to-r from-slate-900 via-teal-900 to-cyan-900 px-6 py-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h1 className="text-2xl font-semibold tracking-tight text-white">Production Planning</h1>
+                  <p className="mt-1 text-sm text-cyan-100/90">Schedule production, set targets, and create production orders.</p>
+                </div>
+                <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] text-white/90">
+                  Planning Hub
+                </span>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2 bg-gradient-to-r from-emerald-50/90 via-cyan-50/70 to-teal-50 px-4 py-3">
               <Link
                 href="/dashboard/production"
-                className="px-4 py-2 border border-cyan-200 bg-cyan-50 text-cyan-700 rounded-md text-sm font-medium hover:bg-cyan-100"
+                className="rounded-full border border-emerald-200 bg-white px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
               >
                 Back to Production
               </Link>
               <button
                 onClick={handleLogout}
-                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-5 py-2 rounded-full text-sm font-medium"
+                className="rounded-full border border-red-200 bg-red-50 px-5 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
               >
                 Logout
               </button>
@@ -413,34 +461,34 @@ export default function ProductionPlanningPage() {
       </nav>
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-xl border border-sky-100 bg-sky-50/80 px-4 py-3 text-sm text-sky-800 shadow-sm">
+        <section className="rounded-2xl border border-teal-200 bg-teal-50/75 px-4 py-3 text-sm text-teal-900 shadow-sm">
           <p className="font-semibold">Recommended flow</p>
           <p className="mt-1">1) Filter and review existing plans, 2) Create a new production plan, 3) Verify today&apos;s queue, 4) Create production order when ready.</p>
         </section>
 
-        {message && <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-700">{message}</div>}
-        {errorMessage && <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>}
+        {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
+        {errorMessage && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>}
 
         <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Total Plans</div>
-            <div className="text-2xl font-bold text-gray-900">{summary.total_plans}</div>
+          <div className="rounded-2xl border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.15em] text-cyan-600">Total Plans</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{summary.total_plans}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Today Plans</div>
-            <div className="text-2xl font-bold text-gray-900">{summary.today_plans}</div>
+          <div className="rounded-2xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.15em] text-emerald-600">Today Plans</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{summary.today_plans}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Total Target Qty</div>
-            <div className="text-2xl font-bold text-gray-900">{Number(summary.total_target_quantity || 0).toFixed(3)}</div>
+          <div className="rounded-2xl border border-teal-100 bg-gradient-to-br from-teal-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.15em] text-teal-600">Total Target Qty</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{Number(summary.total_target_quantity || 0).toFixed(3)}</div>
           </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Scheduled/Order Created</div>
-            <div className="text-2xl font-bold text-gray-900">{summary.scheduled_or_order_created}</div>
+          <div className="rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-white p-4 shadow-sm">
+            <div className="text-xs uppercase tracking-[0.15em] text-indigo-600">Scheduled/Order Created</div>
+            <div className="mt-2 text-2xl font-bold text-gray-900">{summary.scheduled_or_order_created}</div>
           </div>
         </section>
 
-        <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
+        <section className="rounded-3xl border border-emerald-100 bg-white shadow-sm p-5">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Production Schedule Filters</h2>
           <p className="text-xs text-gray-500 mb-4">Use date range and status together to quickly find missing or pending plans.</p>
           <div className="mb-4 flex flex-wrap gap-2">
@@ -449,7 +497,7 @@ export default function ProductionPlanningPage() {
               onClick={() => applyQuickFilter('all')}
               className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
                 quickFilter === 'all'
-                  ? 'border-cyan-300 bg-cyan-100 text-cyan-800'
+                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
                   : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
@@ -460,7 +508,7 @@ export default function ProductionPlanningPage() {
               onClick={() => applyQuickFilter('today')}
               className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
                 quickFilter === 'today'
-                  ? 'border-cyan-300 bg-cyan-100 text-cyan-800'
+                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
                   : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
@@ -471,7 +519,7 @@ export default function ProductionPlanningPage() {
               onClick={() => applyQuickFilter('this_week')}
               className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
                 quickFilter === 'this_week'
-                  ? 'border-cyan-300 bg-cyan-100 text-cyan-800'
+                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
                   : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
@@ -482,7 +530,7 @@ export default function ProductionPlanningPage() {
               onClick={() => applyQuickFilter('pending_orders')}
               className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
                 quickFilter === 'pending_orders'
-                  ? 'border-cyan-300 bg-cyan-100 text-cyan-800'
+                  ? 'border-emerald-300 bg-emerald-100 text-emerald-800'
                   : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
               }`}
             >
@@ -512,10 +560,11 @@ export default function ProductionPlanningPage() {
             </div>
             <button
               type="button"
+              disabled={applyingFilters}
               onClick={applyFilters}
-              className="h-[42px] px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md text-sm font-medium hover:from-blue-700 hover:to-indigo-700"
+              className="h-[42px] px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 text-white text-sm font-medium hover:from-emerald-700 hover:to-cyan-700 disabled:opacity-50"
             >
-              Apply
+              {applyingFilters ? 'Applying...' : 'Apply'}
             </button>
             <button
               type="button"
@@ -533,7 +582,7 @@ export default function ProductionPlanningPage() {
                   setErrorMessage(error?.response?.data?.message || 'Failed to clear filters.');
                 }
               }}
-              className="h-[42px] px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50"
+              className="h-[42px] px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-xl text-sm font-medium hover:bg-gray-50"
             >
               Clear
             </button>
@@ -541,9 +590,9 @@ export default function ProductionPlanningPage() {
         </section>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-          <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
+          <section className="rounded-3xl border border-emerald-100 bg-white shadow-sm p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Create Daily Production Plan</h2>
-            <div className="mb-4 rounded-md border border-cyan-100 bg-cyan-50/70 px-3 py-2 text-xs text-cyan-800">
+            <div className="mb-4 rounded-xl border border-emerald-100 bg-emerald-50/80 px-3 py-2 text-xs text-emerald-800">
               Select product first, then optionally pick BOM version. Keep target and batches greater than zero.
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -584,6 +633,9 @@ export default function ProductionPlanningPage() {
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Batch Count</label>
                 <input type="number" min="0" step="0.01" value={planBatchCount} onChange={(e) => setPlanBatchCount(e.target.value)} className={inputClass} />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Batch Count means how many production runs you plan to execute for this plan date and shift.
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Priority</label>
@@ -602,20 +654,20 @@ export default function ProductionPlanningPage() {
               type="button"
               disabled={saving}
               onClick={createPlan}
-              className="mt-4 px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 text-white rounded-md text-sm font-medium hover:from-cyan-700 hover:to-blue-700 disabled:opacity-50"
+              className="mt-4 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 text-white text-sm font-medium hover:from-emerald-700 hover:to-cyan-700 disabled:opacity-50"
             >
               {saving ? 'Saving Plan...' : 'Save Production Plan'}
             </button>
           </section>
 
-          <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
+          <section className="rounded-3xl border border-emerald-100 bg-white shadow-sm p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Daily Production Plan (Today)</h2>
             <div className="space-y-3 max-h-[420px] overflow-auto">
               {todayPlans.length === 0 ? (
                 <div className="text-sm text-gray-500">No plans scheduled for today.</div>
               ) : (
                 todayPlans.map((plan) => (
-                  <div key={plan.id} className="rounded-lg border border-cyan-100 bg-cyan-50/40 p-3">
+                  <div key={plan.id} className="rounded-xl border border-cyan-100 bg-cyan-50/40 p-3">
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-semibold text-gray-800">{plan.product?.code || '-'} - {plan.product?.name || '-'}</div>
                       <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${statusBadgeClass(plan.status)}`}>
@@ -638,8 +690,8 @@ export default function ProductionPlanningPage() {
           </section>
         </div>
 
-        <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-200/80 bg-gradient-to-r from-cyan-50 to-blue-50 text-sm font-semibold text-gray-800">
+        <section className="rounded-3xl border border-emerald-100 bg-white shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-emerald-100 bg-gradient-to-r from-emerald-50 to-cyan-50 text-sm font-semibold text-gray-800">
             Production Plans & Order Creation
           </div>
           <div className="overflow-x-auto">
@@ -662,7 +714,7 @@ export default function ProductionPlanningPage() {
                   <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">No production plans found.</td></tr>
                 ) : (
                   plans.map((plan) => (
-                    <tr key={plan.id} className="hover:bg-cyan-50/40 transition-colors">
+                    <tr key={plan.id} className="hover:bg-emerald-50/40 transition-colors">
                       <td className="px-4 py-2.5 text-sm text-gray-700">{String(plan.plan_date).slice(0, 10)}</td>
                       <td className="px-4 py-2.5 text-sm text-gray-800 font-medium">{plan.product?.code || '-'} - {plan.product?.name || '-'}</td>
                       <td className="px-4 py-2.5 text-sm text-right text-gray-700">{Number(plan.target_quantity || 0).toFixed(3)}</td>
@@ -684,7 +736,7 @@ export default function ProductionPlanningPage() {
                           type="button"
                           onClick={() => openCreateOrderConfirm(plan)}
                           disabled={Boolean(plan.order_number) || creatingOrderPlanId === plan.id}
-                          className="px-3 py-1.5 rounded-md text-xs font-medium border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                          className="px-3 py-1.5 rounded-full text-xs font-medium border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
                         >
                           {plan.order_number ? 'Order Created' : creatingOrderPlanId === plan.id ? 'Creating...' : 'Create Order'}
                         </button>
@@ -700,26 +752,26 @@ export default function ProductionPlanningPage() {
 
       {confirmModal.open && confirmModal.plan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-2xl border border-white/70 bg-white/95 p-5 shadow-2xl">
+          <div className="w-full max-w-md rounded-3xl border border-emerald-100 bg-white p-5 shadow-2xl">
             <h3 className="text-lg font-semibold text-gray-900">Create Production Order</h3>
             <p className="mt-2 text-sm text-gray-600">
               Create order for {confirmModal.plan.product?.code || '-'} - {confirmModal.plan.product?.name || '-'} on {String(confirmModal.plan.plan_date).slice(0, 10)}?
             </p>
-            <div className="mt-3 rounded-md border border-cyan-100 bg-cyan-50 px-3 py-2 text-xs text-cyan-800">
+            <div className="mt-3 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
               Target: {Number(confirmModal.plan.target_quantity || 0).toFixed(3)} | Batches: {Number(confirmModal.plan.batch_count || 0).toFixed(2)}
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={closeCreateOrderConfirm}
-                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={confirmCreateOrder}
-                className="rounded-md bg-gradient-to-r from-indigo-600 to-blue-600 px-3 py-2 text-sm font-medium text-white hover:from-indigo-700 hover:to-blue-700"
+                className="rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 px-3 py-2 text-sm font-medium text-white hover:from-emerald-700 hover:to-cyan-700"
               >
                 Confirm Create Order
               </button>

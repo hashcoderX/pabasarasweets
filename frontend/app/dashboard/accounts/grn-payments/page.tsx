@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createApiClient } from '../../../../lib/apiClient';
-import { isAxiosError } from 'axios';
+import { isAxiosError } from '@/lib/http';
 
 interface Supplier {
   id: number;

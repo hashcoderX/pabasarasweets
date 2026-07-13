@@ -1,0 +1,15 @@
+# Local environment files (never commit machine-specific config)
+.env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+!.env.*.example
+
+# Local runtime artifacts
+*.pid
+*.pid.lock
+*.seed
+
+# Local editor/project metadata
+.vscode/

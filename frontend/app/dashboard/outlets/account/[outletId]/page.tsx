@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { isAxiosError } from 'axios';
+import { isAxiosError } from '@/lib/http';
 import { createApiClient } from '../../../../../lib/apiClient';
 
 type OutletProfile = {

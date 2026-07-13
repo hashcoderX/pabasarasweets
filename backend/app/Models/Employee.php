@@ -28,6 +28,7 @@ class Employee extends Model
         'gender',
         'department_id',
         'designation_id',
+        'reporting_person_id',
         'join_date',
         'basic_salary',
         'commission',
@@ -82,6 +83,16 @@ class Employee extends Model
     public function designation(): BelongsTo
     {
         return $this->belongsTo(Designation::class);
+    }
+
+    public function reportingPerson(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'reporting_person_id');
+    }
+
+    public function reportees(): HasMany
+    {
+        return $this->hasMany(self::class, 'reporting_person_id');
     }
 
     public function attendance(): HasMany

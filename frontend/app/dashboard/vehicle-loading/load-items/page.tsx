@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Load {
   id: number;
@@ -49,6 +49,13 @@ interface LoadItem {
 
 interface InventoryItem {
   id: number;
+  inventory_item_id?: number;
+  grn_item_id?: number | null;
+  batch_no?: string | null;
+  batch_purchase_price?: number | null;
+  batch_received_quantity?: number | null;
+  batch_accepted_quantity?: number | null;
+  batch_received_date?: string | null;
   name: string;
   code: string;
   type: 'raw_material' | 'finished_good';
@@ -58,6 +65,13 @@ interface InventoryItem {
   out_price?: number | null;
   current_stock: number;
   unit: string;
+  additional_info?: Record<string, any> | string | null;
+  last_batch_no?: string | null;
+  lastBatchNo?: string | null;
+  last_label_code?: string | null;
+  lastLabelCode?: string | null;
+  last_packaging_batch_id?: number | null;
+  lastPackagingBatchId?: number | null;
 }
 
 type NoticeModalState = {
@@ -152,6 +166,30 @@ export default function LoadItemsPage() {
     return sellPrice || unitPrice || outPrice || 0;
   };
 
+  const resolveAvailableQty = (item: InventoryItem): number => {
+    if (item.type === 'raw_material' && item.grn_item_id) {
+      const batchQty = toSafeNumber(item.batch_accepted_quantity ?? item.batch_received_quantity);
+      if (batchQty > 0) return batchQty;
+    }
+
+    return toSafeNumber(item.current_stock);
+  };
+
+  const resolveAdditionalInfo = (item: InventoryItem): Record<string, any> => {
+    const info = item.additional_info;
+    if (!info) return {};
+
+    if (typeof info === 'string') {
+      try {
+        return JSON.parse(info);
+      } catch {
+        return {};
+      }
+    }
+
+    return info;
+  };
+
   // Handle clicking outside to close suggestions
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -210,30 +248,66 @@ export default function LoadItemsPage() {
 
   const fetchInventoryItems = async () => {
     try {
-      const response = await axios.get('/api/stock/inventory?status=active&per_page=1000', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const [finishedResponse, rawBatchResponse] = await Promise.all([
+        axios.get('/api/stock/inventory', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          params: {
+            type: 'finished_good',
+            status: 'active',
+            per_page: 1000,
+          },
+        }),
+        axios.get('/api/stock/inventory', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          params: {
+            type: 'raw_material',
+            status: 'active',
+            batch_view: true,
+            per_page: 1000,
+          },
+        }),
+      ]);
 
-      let items: InventoryItem[] = [];
-      if (Array.isArray(response.data)) {
-        items = response.data;
-      } else if (response.data.data) {
-        if (Array.isArray(response.data.data)) {
-          items = response.data.data;
-        } else if (response.data.data.data && Array.isArray(response.data.data.data)) {
-          items = response.data.data.data;
-        }
-      }
+      const extractItems = (response: any): any[] => {
+        const data = response?.data;
+        if (Array.isArray(data)) return data;
+        if (Array.isArray(data?.data)) return data.data;
+        if (Array.isArray(data?.data?.data)) return data.data.data;
+        return [];
+      };
 
-      if (!Array.isArray(items)) {
-        console.warn('Inventory API returned unexpected data format:', response.data);
-        items = [];
-      }
+      const items = [
+        ...extractItems(finishedResponse),
+        ...extractItems(rawBatchResponse),
+      ];
 
       const normalized: InventoryItem[] = items.map((item: any) => ({
         id: Number(item?.id) || 0,
+        inventory_item_id: Number(item?.inventory_item_id) || undefined,
+        grn_item_id: item?.grn_item_id !== undefined && item?.grn_item_id !== null ? Number(item?.grn_item_id) : null,
+        batch_no: item?.batch_no
+          ? String(item.batch_no)
+          : item?.batch_number
+            ? String(item.batch_number)
+            : item?.last_batch_no
+              ? String(item.last_batch_no)
+              : item?.lastBatchNo
+                ? String(item.lastBatchNo)
+            : null,
+        batch_purchase_price: item?.batch_purchase_price !== undefined && item?.batch_purchase_price !== null
+          ? toSafeNumber(item.batch_purchase_price)
+          : null,
+        batch_received_quantity: item?.batch_received_quantity !== undefined && item?.batch_received_quantity !== null
+          ? toSafeNumber(item.batch_received_quantity)
+          : null,
+        batch_accepted_quantity: item?.batch_accepted_quantity !== undefined && item?.batch_accepted_quantity !== null
+          ? toSafeNumber(item.batch_accepted_quantity)
+          : null,
+        batch_received_date: item?.batch_received_date ? String(item.batch_received_date) : null,
         name: String(item?.name || ''),
         code: String(item?.code || ''),
         type: (item?.type === 'raw_material' ? 'raw_material' : 'finished_good') as 'raw_material' | 'finished_good',
@@ -243,7 +317,18 @@ export default function LoadItemsPage() {
         out_price: toSafeNumber(item?.out_price),
         current_stock: toSafeNumber(item?.current_stock),
         unit: String(item?.unit || ''),
-      })).filter((item) => item.id > 0);
+        additional_info: item?.additional_info ?? null,
+        last_batch_no: item?.last_batch_no ? String(item.last_batch_no) : null,
+        lastBatchNo: item?.lastBatchNo ? String(item.lastBatchNo) : null,
+        last_label_code: item?.last_label_code ? String(item.last_label_code) : null,
+        lastLabelCode: item?.lastLabelCode ? String(item.lastLabelCode) : null,
+        last_packaging_batch_id: item?.last_packaging_batch_id !== undefined && item?.last_packaging_batch_id !== null
+          ? Number(item.last_packaging_batch_id)
+          : null,
+        lastPackagingBatchId: item?.lastPackagingBatchId !== undefined && item?.lastPackagingBatchId !== null
+          ? Number(item.lastPackagingBatchId)
+          : null,
+      })).filter((item) => item.id > 0 && resolveAvailableQty(item) > 0);
 
       setInventoryItems(normalized);
     } catch (error) {
@@ -252,9 +337,35 @@ export default function LoadItemsPage() {
     }
   };
 
+  const formatBatchLabel = (item: InventoryItem): string => {
+    const info = resolveAdditionalInfo(item);
+    const batchNo =
+      item.batch_no ||
+      item.last_batch_no ||
+      item.lastBatchNo ||
+      info.last_batch_no ||
+      info.lastBatchNo ||
+      info.batch_no ||
+      info.batchNo ||
+      info.batch_number ||
+      info.batchNumber;
+    if (batchNo) return String(batchNo);
+
+    const labelCode = item.last_label_code || item.lastLabelCode || info.last_label_code || info.lastLabelCode;
+    if (labelCode) return String(labelCode);
+
+    const packagingBatchId = item.last_packaging_batch_id || item.lastPackagingBatchId || info.last_packaging_batch_id || info.lastPackagingBatchId;
+    if (packagingBatchId) return `Batch #${packagingBatchId}`;
+
+    if (item.grn_item_id) return `GRN Item #${item.grn_item_id}`;
+    return 'General';
+  };
+
   const selectInventoryItem = (item: InventoryItem) => {
     const outPrice = resolveOutPrice(item);
     const sellPrice = resolveSellPrice(item);
+    const availableQty = resolveAvailableQty(item);
+    const batchLabel = formatBatchLabel(item);
 
     setFormData((prev) => ({
       ...prev,
@@ -262,9 +373,10 @@ export default function LoadItemsPage() {
       name: item.name,
       type: item.type === 'finished_good' ? 'finished_product' : 'raw_material',
       out_price: outPrice.toFixed(2),
-      sell_price: sellPrice.toFixed(2)
+      sell_price: sellPrice.toFixed(2),
+      qty: prev.qty || availableQty.toFixed(2),
     }));
-    setItemSearch(`${item.code} - ${item.name}`);
+    setItemSearch(`${item.code} - ${item.name} | Batch: ${batchLabel}`);
     setShowItemDropdown(false);
     setHighlightedItemIndex(-1);
     itemInputRef.current?.focus();
@@ -707,9 +819,12 @@ export default function LoadItemsPage() {
                     />
                     {showItemDropdown && filteredInventoryItems.length > 0 && (
                       <div ref={itemDropdownRef} className="z-[120] mt-2 w-full rounded-xl border border-emerald-100 bg-white shadow-2xl max-h-56 overflow-y-auto lg:absolute lg:left-0 lg:top-full">
-                        {filteredInventoryItems.map((item, index) => (
+                        {filteredInventoryItems.map((item, index) => {
+                          const availableQty = resolveAvailableQty(item);
+                          const batchLabel = formatBatchLabel(item);
+                          return (
                           <button
-                            key={item.id}
+                            key={`${item.inventory_item_id || item.id}-${item.grn_item_id || item.id}-${index}`}
                             type="button"
                             data-index={index}
                             onClick={() => selectInventoryItem(item)}
@@ -718,9 +833,13 @@ export default function LoadItemsPage() {
                             }`}
                           >
                             <div className="text-sm font-medium text-slate-900">{item.code} - {item.name}</div>
-                            <div className="text-xs text-slate-500">Stock: {item.current_stock} {item.unit}</div>
+                            <div className="text-xs text-slate-500">Batch: {batchLabel} | Qty: {availableQty.toFixed(2)} {item.unit}</div>
+                            <div className="text-xs text-slate-500">
+                              Out: LKR {resolveOutPrice(item).toFixed(2)} | Sell: LKR {resolveSellPrice(item).toFixed(2)}
+                            </div>
                           </button>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

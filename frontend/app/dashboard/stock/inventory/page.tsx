@@ -2,10 +2,12 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface InventoryItem {
   id: number;
+  inventory_item_id?: number;
+  grn_item_id?: number | null;
   name: string;
   code: string;
   description: string;
@@ -18,6 +20,13 @@ interface InventoryItem {
   unit_price: number;
   purchase_price?: number | null;
   sell_price?: number | null;
+  batch_no?: string | null;
+  batch_purchase_price?: number | null;
+  batch_received_quantity?: number | null;
+  batch_accepted_quantity?: number | null;
+  batch_rejected_quantity?: number | null;
+  batch_received_date?: string | null;
+  batch_quality_status?: 'pending' | 'accepted' | 'rejected' | 'partial' | null;
   supplier_name: string | null;
   supplier_id: number | null;
   location: string;
@@ -135,7 +144,7 @@ export default function Inventory() {
       setLoading(true);
       const response = await axios.get('/api/stock/inventory', {
         headers: { Authorization: `Bearer ${token}` },
-        params: { type: activeTab, per_page: 100 }
+        params: { type: activeTab, per_page: 100, batch_view: activeTab === 'raw_material' }
       });
 
       if (response.data.success) {
@@ -147,6 +156,18 @@ export default function Inventory() {
           maximum_stock: toSafeNumber(item.maximum_stock),
           purchase_price: toSafeNumber(item.purchase_price),
           sell_price: toSafeNumber(item.sell_price),
+          batch_purchase_price: item.batch_purchase_price !== undefined && item.batch_purchase_price !== null
+            ? toSafeNumber(item.batch_purchase_price)
+            : null,
+          batch_received_quantity: item.batch_received_quantity !== undefined && item.batch_received_quantity !== null
+            ? toSafeNumber(item.batch_received_quantity)
+            : null,
+          batch_accepted_quantity: item.batch_accepted_quantity !== undefined && item.batch_accepted_quantity !== null
+            ? toSafeNumber(item.batch_accepted_quantity)
+            : null,
+          batch_rejected_quantity: item.batch_rejected_quantity !== undefined && item.batch_rejected_quantity !== null
+            ? toSafeNumber(item.batch_rejected_quantity)
+            : null,
           unit_price: resolveItemPrice(item),
         }));
         setItems(formattedItems);
@@ -430,9 +451,20 @@ export default function Inventory() {
   const modalInputClass = 'mt-1.5 block w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm transition-all duration-200 placeholder:text-gray-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
   const modalSelectClass = 'mt-1.5 block w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm transition-all duration-200 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
   const modalTextareaClass = 'mt-1.5 block w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm transition-all duration-200 placeholder:text-gray-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
+  const uniqueStockItems = activeTab === 'raw_material'
+    ? Array.from(new Map(items.map((item) => [item.inventory_item_id || item.id, item])).values())
+    : items;
+  const visibleItems = items.filter((item) => {
+    if (activeTab === 'raw_material') {
+      const batchQty = toSafeNumber(item.batch_accepted_quantity ?? item.batch_received_quantity ?? 0);
+      return batchQty > 0;
+    }
+
+    return toSafeNumber(item.current_stock) > 0;
+  });
   const totalStockValue = items.reduce((sum, item) => sum + (item.current_stock * resolveItemPrice(item)), 0);
-  const lowStockItems = items.filter(item => item.current_stock <= item.minimum_stock).length;
-  const inStockItems = items.filter(item => item.current_stock > item.minimum_stock).length;
+  const lowStockItems = uniqueStockItems.filter(item => item.current_stock <= item.minimum_stock).length;
+  const inStockItems = uniqueStockItems.filter(item => item.current_stock > item.minimum_stock).length;
 
   if (!token) {
     return (
@@ -474,7 +506,7 @@ export default function Inventory() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
             <div className="rounded-3xl border border-orange-200/70 bg-gradient-to-br from-orange-500 to-amber-500 p-5 text-white shadow-lg shadow-orange-300/45">
               <p className="text-xs uppercase tracking-[0.24em] text-white/80">Total Items</p>
-              <p className="mt-2 text-3xl font-bold">{items.length}</p>
+              <p className="mt-2 text-3xl font-bold">{uniqueStockItems.length}</p>
               <p className="mt-2 text-sm text-white/85">LKR {totalStockValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} inventory value</p>
             </div>
             <div className="rounded-3xl border border-red-200 bg-white p-5 shadow-sm">
@@ -539,7 +571,7 @@ export default function Inventory() {
                         Total Items
                       </dt>
                       <dd className="text-lg font-medium text-gray-900">
-                        {items.length}
+                        {uniqueStockItems.length}
                       </dd>
                     </dl>
                   </div>
@@ -619,7 +651,7 @@ export default function Inventory() {
             <div className="flex justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600"></div>
             </div>
-          ) : items.length === 0 ? (
+          ) : visibleItems.length === 0 ? (
             <div className="text-center py-8">
               <div className="text-gray-400 text-sm">No items found in this store</div>
               <button
@@ -633,7 +665,7 @@ export default function Inventory() {
             <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_16px_55px_-35px_rgba(194,65,12,0.45)]">
               <div className="border-b border-orange-100 bg-gradient-to-r from-slate-900 via-orange-900 to-amber-800 px-5 py-3.5">
                 <h4 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-100">
-                  {activeTab === 'raw_material' ? 'Raw Material Inventory' : 'Finished Goods Inventory'}
+                  {activeTab === 'raw_material' ? 'Raw Material Inventory (Batch View)' : 'Finished Goods Inventory'}
                 </h4>
               </div>
               <div className="overflow-x-auto">
@@ -644,7 +676,7 @@ export default function Inventory() {
                       Item
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Stock Info
+                      {activeTab === 'raw_material' ? 'Batch Qty' : 'Stock Info'}
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
                       Batch
@@ -661,18 +693,22 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-200">
-                  {items.map((item) => {
+                  {visibleItems.map((item) => {
                     const stockStatus = getStockStatus(item);
                     const resolvedPrice = resolveItemPrice(item);
                     const info = resolveAdditionalInfo(item);
-                    const batchNo = info.last_batch_no || info.lastBatchNo || '';
+                    const batchNo = item.batch_no || info.last_batch_no || info.lastBatchNo || '';
                     const labelCode = info.last_label_code || info.lastLabelCode || '';
                     const storeTag = info.store_tag || info.storeTag || '';
                     const stockSource = info.stock_source || info.stockSource || '';
                     const packagingBatchId = info.last_packaging_batch_id || info.lastPackagingBatchId;
+                    const baseItemId = item.inventory_item_id || item.id;
+                    const displayPrice = activeTab === 'raw_material'
+                      ? toSafeNumber(item.batch_purchase_price ?? item.purchase_price ?? item.unit_price)
+                      : resolvedPrice;
                     return (
                       <tr
-                        key={item.id}
+                        key={`${baseItemId}-${item.grn_item_id ?? item.id}`}
                         onClick={() => openItemDetails(item)}
                         className="cursor-pointer transition hover:bg-orange-50/45"
                       >
@@ -696,12 +732,28 @@ export default function Inventory() {
                           </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="text-sm text-gray-900">
-                            {item.current_stock} {item.unit}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            Min: {item.minimum_stock} {item.unit}
-                          </div>
+                          {activeTab === 'raw_material' ? (
+                            <>
+                              <div className="text-sm font-semibold text-gray-900">
+                                {toSafeNumber(item.batch_accepted_quantity ?? item.batch_received_quantity ?? 0).toFixed(2)} {item.unit}
+                              </div>
+                              <div className="text-sm text-gray-500">
+                                Total Item Stock: {toSafeNumber(item.current_stock).toFixed(2)} {item.unit}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                Min: {toSafeNumber(item.minimum_stock).toFixed(2)} {item.unit}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-sm text-gray-900">
+                                {item.current_stock} {item.unit}
+                              </div>
+                              <div className="text-sm text-gray-500">
+                                Min: {item.minimum_stock} {item.unit}
+                              </div>
+                            </>
+                          )}
                           {item.location && (
                             <div className="text-xs text-gray-400">
                               {item.location}
@@ -712,6 +764,16 @@ export default function Inventory() {
                           <div className="text-sm text-gray-900">
                             {batchNo || labelCode || (packagingBatchId ? `Batch #${packagingBatchId}` : '-')}
                           </div>
+                          {activeTab === 'raw_material' && item.batch_received_date && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              Received: {new Date(item.batch_received_date).toLocaleDateString()}
+                            </div>
+                          )}
+                          {activeTab === 'raw_material' && (
+                            <div className="text-xs text-gray-600 mt-1">
+                              Qty: {toSafeNumber(item.batch_accepted_quantity ?? item.batch_received_quantity ?? 0).toFixed(2)} {item.unit}
+                            </div>
+                          )}
                           <div className="mt-1 flex items-center gap-2">
                             {storeTag && (
                               <span className="inline-flex px-2 py-0.5 text-xs font-medium rounded-full bg-blue-100 text-blue-800">
@@ -721,6 +783,11 @@ export default function Inventory() {
                             {stockSource && (
                               <span className="inline-flex px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-800">
                                 {String(stockSource).toUpperCase()}
+                              </span>
+                            )}
+                            {activeTab === 'raw_material' && item.batch_quality_status && (
+                              <span className="inline-flex px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-800">
+                                {item.batch_quality_status.toUpperCase()}
                               </span>
                             )}
                           </div>
@@ -734,7 +801,7 @@ export default function Inventory() {
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-800">
-                          LKR {resolvedPrice.toFixed(2)}
+                          LKR {displayPrice.toFixed(2)}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${stockStatus.color}`}>
@@ -745,7 +812,7 @@ export default function Inventory() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleEdit(item);
+                              handleEdit({ ...item, id: baseItemId });
                             }}
                             className="mr-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
                           >
@@ -754,7 +821,7 @@ export default function Inventory() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setDeleteConfirm(item.id);
+                              setDeleteConfirm(baseItemId);
                             }}
                             className="rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100"
                           >

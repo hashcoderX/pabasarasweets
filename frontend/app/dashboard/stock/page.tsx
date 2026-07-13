@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 export default function StockManagement() {
   const [token, setToken] = useState('');
@@ -78,7 +78,7 @@ export default function StockManagement() {
 
   if (!token) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-100 flex items-center justify-center">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
       </div>
     );
@@ -86,189 +86,129 @@ export default function StockManagement() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-100 flex items-center justify-center">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white shadow rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-lg leading-6 font-medium text-gray-900">
-            Stock Management Dashboard
-          </h3>
-          <p className="mt-1 max-w-2xl text-sm text-gray-500">
-            Monitor and manage your inventory, suppliers, and stock levels.
-          </p>
-        </div>
+    <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-100 relative overflow-hidden">
+      <div className="absolute inset-0 opacity-30 pointer-events-none">
+        <div className="absolute top-20 left-10 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+        <div className="absolute top-28 right-10 w-80 h-80 bg-amber-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
+        <div className="absolute -bottom-16 left-1/3 w-80 h-80 bg-yellow-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-orange-500 rounded-md flex items-center justify-center">
-                  <span className="text-white text-sm font-bold">📦</span>
-                </div>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Total Items
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {totalItems.toLocaleString()}
-                  </dd>
-                </dl>
-              </div>
+      <div className="relative z-10 space-y-8 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <section className="rounded-3xl border border-white/60 bg-white/75 backdrop-blur-xl shadow-xl p-6 sm:p-8">
+          <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6">
+            <div>
+              <p className="inline-flex items-center rounded-full bg-orange-100 border border-orange-200 px-3 py-1 text-xs font-semibold text-orange-700 uppercase tracking-wide">
+                Warehouse Intelligence
+              </p>
+              <h2 className="mt-3 text-3xl sm:text-4xl font-bold text-slate-900">Stock Management Dashboard</h2>
+              <p className="mt-2 text-sm sm:text-base text-slate-600 max-w-2xl">
+                Track inventory health, supplier coverage, and stock risks with one operational cockpit.
+              </p>
             </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-red-500 rounded-md flex items-center justify-center">
-                  <span className="text-white text-sm font-bold">⚠️</span>
-                </div>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Low Stock Items
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {lowStockItems}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-blue-500 rounded-md flex items-center justify-center">
-                  <span className="text-white text-sm font-bold">🚚</span>
-                </div>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Total Suppliers
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {totalSuppliers}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white overflow-hidden shadow rounded-lg">
-          <div className="p-5">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-gray-500 rounded-md flex items-center justify-center">
-                  <span className="text-white text-sm font-bold">❌</span>
-                </div>
-              </div>
-              <div className="ml-5 w-0 flex-1">
-                <dl>
-                  <dt className="text-sm font-medium text-gray-500 truncate">
-                    Out of Stock
-                  </dt>
-                  <dd className="text-lg font-medium text-gray-900">
-                    {outOfStockItems}
-                  </dd>
-                </dl>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="bg-white shadow rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-            Quick Actions
-          </h3>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <Link
               href="/dashboard/stock/inventory"
-              className="relative block w-full bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded-lg p-4 text-center focus:outline-none focus:ring-2 focus:ring-orange-500 focus:ring-offset-2 transition-colors"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-orange-200/70 hover:from-orange-600 hover:to-amber-600 transition"
             >
-              <div className="flex items-center justify-center">
-                <span className="text-2xl mr-2">📦</span>
-                <span className="text-sm font-medium text-orange-900">View Inventory</span>
-              </div>
-            </Link>
-
-            <Link
-              href="/dashboard/stock/suppliers"
-              className="relative block w-full bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg p-4 text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
-            >
-              <div className="flex items-center justify-center">
-                <span className="text-2xl mr-2">🚚</span>
-                <span className="text-sm font-medium text-blue-900">Manage Suppliers</span>
-              </div>
-            </Link>
-
-            <Link
-              href="/dashboard/stock/levels"
-              className="relative block w-full bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg p-4 text-center focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition-colors"
-            >
-              <div className="flex items-center justify-center">
-                <span className="text-2xl mr-2">📊</span>
-                <span className="text-sm font-medium text-green-900">Check Stock Levels</span>
-              </div>
-            </Link>
-
-            <Link
-              href="/dashboard/stock/reports"
-              className="relative block w-full bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg p-4 text-center focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition-colors"
-            >
-              <div className="flex items-center justify-center">
-                <span className="text-2xl mr-2">📈</span>
-                <span className="text-sm font-medium text-purple-900">Generate Reports</span>
-              </div>
-            </Link>
-
-            <Link
-              href="/dashboard/stock/transfers"
-              className="relative block w-full bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg p-4 text-center focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-colors"
-            >
-              <div className="flex items-center justify-center">
-                <span className="text-2xl mr-2">🔄</span>
-                <span className="text-sm font-medium text-indigo-900">Transfer to Outlets</span>
-              </div>
+              <span>Open Inventory</span>
+              <span>→</span>
             </Link>
           </div>
-        </div>
-      </div>
+        </section>
 
-      {/* Recent Activity Placeholder */}
-      <div className="bg-white shadow rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-            Recent Activity
-          </h3>
-          <div className="text-center py-8">
-            <div className="text-gray-400 text-sm">
-              Recent stock activities will appear here
-            </div>
+        <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          {[
+            {
+              title: 'Total Items',
+              value: totalItems.toLocaleString(),
+              icon: '📦',
+              tone: 'from-orange-500 to-amber-500',
+              panel: 'from-orange-50 to-amber-50 border-orange-200'
+            },
+            {
+              title: 'Low Stock Items',
+              value: lowStockItems.toLocaleString(),
+              icon: '⚠️',
+              tone: 'from-red-500 to-rose-500',
+              panel: 'from-red-50 to-rose-50 border-red-200'
+            },
+            {
+              title: 'Total Suppliers',
+              value: totalSuppliers.toLocaleString(),
+              icon: '🚚',
+              tone: 'from-sky-500 to-cyan-500',
+              panel: 'from-sky-50 to-cyan-50 border-sky-200'
+            },
+            {
+              title: 'Out of Stock',
+              value: outOfStockItems.toLocaleString(),
+              icon: '❌',
+              tone: 'from-slate-500 to-slate-600',
+              panel: 'from-slate-50 to-gray-100 border-slate-200'
+            }
+          ].map((stat) => (
+            <article key={stat.title} className={`rounded-2xl border bg-gradient-to-br ${stat.panel} p-5 shadow-md hover:shadow-lg transition`}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-sm text-slate-600">{stat.title}</p>
+                  <p className="mt-2 text-3xl font-bold text-slate-900">{stat.value}</p>
+                </div>
+                <div className={`h-11 w-11 rounded-xl bg-gradient-to-br ${stat.tone} text-white flex items-center justify-center text-lg shadow`}>
+                  {stat.icon}
+                </div>
+              </div>
+            </article>
+          ))}
+        </section>
+
+        <section className="rounded-3xl border border-white/60 bg-white/80 backdrop-blur-xl shadow-xl p-6 sm:p-8">
+          <h3 className="text-xl font-semibold text-slate-900">Quick Actions</h3>
+          <p className="text-sm text-slate-600 mt-1">Jump directly into day-to-day stock operations.</p>
+
+          <div className="mt-5 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
+            <Link href="/dashboard/stock/inventory" className="group rounded-xl border border-orange-200 bg-orange-50 p-4 hover:bg-orange-100 transition">
+              <div className="text-2xl">📦</div>
+              <div className="mt-2 text-sm font-semibold text-orange-900">View Inventory</div>
+              <div className="text-xs text-orange-700 mt-1">Items, pricing, batches</div>
+            </Link>
+            <Link href="/dashboard/stock/suppliers" className="group rounded-xl border border-sky-200 bg-sky-50 p-4 hover:bg-sky-100 transition">
+              <div className="text-2xl">🚚</div>
+              <div className="mt-2 text-sm font-semibold text-sky-900">Manage Suppliers</div>
+              <div className="text-xs text-sky-700 mt-1">Partners and sourcing</div>
+            </Link>
+            <Link href="/dashboard/stock/levels" className="group rounded-xl border border-emerald-200 bg-emerald-50 p-4 hover:bg-emerald-100 transition">
+              <div className="text-2xl">📊</div>
+              <div className="mt-2 text-sm font-semibold text-emerald-900">Stock Levels</div>
+              <div className="text-xs text-emerald-700 mt-1">Monitor thresholds</div>
+            </Link>
+            <Link href="/dashboard/stock/reports" className="group rounded-xl border border-violet-200 bg-violet-50 p-4 hover:bg-violet-100 transition">
+              <div className="text-2xl">📈</div>
+              <div className="mt-2 text-sm font-semibold text-violet-900">Reports</div>
+              <div className="text-xs text-violet-700 mt-1">Usage and valuation</div>
+            </Link>
+            <Link href="/dashboard/stock/transfers" className="group rounded-xl border border-indigo-200 bg-indigo-50 p-4 hover:bg-indigo-100 transition">
+              <div className="text-2xl">🔄</div>
+              <div className="mt-2 text-sm font-semibold text-indigo-900">Transfer to Outlets</div>
+              <div className="text-xs text-indigo-700 mt-1">Internal distribution</div>
+            </Link>
           </div>
-        </div>
+        </section>
+
+        <section className="rounded-3xl border border-white/60 bg-white/80 backdrop-blur-xl shadow-xl p-6 sm:p-8">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xl font-semibold text-slate-900">Recent Activity</h3>
+            <span className="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200">Coming Soon</span>
+          </div>
+          <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-10 text-center">
+            <p className="text-sm text-slate-500">Recent stock activities will appear here once event tracking is enabled.</p>
+          </div>
+        </section>
       </div>
     </div>
   );

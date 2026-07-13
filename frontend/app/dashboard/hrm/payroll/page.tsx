@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Payroll {
   id: number;
@@ -30,6 +30,22 @@ interface Payroll {
   overtime_hours: number;
   overtime_amount: number;
   salary_breakdown?: {
+    custom_allowance_items?: Array<{
+      id: number;
+      name: string;
+      amount: number;
+      amount_type: 'fixed' | 'percentage';
+      raw_amount: number;
+    }>;
+    custom_deduction_items?: Array<{
+      id: number;
+      name: string;
+      amount: number;
+      amount_type: 'fixed' | 'percentage';
+      raw_amount: number;
+    }>;
+    custom_allowances_total?: number;
+    custom_deductions_total?: number;
     basic_salary: number;
     earned_basic_salary: number;
     commission_amount: number;
@@ -720,54 +736,67 @@ export default function Payroll() {
               <div className="bg-gray-50 rounded-lg p-6 space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <h4 className="font-semibold text-gray-900">Employee Details</h4>
-                    <p className="text-sm text-gray-600">Name: {selectedPayroll.employee.first_name} {selectedPayroll.employee.last_name}</p>
-                    <p className="text-sm text-gray-600">Code: {selectedPayroll.employee.employee_code}</p>
-                    <p className="text-sm text-gray-600">Department: {selectedPayroll.employee.department?.name || 'Not Assigned'}</p>
-                    <p className="text-sm text-gray-600">Designation: {selectedPayroll.employee.designation?.name || 'Not Assigned'}</p>
+                    <h4 className="font-semibold text-black">Employee Details</h4>
+                    <p className="text-sm text-black">Name: {selectedPayroll.employee.first_name} {selectedPayroll.employee.last_name}</p>
+                    <p className="text-sm text-black">Code: {selectedPayroll.employee.employee_code}</p>
+                    <p className="text-sm text-black">Department: {selectedPayroll.employee.department?.name || 'Not Assigned'}</p>
+                    <p className="text-sm text-black">Designation: {selectedPayroll.employee.designation?.name || 'Not Assigned'}</p>
                   </div>
                   <div>
-                    <h4 className="font-semibold text-gray-900">Payroll Details</h4>
-                    <p className="text-sm text-gray-600">Month/Year: {selectedPayroll.month_year}</p>
-                    <p className="text-sm text-gray-600">Status: <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedPayroll.status)}`}>{selectedPayroll.status}</span></p>
-                    <p className="text-sm text-gray-600">Working Days: {selectedPayroll.working_days}</p>
-                    <p className="text-sm text-gray-600">Present Days: {selectedPayroll.present_days}</p>
+                    <h4 className="font-semibold text-black">Payroll Details</h4>
+                    <p className="text-sm text-black">Month/Year: {selectedPayroll.month_year}</p>
+                    <p className="text-sm text-black">Status: <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusColor(selectedPayroll.status)}`}>{selectedPayroll.status}</span></p>
+                    <p className="text-sm text-black">Working Days: {selectedPayroll.working_days}</p>
+                    <p className="text-sm text-black">Present Days: {selectedPayroll.present_days}</p>
                   </div>
                 </div>
 
                 <div className="border-t pt-4">
-                  <h4 className="font-semibold text-gray-900 mb-4">Salary Breakdown</h4>
+                  <h4 className="font-semibold text-black mb-4">Salary Breakdown</h4>
                   <div className="space-y-2">
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Basic Salary:</span>
-                      <span className="text-sm font-medium">{formatCurrency(selectedPayroll.basic_salary, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                      <span className="text-sm text-black">Basic Salary:</span>
+                      <span className="text-sm font-medium text-black">{formatCurrency(selectedPayroll.basic_salary, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Earned Basic (Attendance):</span>
-                      <span className="text-sm font-medium">{formatCurrency(getBreakdownValue(selectedPayroll, 'earned_basic_salary', selectedPayroll.basic_salary), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                      <span className="text-sm text-black">Earned Basic (Attendance):</span>
+                      <span className="text-sm font-medium text-black">{formatCurrency(getBreakdownValue(selectedPayroll, 'earned_basic_salary', selectedPayroll.basic_salary), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Commission:</span>
+                      <span className="text-sm text-black">Commission:</span>
                       <span className="text-sm font-medium text-green-600">+{formatCurrency(getBreakdownValue(selectedPayroll, 'commission_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Overtime:</span>
+                      <span className="text-sm text-black">Overtime:</span>
                       <span className="text-sm font-medium text-green-600">+{formatCurrency(getBreakdownValue(selectedPayroll, 'overtime_amount', selectedPayroll.overtime_amount || 0), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
+                    <div className="flex justify-between">
+                      <span className="text-sm text-black">Custom Allowances:</span>
+                      <span className="text-sm font-medium text-green-600">+{formatCurrency(getBreakdownValue(selectedPayroll, 'custom_allowances_total'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                    </div>
+                    {(selectedPayroll.salary_breakdown?.custom_allowance_items || []).map((item) => (
+                      <div key={`allowance-${item.id}`} className="flex justify-between text-xs text-green-700">
+                        <span>
+                          {item.name}
+                          {item.amount_type === 'percentage' ? ` (${item.raw_amount}% of earned basic)` : ''}
+                        </span>
+                        <span>+{formatCurrency(item.amount, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                      </div>
+                    ))}
                     <div className="flex justify-between text-xs text-gray-500">
                       <span>Overtime Hours:</span>
                       <span>{getBreakdownValue(selectedPayroll, 'overtime_hours', selectedPayroll.overtime_hours || 0).toFixed(2)} h</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Allowances:</span>
+                      <span className="text-sm text-black">Allowances:</span>
                       <span className="text-sm font-medium text-green-600">+{formatCurrency(selectedPayroll.allowances, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Attendance Deduction:</span>
+                      <span className="text-sm text-black">Attendance Deduction:</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'attendance_deduction_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Late Deduction:</span>
+                      <span className="text-sm text-black">Late Deduction:</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'late_deduction_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between text-xs text-gray-500">
@@ -775,17 +804,30 @@ export default function Payroll() {
                       <span>{getBreakdownValue(selectedPayroll, 'late_hours').toFixed(2)} h</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">EPF (Employee):</span>
+                      <span className="text-sm text-black">EPF (Employee):</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'epf_employee_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">ETF (Employee):</span>
+                      <span className="text-sm text-black">ETF (Employee):</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'etf_employee_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">APIT Tax:</span>
+                      <span className="text-sm text-black">APIT Tax:</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'apit_tax_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
+                    <div className="flex justify-between">
+                      <span className="text-sm text-black">Custom Deductions:</span>
+                      <span className="text-sm font-medium text-red-600">-{formatCurrency(getBreakdownValue(selectedPayroll, 'custom_deductions_total'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                    </div>
+                    {(selectedPayroll.salary_breakdown?.custom_deduction_items || []).map((item) => (
+                      <div key={`deduction-${item.id}`} className="flex justify-between text-xs text-red-700">
+                        <span>
+                          {item.name}
+                          {item.amount_type === 'percentage' ? ` (${item.raw_amount}% of earned basic)` : ''}
+                        </span>
+                        <span>-{formatCurrency(item.amount, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                      </div>
+                    ))}
                     <div className="flex justify-between text-xs text-gray-500">
                       <span>EPF (Employer):</span>
                       <span>{formatCurrency(getBreakdownValue(selectedPayroll, 'epf_employer_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
@@ -795,15 +837,15 @@ export default function Payroll() {
                       <span>{formatCurrency(getBreakdownValue(selectedPayroll, 'etf_employer_amount'), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Deductions:</span>
+                      <span className="text-sm text-black">Deductions:</span>
                       <span className="text-sm font-medium text-red-600">-{formatCurrency(selectedPayroll.deductions, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-sm text-gray-600">Gross Salary:</span>
-                      <span className="text-sm font-medium">{formatCurrency(getBreakdownValue(selectedPayroll, 'gross_salary', (selectedPayroll.basic_salary || 0) + (selectedPayroll.allowances || 0)), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
+                      <span className="text-sm text-black">Gross Salary:</span>
+                      <span className="text-sm font-medium text-black">{formatCurrency(getBreakdownValue(selectedPayroll, 'gross_salary', (selectedPayroll.basic_salary || 0) + (selectedPayroll.allowances || 0)), resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                     <div className="flex justify-between border-t pt-2">
-                      <span className="text-lg font-semibold text-gray-900">Net Salary:</span>
+                      <span className="text-lg font-semibold text-black">Net Salary:</span>
                       <span className="text-lg font-bold text-blue-600">{formatCurrency(selectedPayroll.net_salary, resolveBranchCurrency(selectedPayroll.branch_id) || activeCurrency)}</span>
                     </div>
                   </div>
@@ -819,7 +861,7 @@ export default function Payroll() {
                 </button>
                 <button
                   onClick={() => setShowPayslipModal(false)}
-                  className="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors duration-300"
+                  className="px-6 py-2 border border-gray-300 rounded-lg text-black hover:bg-gray-50 transition-colors duration-300"
                 >
                   Close
                 </button>

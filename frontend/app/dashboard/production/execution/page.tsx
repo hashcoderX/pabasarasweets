@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type StepKey = 'step1' | 'step2' | 'step3' | 'step4';
 
@@ -67,7 +67,7 @@ export default function ProductionExecutionPage() {
   const [updateWastageQty, setUpdateWastageQty] = useState('0');
   const [updateNotes, setUpdateNotes] = useState('');
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const router = useRouter();
   const inputClass =
     'w-full rounded-xl border border-amber-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-amber-400 focus:ring-4 focus:ring-amber-100 focus:outline-none';

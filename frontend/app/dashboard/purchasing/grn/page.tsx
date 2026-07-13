@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import axios from 'axios';
+import axios from '@/lib/http';
 import { useRouter } from 'next/navigation';
 
 interface PurchaseOrderItem {
@@ -207,6 +207,11 @@ export default function GRNPage() {
       case 'cancelled': return 'bg-red-100 text-red-800';
       default: return 'bg-gray-100 text-gray-800';
     }
+  };
+
+  const getStatusLabel = (status: string) => {
+    if (status === 'received') return 'complete';
+    return status;
   };
 
   const hasGrnForOrder = (orderId: number) => {
@@ -863,7 +868,7 @@ export default function GRNPage() {
                           </td>
                           <td className="whitespace-nowrap px-6 py-4">
                             <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${getStatusColor(order.status)}`}>
-                              {order.status}
+                              {getStatusLabel(order.status)}
                             </span>
                           </td>
                           <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-600">
@@ -1534,9 +1539,36 @@ export default function GRNPage() {
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto rounded-2xl border border-slate-200">
-                    <table className="min-w-full divide-y divide-slate-200">
-                      <thead className="bg-slate-100/80">
+                  <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">PO Quantity</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">
+                        {selectedOrder.items.reduce((sum, row) => sum + Number(row.quantity || 0), 0).toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-blue-600">Received</p>
+                      <p className="mt-1 text-lg font-bold text-blue-700">
+                        {grnFormData.items.reduce((sum, row) => sum + Number(row.received_quantity || 0), 0).toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-600">Accepted</p>
+                      <p className="mt-1 text-lg font-bold text-emerald-700">
+                        {grnFormData.items.reduce((sum, row) => sum + Number(row.accepted_quantity || 0), 0).toFixed(2)}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-rose-600">Rejected</p>
+                      <p className="mt-1 text-lg font-bold text-rose-700">
+                        {grnFormData.items.reduce((sum, row) => sum + Number(row.rejected_quantity || 0), 0).toFixed(2)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-2xl border border-slate-200 shadow-inner">
+                    <table className="min-w-[1500px] w-full divide-y divide-slate-200">
+                      <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur supports-[backdrop-filter]:bg-slate-100/85">
                         <tr>
                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Item</th>
                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">PO Qty</th>
@@ -1555,34 +1587,39 @@ export default function GRNPage() {
                       </thead>
                       <tbody className="divide-y divide-slate-200 bg-white">
                         {selectedOrder.items.map((orderItem, index) => (
-                          <tr key={orderItem.id} className="transition hover:bg-blue-50/40">
-                            <td className="whitespace-nowrap px-4 py-4 text-sm font-medium text-slate-900">
-                              {orderItem.inventory_item.name}
+                          <tr key={orderItem.id} className="transition hover:bg-blue-50/40 focus-within:bg-blue-50/40">
+                            <td className="px-4 py-4 text-sm text-slate-900">
+                              <div className="flex flex-col">
+                                <span className="font-semibold">{orderItem.inventory_item.name}</span>
+                                <span className="mt-1 inline-flex w-fit rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-600">
+                                  {orderItem.inventory_item.type || 'item'}
+                                </span>
+                              </div>
                             </td>
                             <td className="whitespace-nowrap px-4 py-4 text-sm font-semibold text-blue-700">
-                              {orderItem.quantity}
+                              {Number(orderItem.quantity || 0).toFixed(2)}
                             </td>
                             <td className="whitespace-nowrap px-4 py-4">
-                              <div className="flex items-center">
-                                <span className="mr-1 text-gray-500">LKR</span>
+                              <div className="inline-flex items-center rounded-lg border border-blue-100 bg-white px-2 py-1.5 shadow-sm focus-within:ring-2 focus-within:ring-blue-100">
+                                <span className="mr-1 text-xs font-semibold text-slate-500">LKR</span>
                                 <input
                                   type="number"
                                   value={grnFormData.items[index]?.purchase_price || 0}
                                   onChange={(e) => updateGrnItem(index, 'purchase_price', parseFloat(e.target.value) || 0)}
-                                  className="w-24 rounded-lg border border-blue-100 bg-white px-2 py-1.5 text-sm text-black shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                                  className="w-24 bg-transparent px-1 text-sm text-black focus:outline-none"
                                   min="0"
                                   step="0.01"
                                 />
                               </div>
                             </td>
                             <td className="whitespace-nowrap px-4 py-4">
-                              <div className="flex items-center">
-                                <span className="mr-1 text-gray-500">LKR</span>
+                              <div className="inline-flex items-center rounded-lg border border-blue-100 bg-white px-2 py-1.5 shadow-sm focus-within:ring-2 focus-within:ring-blue-100">
+                                <span className="mr-1 text-xs font-semibold text-slate-500">LKR</span>
                                 <input
                                   type="number"
                                   value={grnFormData.items[index]?.sell_price || 0}
                                   onChange={(e) => updateGrnItem(index, 'sell_price', parseFloat(e.target.value) || 0)}
-                                  className="w-24 rounded-lg border border-blue-100 bg-white px-2 py-1.5 text-sm text-black shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                                  className="w-24 bg-transparent px-1 text-sm text-black focus:outline-none"
                                   min="0"
                                   step="0.01"
                                 />
@@ -1612,7 +1649,7 @@ export default function GRNPage() {
                                 type="number"
                                 value={grnFormData.items[index]?.accepted_quantity || 0}
                                 readOnly
-                                className="w-24 cursor-not-allowed rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-black"
+                                className="w-24 cursor-not-allowed rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-sm font-semibold text-emerald-700"
                                 min="0"
                                 step="0.01"
                               />
@@ -1631,7 +1668,15 @@ export default function GRNPage() {
                               <select
                                 value={grnFormData.items[index]?.quality_status || 'pending'}
                                 onChange={(e) => updateGrnItem(index, 'quality_status', e.target.value)}
-                                className="w-36 rounded-lg border border-blue-100 bg-white px-2 py-1.5 text-sm text-black shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                                className={`w-36 rounded-lg border px-2 py-1.5 text-sm font-medium shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 ${
+                                  (grnFormData.items[index]?.quality_status || 'pending') === 'accepted'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                    : (grnFormData.items[index]?.quality_status || 'pending') === 'rejected'
+                                      ? 'border-rose-200 bg-rose-50 text-rose-700'
+                                      : (grnFormData.items[index]?.quality_status || 'pending') === 'partial'
+                                        ? 'border-amber-200 bg-amber-50 text-amber-700'
+                                        : 'border-blue-100 bg-white text-black'
+                                }`}
                               >
                                 <option value="pending">Pending</option>
                                 <option value="accepted">Accepted</option>

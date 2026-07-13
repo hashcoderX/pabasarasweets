@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Production;
 
 use App\Http\Controllers\Controller;
 use App\Models\BomHeader;
+use App\Models\GrnItem;
 use App\Models\InventoryItem;
 use App\Models\Product;
 use App\Models\ProductionOrder;
@@ -65,7 +66,33 @@ class BomController extends Controller
 
     public function rawMaterials(): JsonResponse
     {
-        $materials = RawMaterial::with('inventoryItem')->orderByDesc('id')->get();
+        $grnBatchItems = GrnItem::with('purchaseOrderItem.inventoryItem')
+            ->where('accepted_quantity', '>', 0)
+            ->whereHas('purchaseOrderItem.inventoryItem', fn ($q) => $q->where('type', 'raw_material'))
+            ->get();
+
+        foreach ($grnBatchItems as $grnItem) {
+            $inventoryItemId = (int) ($grnItem->purchaseOrderItem?->inventory_item_id ?? 0);
+            if ($inventoryItemId <= 0) {
+                continue;
+            }
+
+            RawMaterial::firstOrCreate(
+                [
+                    'inventory_item_id' => $inventoryItemId,
+                    'grn_item_id' => (int) $grnItem->id,
+                ],
+                [
+                    'status' => 'active',
+                ]
+            );
+        }
+
+        $materials = RawMaterial::with([
+            'inventoryItem',
+            'grnItem.grn',
+            'grnItem.purchaseOrderItem:id,inventory_item_id,unit_price',
+        ])->orderByDesc('id')->get();
 
         return response()->json([
             'success' => true,
@@ -78,10 +105,11 @@ class BomController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'inventory_item_id' => [
-                'required',
+                'nullable',
                 'integer',
                 Rule::exists('inventory_items', 'id')->where(fn ($q) => $q->where('type', 'raw_material')),
             ],
+            'grn_item_id' => 'nullable|integer|exists:grn_items,id',
             'status' => 'nullable|in:active,inactive',
         ]);
 
@@ -93,18 +121,58 @@ class BomController extends Controller
             ], 422);
         }
 
-        $existing = RawMaterial::where('inventory_item_id', $request->inventory_item_id)->first();
+        if (empty($request->inventory_item_id) && empty($request->grn_item_id)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => [
+                    'inventory_item_id' => ['Select either an inventory item or a GRN batch item.'],
+                ],
+            ], 422);
+        }
+
+        $resolvedInventoryItemId = (int) ($request->inventory_item_id ?? 0);
+        $resolvedGrnItemId = $request->grn_item_id ? (int) $request->grn_item_id : null;
+
+        if ($resolvedGrnItemId) {
+            $grnItem = GrnItem::with('purchaseOrderItem.inventoryItem')->find($resolvedGrnItemId);
+            $resolvedInventoryItemId = (int) ($grnItem?->purchaseOrderItem?->inventory_item_id ?? 0);
+
+            $isRawMaterial = (string) ($grnItem?->purchaseOrderItem?->inventoryItem?->type ?? '') === 'raw_material';
+            if ($resolvedInventoryItemId <= 0 || !$isRawMaterial) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'grn_item_id' => ['Selected GRN item is not linked to a raw material inventory record.'],
+                    ],
+                ], 422);
+            }
+        }
+
+        $existing = RawMaterial::query()
+            ->when($resolvedGrnItemId, fn ($q) => $q->where('grn_item_id', $resolvedGrnItemId))
+            ->when(!$resolvedGrnItemId, fn ($q) => $q->where('inventory_item_id', $resolvedInventoryItemId)->whereNull('grn_item_id'))
+            ->first();
+
         if ($existing) {
             return response()->json([
                 'success' => false,
-                'message' => 'Selected inventory item is already added as a raw material.',
+                'message' => $resolvedGrnItemId
+                    ? 'Selected raw material batch is already added.'
+                    : 'Selected inventory item is already added as a raw material.',
             ], 422);
         }
 
         $material = RawMaterial::create([
-            'inventory_item_id' => $request->inventory_item_id,
+            'inventory_item_id' => $resolvedInventoryItemId,
+            'grn_item_id' => $resolvedGrnItemId,
             'status' => $request->status ?? 'active',
-        ])->load('inventoryItem');
+        ])->load([
+            'inventoryItem',
+            'grnItem.grn',
+            'grnItem.purchaseOrderItem:id,inventory_item_id,unit_price',
+        ]);
 
         return response()->json([
             'success' => true,

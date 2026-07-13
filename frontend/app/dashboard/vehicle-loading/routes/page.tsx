@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type RouteStatus = 'active' | 'inactive';
 type RouteType = 'local' | 'inter_city' | 'highway';

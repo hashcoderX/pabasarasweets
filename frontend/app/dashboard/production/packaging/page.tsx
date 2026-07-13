@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 type ApprovedQcRow = {
   id: number;
@@ -35,6 +35,7 @@ type PackagingRow = {
   packed_quantity: number;
   batch_no?: string | null;
   unit_price?: number | null;
+  selling_price?: number | null;
   expiry_date?: string | null;
   status: 'planned' | 'packed' | 'dispatched';
   label_code: string;
@@ -83,7 +84,8 @@ export default function PackagingManagementPage() {
   const [materialQty, setMaterialQty] = useState('100');
   const [materialUnit, setMaterialUnit] = useState('pcs');
   const [packedQty, setPackedQty] = useState('0');
-  const [unitPrice, setUnitPrice] = useState('0');
+  const [costingPrice, setCostingPrice] = useState('0');
+  const [sellingPrice, setSellingPrice] = useState('0');
   const [expiryDate, setExpiryDate] = useState('');
   const [packStatus, setPackStatus] = useState<'planned' | 'packed' | 'dispatched'>('planned');
   const [packNotes, setPackNotes] = useState('');
@@ -91,7 +93,8 @@ export default function PackagingManagementPage() {
   const [updateRowId, setUpdateRowId] = useState<number>(0);
   const [updateStatus, setUpdateStatus] = useState<'planned' | 'packed' | 'dispatched'>('planned');
   const [updatePackedQty, setUpdatePackedQty] = useState('0');
-  const [updateUnitPrice, setUpdateUnitPrice] = useState('0');
+  const [updateCostingPrice, setUpdateCostingPrice] = useState('0');
+  const [updateSellingPrice, setUpdateSellingPrice] = useState('0');
   const [updateExpiryDate, setUpdateExpiryDate] = useState('');
 
   const [fromDate, setFromDate] = useState('');
@@ -99,7 +102,7 @@ export default function PackagingManagementPage() {
   const [statusFilter, setStatusFilter] = useState<'planned' | 'packed' | 'dispatched' | ''>('');
   const [search, setSearch] = useState('');
 
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8020';
+  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const router = useRouter();
   const inputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
@@ -188,7 +191,8 @@ export default function PackagingManagementPage() {
           packaging_material_quantity: Number(materialQty || 0),
           packaging_material_unit: materialUnit,
           packed_quantity: Number(packedQty || 0),
-          unit_price: Number(unitPrice || 0),
+          unit_price: Number(costingPrice || 0),
+          selling_price: Number(sellingPrice || 0),
           expiry_date: expiryDate || null,
           status: packStatus,
           notes: packNotes || null,
@@ -201,7 +205,8 @@ export default function PackagingManagementPage() {
       setMaterialQty('100');
       setMaterialUnit('pcs');
       setPackedQty('0');
-      setUnitPrice('0');
+      setCostingPrice('0');
+      setSellingPrice('0');
       setExpiryDate('');
       setPackStatus('planned');
       setPackNotes('');
@@ -230,7 +235,8 @@ export default function PackagingManagementPage() {
         {
           status: updateStatus,
           packed_quantity: Number(updatePackedQty || 0),
-          unit_price: Number(updateUnitPrice || 0),
+          unit_price: Number(updateCostingPrice || 0),
+          selling_price: Number(updateSellingPrice || 0),
           expiry_date: updateExpiryDate || null,
         },
         { headers: authHeaders(token) }
@@ -262,7 +268,8 @@ export default function PackagingManagementPage() {
       'Packaging Material',
       'Material Qty',
       'Packed Qty',
-      'Unit Price',
+      'Costing Price',
+      'Selling Price',
       'Expiry Date',
       'Status',
       'Label Code',
@@ -284,6 +291,7 @@ export default function PackagingManagementPage() {
         `${Number(row.packaging_material_quantity || 0).toFixed(3)} ${row.packaging_material_unit || ''}`,
         Number(row.packed_quantity || 0).toFixed(3),
         Number(row.unit_price || 0).toFixed(2),
+        Number(row.selling_price || 0).toFixed(2),
         row.expiry_date || '',
         row.status,
         row.label_code || '',
@@ -392,8 +400,12 @@ export default function PackagingManagementPage() {
                 <input type="number" min="0" step="0.001" value={packedQty} onChange={(e) => setPackedQty(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Unit Price (LKR)</label>
-                <input type="number" min="0" step="0.01" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} className={inputClass} />
+                <label className="block text-xs font-medium text-gray-600 mb-1">Costing Price (LKR)</label>
+                <input type="number" min="0" step="0.01" value={costingPrice} onChange={(e) => setCostingPrice(e.target.value)} className={inputClass} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Selling Price (LKR)</label>
+                <input type="number" min="0" step="0.01" value={sellingPrice} onChange={(e) => setSellingPrice(e.target.value)} className={inputClass} />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Expiry Date</label>
@@ -430,7 +442,8 @@ export default function PackagingManagementPage() {
                     if (row) {
                       setUpdateStatus(row.status);
                       setUpdatePackedQty(String(row.packed_quantity ?? 0));
-                      setUpdateUnitPrice(String(row.unit_price ?? 0));
+                      setUpdateCostingPrice(String(row.unit_price ?? 0));
+                      setUpdateSellingPrice(String(row.selling_price ?? 0));
                       setUpdateExpiryDate(row.expiry_date ? String(row.expiry_date).slice(0, 10) : '');
                     }
                   }}
@@ -460,8 +473,12 @@ export default function PackagingManagementPage() {
                 <input type="number" min="0" step="0.001" value={updatePackedQty} onChange={(e) => setUpdatePackedQty(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Unit Price (LKR)</label>
-                <input type="number" min="0" step="0.01" value={updateUnitPrice} onChange={(e) => setUpdateUnitPrice(e.target.value)} className={inputClass} />
+                <label className="block text-xs font-medium text-gray-600 mb-1">Costing Price (LKR)</label>
+                <input type="number" min="0" step="0.01" value={updateCostingPrice} onChange={(e) => setUpdateCostingPrice(e.target.value)} className={inputClass} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Selling Price (LKR)</label>
+                <input type="number" min="0" step="0.01" value={updateSellingPrice} onChange={(e) => setUpdateSellingPrice(e.target.value)} className={inputClass} />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Expiry Date</label>
@@ -516,7 +533,8 @@ export default function PackagingManagementPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Packed Qty</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Unit Price</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Costing Price</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Selling Price</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Expiry</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Label</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Barcode / QR</th>
@@ -525,7 +543,7 @@ export default function PackagingManagementPage() {
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {rows.length === 0 ? (
-                  <tr><td colSpan={11} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
+                  <tr><td colSpan={12} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
                 ) : (
                   rows.map((row) => {
                     const order = resolveOrder(row);
@@ -538,6 +556,7 @@ export default function PackagingManagementPage() {
                         <td className="px-4 py-2.5 text-sm text-gray-700">{row.packaging_material_name} ({Number(row.packaging_material_quantity || 0).toFixed(3)} {row.packaging_material_unit})</td>
                         <td className="px-4 py-2.5 text-sm text-right text-rose-700 font-semibold">{Number(row.packed_quantity || 0).toFixed(3)}</td>
                         <td className="px-4 py-2.5 text-sm text-right text-gray-700">LKR {Number(row.unit_price || 0).toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-sm text-right text-gray-700">LKR {Number(row.selling_price || 0).toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-xs text-gray-700">{row.expiry_date ? String(row.expiry_date).slice(0, 10) : '-'}</td>
                         <td className="px-4 py-2.5 text-xs text-gray-700 font-semibold">{row.label_code}</td>
                         <td className="px-4 py-2.5 text-xs text-gray-600">BAR: {row.barcode_value || '-'}<br />QR: {row.qr_value || '-'}</td>

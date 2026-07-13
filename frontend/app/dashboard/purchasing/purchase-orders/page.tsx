@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '@/lib/http';
 import { useRouter } from 'next/navigation';
 
 interface PurchaseOrder {
@@ -82,6 +82,8 @@ export default function PurchaseOrdersPage() {
     notes: '',
     items: [] as OrderItem[],
   });
+  const [activeSuggestionRow, setActiveSuggestionRow] = useState<number | null>(null);
+  const [highlightedSuggestionIndex, setHighlightedSuggestionIndex] = useState<number>(-1);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -218,6 +220,56 @@ export default function PurchaseOrdersPage() {
   const removeItem = (index: number) => {
     const updatedItems = formData.items.filter((_, i) => i !== index);
     setFormData({ ...formData, items: updatedItems });
+    if (activeSuggestionRow === index) {
+      setActiveSuggestionRow(null);
+      setHighlightedSuggestionIndex(-1);
+    }
+  };
+
+  const getItemSuggestions = (query: string, currentItemId: number) => {
+    const search = query.trim().toLowerCase();
+    const ranked = [...inventoryItems]
+      .filter((invItem) => {
+        if (!search) return true;
+        const haystack = [
+          invItem.name,
+          invItem.code,
+          invItem.category,
+          invItem.unit,
+          invItem.type,
+          invItem.supplier_name,
+        ]
+          .map((value) => String(value || '').toLowerCase())
+          .join(' ');
+        return haystack.includes(search);
+      })
+      .sort((a, b) => {
+        const aName = String(a.name || '').toLowerCase();
+        const bName = String(b.name || '').toLowerCase();
+        const aStarts = search ? aName.startsWith(search) : false;
+        const bStarts = search ? bName.startsWith(search) : false;
+        if (aStarts !== bStarts) return aStarts ? -1 : 1;
+        if (a.id === currentItemId) return -1;
+        if (b.id === currentItemId) return 1;
+        return aName.localeCompare(bName);
+      });
+
+    return ranked.slice(0, 8);
+  };
+
+  const applyInventoryItemToRow = (index: number, selected: InventoryItem) => {
+    const updatedItems = [...formData.items];
+    updatedItems[index] = {
+      ...updatedItems[index],
+      inventory_item_id: selected.id,
+      item_name: selected.name,
+      item_code: selected.code,
+      item_unit: selected.unit || 'pieces',
+      unit_price: Number(selected.unit_price) || 0,
+    };
+    setFormData({ ...formData, items: updatedItems });
+    setActiveSuggestionRow(null);
+    setHighlightedSuggestionIndex(-1);
   };
 
   const handleInventorySelect = (index: number, rawValue: string) => {
@@ -225,16 +277,7 @@ export default function PurchaseOrdersPage() {
     const selected = inventoryItems.find((inv) => inv.id === inventoryItemId);
 
     if (selected) {
-      const updatedItems = [...formData.items];
-      updatedItems[index] = {
-        ...updatedItems[index],
-        inventory_item_id: selected.id,
-        item_name: selected.name,
-        item_code: selected.code,
-        item_unit: selected.unit || 'pieces',
-        unit_price: Number(selected.unit_price) || 0,
-      };
-      setFormData({ ...formData, items: updatedItems });
+      applyInventoryItemToRow(index, selected);
       return;
     }
 
@@ -425,6 +468,11 @@ export default function PurchaseOrdersPage() {
                   </div>
                   <div className="space-y-4">
                     {formData.items.map((item, index) => (
+                      (() => {
+                        const suggestions = getItemSuggestions(item.item_name, item.inventory_item_id);
+                        const showSuggestions = activeSuggestionRow === index && suggestions.length > 0;
+
+                        return (
                       <div key={index} className="p-4 border border-blue-100 rounded-2xl bg-gradient-to-br from-blue-50/40 to-white shadow-sm">
                         <div className="flex justify-between items-center mb-3">
                           <h5 className="text-sm font-semibold text-gray-900">Item {index + 1}</h5>
@@ -455,19 +503,81 @@ export default function PurchaseOrdersPage() {
 
                           <div>
                             <label className={modalLabelClass}>Or Type New Item Name</label>
-                            <input
-                              type="text"
-                              value={item.item_name}
-                              onChange={(e) => {
-                                updateItem(index, 'item_name', e.target.value);
-                                if (e.target.value.trim().length > 0 && item.inventory_item_id !== 0) {
-                                  updateItem(index, 'inventory_item_id', 0);
-                                }
-                              }}
-                              className={modalInputClass}
-                              placeholder="Type item if not in stock list"
-                              required={item.inventory_item_id === 0}
-                            />
+                            <div className="relative">
+                              <input
+                                type="text"
+                                value={item.item_name}
+                                onFocus={() => {
+                                  setActiveSuggestionRow(index);
+                                  setHighlightedSuggestionIndex(0);
+                                }}
+                                onBlur={() => {
+                                  setTimeout(() => {
+                                    setActiveSuggestionRow((prev) => (prev === index ? null : prev));
+                                    setHighlightedSuggestionIndex(-1);
+                                  }, 120);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (!showSuggestions) return;
+
+                                  if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setHighlightedSuggestionIndex((prev) => Math.min(prev + 1, suggestions.length - 1));
+                                  }
+
+                                  if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setHighlightedSuggestionIndex((prev) => Math.max(prev - 1, 0));
+                                  }
+
+                                  if (e.key === 'Enter' && highlightedSuggestionIndex >= 0 && highlightedSuggestionIndex < suggestions.length) {
+                                    e.preventDefault();
+                                    applyInventoryItemToRow(index, suggestions[highlightedSuggestionIndex]);
+                                  }
+
+                                  if (e.key === 'Escape') {
+                                    setActiveSuggestionRow(null);
+                                    setHighlightedSuggestionIndex(-1);
+                                  }
+                                }}
+                                onChange={(e) => {
+                                  updateItem(index, 'item_name', e.target.value);
+                                  setActiveSuggestionRow(index);
+                                  setHighlightedSuggestionIndex(0);
+                                  if (e.target.value.trim().length > 0 && item.inventory_item_id !== 0) {
+                                    updateItem(index, 'inventory_item_id', 0);
+                                  }
+                                }}
+                                className={modalInputClass}
+                                placeholder="Type item name, code, category..."
+                                required={item.inventory_item_id === 0}
+                              />
+
+                              {showSuggestions && (
+                                <div className="absolute z-20 mt-1 w-full rounded-xl border border-blue-100 bg-white shadow-xl max-h-64 overflow-auto">
+                                  {suggestions.map((suggestion, suggestionIndex) => (
+                                    <button
+                                      type="button"
+                                      key={suggestion.id}
+                                      onMouseDown={(e) => {
+                                        e.preventDefault();
+                                        applyInventoryItemToRow(index, suggestion);
+                                      }}
+                                      className={`w-full px-3 py-2.5 text-left transition ${
+                                        highlightedSuggestionIndex === suggestionIndex
+                                          ? 'bg-blue-50 border-l-2 border-blue-500'
+                                          : 'hover:bg-slate-50'
+                                      }`}
+                                    >
+                                      <div className="text-sm font-medium text-slate-900">{suggestion.name}</div>
+                                      <div className="text-xs text-slate-500">
+                                        {suggestion.code} • {suggestion.unit || 'pieces'} • Stock: {Number(suggestion.current_stock || 0).toFixed(2)} • LKR {Number(suggestion.unit_price || 0).toFixed(2)}
+                                      </div>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                           </div>
 
                           <div>
@@ -529,6 +639,8 @@ export default function PurchaseOrdersPage() {
                           </div>
                         </div>
                       </div>
+                        );
+                      })()
                     ))}
                   </div>
                 </div>

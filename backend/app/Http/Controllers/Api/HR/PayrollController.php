@@ -7,6 +7,7 @@ use App\Models\Payroll;
 use App\Models\Employee;
 use App\Models\Attendance;
 use App\Models\Company;
+use App\Models\EmployeeAllowanceDeduction;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Carbon\Carbon;
@@ -26,7 +27,7 @@ class PayrollController extends Controller
         $branchId = $request->input('branch_id');
         $monthYear = $request->input('month_year');
 
-        $query = Payroll::with('employee');
+        $query = Payroll::with(['employee.department', 'employee.designation']);
 
         if ($tenantId) {
             $query->where('tenant_id', $tenantId);
@@ -130,7 +131,7 @@ class PayrollController extends Controller
                 'status' => 'pending',
             ]);
 
-            $generatedPayrolls[] = $this->appendBreakdown($payroll->load('employee'));
+            $generatedPayrolls[] = $this->appendBreakdown($payroll->load(['employee.department', 'employee.designation']));
         }
 
         return response()->json([
@@ -302,7 +303,7 @@ class PayrollController extends Controller
 
         $payroll = Payroll::create($validated);
 
-        return response()->json($this->appendBreakdown($payroll->load('employee')), 201);
+        return response()->json($this->appendBreakdown($payroll->load(['employee.department', 'employee.designation'])), 201);
     }
 
     /**
@@ -310,7 +311,7 @@ class PayrollController extends Controller
      */
     public function show(Payroll $payroll): JsonResponse
     {
-        return response()->json($this->appendBreakdown($payroll->load('employee')));
+        return response()->json($this->appendBreakdown($payroll->load(['employee.department', 'employee.designation'])));
     }
 
     /**
@@ -328,7 +329,7 @@ class PayrollController extends Controller
 
         $payroll->update($validated);
 
-        return response()->json($this->appendBreakdown($payroll->load('employee')));
+        return response()->json($this->appendBreakdown($payroll->load(['employee.department', 'employee.designation'])));
     }
 
     /**
@@ -346,7 +347,7 @@ class PayrollController extends Controller
      */
     public function payslip(Payroll $payroll): Response
     {
-        $payroll = $this->appendBreakdown($payroll->load('employee'));
+        $payroll = $this->appendBreakdown($payroll->load(['employee.department', 'employee.designation']));
         $employeeName = trim(($payroll->employee->first_name ?? '') . ' ' . ($payroll->employee->last_name ?? ''));
         $code = $payroll->employee->employee_code ?? 'EMP';
         $safeMonth = str_replace('/', '-', (string) $payroll->month_year);
@@ -393,11 +394,13 @@ class PayrollController extends Controller
                 <tr><td>Earned Basic (Attendance)</td><td class='right'>{$money($b['earned_basic_salary'] ?? ($payroll->earned_basic_salary ?? $payroll->basic_salary))}</td></tr>
                 <tr><td>Commission</td><td class='right'>+{$money($b['commission_amount'] ?? ($payroll->commission_amount ?? 0))}</td></tr>
                 <tr><td>Overtime</td><td class='right'>+{$money($b['overtime_amount'] ?? $payroll->overtime_amount)}</td></tr>
+                <tr><td>Custom Allowances</td><td class='right'>+{$money($b['custom_allowances_total'] ?? 0)}</td></tr>
                 <tr><td>Attendance Deduction</td><td class='right'>-{$money($b['attendance_deduction_amount'] ?? ($payroll->attendance_deduction_amount ?? 0))}</td></tr>
                 <tr><td>Late Deduction</td><td class='right'>-{$money($b['late_deduction_amount'] ?? ($payroll->late_deduction_amount ?? 0))}</td></tr>
                 <tr><td>EPF (Employee)</td><td class='right'>-{$money($b['epf_employee_amount'] ?? ($payroll->epf_employee_amount ?? 0))}</td></tr>
                 <tr><td>ETF (Employee)</td><td class='right'>-{$money($b['etf_employee_amount'] ?? ($payroll->etf_employee_amount ?? 0))}</td></tr>
                 <tr><td>APIT Tax</td><td class='right'>-{$money($b['apit_tax_amount'] ?? ($payroll->apit_tax_amount ?? 0))}</td></tr>
+                <tr><td>Custom Deductions</td><td class='right'>-{$money($b['custom_deductions_total'] ?? 0)}</td></tr>
                 <tr><td><strong>Gross Salary</strong></td><td class='right'><strong>{$money($b['gross_salary'] ?? ($payroll->gross_salary ?? 0))}</strong></td></tr>
                 <tr><td><strong>Net Salary</strong></td><td class='right'><strong>{$money($b['net_salary'] ?? $payroll->net_salary)}</strong></td></tr>
             </table>
@@ -474,8 +477,14 @@ class PayrollController extends Controller
                 : round(($earnedBasicSalary + $commissionAmount + $overtimeAmount) * ($apitRate / 100), 2);
         }
 
-        $allowances = round($commissionAmount + $overtimeAmount, 2);
-        $deductions = round($attendanceDeductionAmount + $lateDeductionAmount + $epfEmployeeAmount + $etfEmployeeAmount + $apitTaxAmount, 2);
+            $adjustments = $this->calculateEmployeeAdjustments((int) $employee->id, $earnedBasicSalary);
+            $customAllowancesTotal = $adjustments['allowances_total'];
+            $customDeductionsTotal = $adjustments['deductions_total'];
+            $customAllowanceItems = $adjustments['allowance_items'];
+            $customDeductionItems = $adjustments['deduction_items'];
+
+            $allowances = round($commissionAmount + $overtimeAmount + $customAllowancesTotal, 2);
+            $deductions = round($attendanceDeductionAmount + $lateDeductionAmount + $epfEmployeeAmount + $etfEmployeeAmount + $apitTaxAmount + $customDeductionsTotal, 2);
         $grossSalary = round($earnedBasicSalary + $allowances, 2);
         $netSalary = round(max(0, $grossSalary - $deductions), 2);
 
@@ -500,6 +509,56 @@ class PayrollController extends Controller
             'absent_days' => (int) ceil($absentDays),
             'overtime_hours' => $overtimeHours,
             'overtime_amount' => $overtimeAmount,
+            'custom_allowances_total' => $customAllowancesTotal,
+            'custom_deductions_total' => $customDeductionsTotal,
+            'custom_allowance_items' => $customAllowanceItems,
+            'custom_deduction_items' => $customDeductionItems,
+        ];
+    }
+
+    private function calculateEmployeeAdjustments(int $employeeId, float $earnedBasicSalary): array
+    {
+        $rows = EmployeeAllowanceDeduction::query()
+            ->where('employee_id', $employeeId)
+            ->where('is_active', true)
+            ->get();
+
+        $allowanceItems = [];
+        $deductionItems = [];
+        $allowancesTotal = 0.0;
+        $deductionsTotal = 0.0;
+
+        foreach ($rows as $row) {
+            $rawAmount = (float) ($row->amount ?? 0);
+            $isPercentage = ($row->amount_type ?? 'fixed') === 'percentage';
+            $calculatedAmount = $isPercentage
+                ? round($earnedBasicSalary * ($rawAmount / 100), 2)
+                : round($rawAmount, 2);
+
+            $item = [
+                'id' => (int) $row->id,
+                'name' => (string) ($row->name ?? ''),
+                'amount' => $calculatedAmount,
+                'amount_type' => (string) ($row->amount_type ?? 'fixed'),
+                'raw_amount' => $rawAmount,
+            ];
+
+            if (($row->type ?? '') === 'allowance') {
+                $allowancesTotal += $calculatedAmount;
+                $allowanceItems[] = $item;
+            }
+
+            if (($row->type ?? '') === 'deduction') {
+                $deductionsTotal += $calculatedAmount;
+                $deductionItems[] = $item;
+            }
+        }
+
+        return [
+            'allowances_total' => round($allowancesTotal, 2),
+            'deductions_total' => round($deductionsTotal, 2),
+            'allowance_items' => $allowanceItems,
+            'deduction_items' => $deductionItems,
         ];
     }
 
@@ -520,9 +579,12 @@ class PayrollController extends Controller
 
     private function appendBreakdown(Payroll $payroll): Payroll
     {
+        $earnedBasicSalary = (float) ($payroll->earned_basic_salary ?? $payroll->basic_salary);
+        $adjustments = $this->calculateEmployeeAdjustments((int) $payroll->employee_id, $earnedBasicSalary);
+
         $payroll->setAttribute('salary_breakdown', [
             'basic_salary' => (float) $payroll->basic_salary,
-            'earned_basic_salary' => (float) ($payroll->earned_basic_salary ?? $payroll->basic_salary),
+            'earned_basic_salary' => $earnedBasicSalary,
             'commission_amount' => (float) ($payroll->commission_amount ?? 0),
             'overtime_hours' => (float) ($payroll->overtime_hours ?? 0),
             'overtime_amount' => (float) ($payroll->overtime_amount ?? 0),
@@ -538,6 +600,10 @@ class PayrollController extends Controller
             'deductions' => (float) ($payroll->deductions ?? 0),
             'gross_salary' => (float) ($payroll->gross_salary ?? (($payroll->basic_salary ?? 0) + ($payroll->allowances ?? 0))),
             'net_salary' => (float) $payroll->net_salary,
+            'custom_allowances_total' => (float) $adjustments['allowances_total'],
+            'custom_deductions_total' => (float) $adjustments['deductions_total'],
+            'custom_allowance_items' => $adjustments['allowance_items'],
+            'custom_deduction_items' => $adjustments['deduction_items'],
         ]);
 
         return $payroll;

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import axios from 'axios';
+import { createApiClient } from '@/lib/apiClient';
 
 export default function HRM() {
   const [token, setToken] = useState('');
@@ -23,6 +23,7 @@ export default function HRM() {
   const [processedPayrolls, setProcessedPayrolls] = useState(0);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const apiClient = createApiClient();
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -42,7 +43,7 @@ export default function HRM() {
 
   const fetchAccessProfile = async () => {
     try {
-      const userRes = await axios.get('/api/user', {
+      const userRes = await apiClient.get('/user', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
@@ -94,7 +95,7 @@ export default function HRM() {
       setLoading(true);
       
       // Fetch all employees
-      const employeesResponse = await axios.get('/api/hr/employees', {
+      const employeesResponse = await apiClient.get('/hr/employees', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 1000 } // Get all employees
       });
@@ -107,7 +108,7 @@ export default function HRM() {
       setActiveEmployees(activeEmployeesCount);
 
       // Fetch departments count
-      const departmentsResponse = await axios.get('/api/hr/departments', {
+      const departmentsResponse = await apiClient.get('/hr/departments', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 1000 } // Get all departments
       });
@@ -116,7 +117,7 @@ export default function HRM() {
       setDepartmentsCount(departmentsCount);
 
       // Fetch designations count
-      const designationsResponse = await axios.get('/api/hr/designations', {
+      const designationsResponse = await apiClient.get('/hr/designations', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 1000 } // Get all designations
       });
@@ -126,7 +127,7 @@ export default function HRM() {
 
       // Fetch today's attendance
       const today = new Date().toISOString().split('T')[0];
-      const attendanceResponse = await axios.get('/api/hr/attendance', {
+      const attendanceResponse = await apiClient.get('/hr/attendance', {
         headers: { Authorization: `Bearer ${token}` },
         params: { date: today, per_page: 1000 }
       });
@@ -146,7 +147,7 @@ export default function HRM() {
       }
 
       // Fetch pending leaves
-      const leavesResponse = await axios.get('/api/hr/leaves', {
+      const leavesResponse = await apiClient.get('/hr/leaves', {
         headers: { Authorization: `Bearer ${token}` },
         params: { status: 'pending', per_page: 1000 } // Get all pending leaves
       });
@@ -155,7 +156,7 @@ export default function HRM() {
       setPendingLeaves(pendingLeavesCount);
 
       // Fetch payroll statistics
-      const payrollsResponse = await axios.get('/api/hr/payrolls', {
+      const payrollsResponse = await apiClient.get('/hr/payrolls', {
         headers: { Authorization: `Bearer ${token}` },
         params: { per_page: 1000 } // Get all payrolls
       });

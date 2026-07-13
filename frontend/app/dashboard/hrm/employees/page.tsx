@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface EmployeeAllowanceDeduction {
   id: number;
@@ -42,6 +42,19 @@ interface Employee {
   apit_tax_rate?: number;
   status: 'active' | 'inactive';
   user?: { role?: string };
+  reporting_person_id?: number | null;
+  reporting_person?: {
+    id: number;
+    employee_code?: string;
+    first_name?: string;
+    last_name?: string;
+  } | null;
+  reportingPerson?: {
+    id: number;
+    employee_code?: string;
+    first_name?: string;
+    last_name?: string;
+  } | null;
   department: { id: number; name: string };
   designation: { id: number; name: string };
   branch: { id: number; name: string };
@@ -182,6 +195,7 @@ export default function Employees() {
   const [taxReliefEligible, setTaxReliefEligible] = useState<'yes' | 'no'>('no');
   const [departmentId, setDepartmentId] = useState('');
   const [designationId, setDesignationId] = useState('');
+  const [reportingPersonId, setReportingPersonId] = useState('');
   const [branchId, setBranchId] = useState('');
   const [status, setStatus] = useState<'active' | 'inactive'>('active');
 
@@ -261,6 +275,18 @@ export default function Employees() {
   const startIndex = (currentPage - 1) * pageSize;
   const endIndex = Math.min(startIndex + pageSize, filteredEmployees.length);
   const paginatedEmployees = filteredEmployees.slice(startIndex, startIndex + pageSize);
+
+  const reportingPersonOptions = useMemo(() => {
+    const currentEditingId = editingEmployee?.id;
+    return employees
+      .filter((employee) => employee.id !== currentEditingId)
+      .map((employee) => ({
+        id: employee.id,
+        employee_code: employee.employee_code,
+        full_name: `${employee.first_name} ${employee.last_name}`.trim(),
+      }))
+      .sort((a, b) => a.full_name.localeCompare(b.full_name));
+  }, [employees, editingEmployee]);
 
   const calculateMonthlyApit = (monthlyIncome: number) => {
     const slabs = [
@@ -534,6 +560,7 @@ export default function Employees() {
     setTaxReliefEligible('no');
     setDepartmentId('');
     setDesignationId('');
+    setReportingPersonId('');
     setBranchId('');
     setStatus('active');
     setEmployeeLeaveBalances([]);
@@ -574,6 +601,7 @@ export default function Employees() {
       tax_relief_eligible: taxReliefEligible === 'yes',
       department_id: parseInt(departmentId),
       designation_name: selectedRole?.name,
+      reporting_person_id: reportingPersonId ? parseInt(reportingPersonId, 10) : null,
       branch_id: parseInt(branchId),
       status,
       leave_balances: employeeLeaveBalances.length > 0 ? employeeLeaveBalances : undefined,
@@ -634,6 +662,14 @@ export default function Employees() {
       designations
         .find((item) => item.name.toLowerCase() === employee.designation.name.toLowerCase())
         ?.id.toString() || employee.designation.id.toString()
+    );
+    setReportingPersonId(
+      String(
+        employee.reporting_person_id ??
+        employee.reporting_person?.id ??
+        employee.reportingPerson?.id ??
+        ''
+      )
     );
     setBranchId(employee.branch.id.toString());
     setStatus(employee.status);
@@ -1837,6 +1873,24 @@ export default function Employees() {
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Reported Person
+                  </label>
+                  <select
+                    value={reportingPersonId}
+                    onChange={(e) => setReportingPersonId(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900"
+                  >
+                    <option value="">Select Reported Person (optional)</option>
+                    {reportingPersonOptions.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.employee_code} - {person.full_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Branch *
                   </label>
                   <select
@@ -2062,6 +2116,14 @@ export default function Employees() {
                     <div><strong>Hire Date:</strong> {profileEmployee.hire_date}</div>
                     <div><strong>Department:</strong> {profileEmployee.department.name}</div>
                     <div><strong>Designation:</strong> {profileEmployee.designation.name}</div>
+                    <div>
+                      <strong>Reported Person:</strong>{' '}
+                      {profileEmployee.reporting_person
+                        ? `${profileEmployee.reporting_person.first_name || ''} ${profileEmployee.reporting_person.last_name || ''}`.trim() || profileEmployee.reporting_person.employee_code || 'N/A'
+                        : profileEmployee.reportingPerson
+                          ? `${profileEmployee.reportingPerson.first_name || ''} ${profileEmployee.reportingPerson.last_name || ''}`.trim() || profileEmployee.reportingPerson.employee_code || 'N/A'
+                          : 'N/A'}
+                    </div>
                     <div><strong>Branch:</strong> {profileEmployee.branch.name}</div>
                     <div><strong>Status:</strong> 
                       <span className={`ml-2 px-2 py-1 text-xs rounded-full ${profileEmployee.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>

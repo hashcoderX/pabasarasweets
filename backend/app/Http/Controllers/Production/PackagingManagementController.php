@@ -120,6 +120,7 @@ class PackagingManagementController extends Controller
             'packaging_material_unit' => 'required|string|max:30',
             'packed_quantity' => 'required|numeric|min:0',
             'unit_price' => 'nullable|numeric|min:0',
+            'selling_price' => 'nullable|numeric|min:0',
             'expiry_date' => 'nullable|date',
             'status' => 'nullable|in:planned,packed,dispatched',
             'notes' => 'nullable|string',
@@ -159,6 +160,7 @@ class PackagingManagementController extends Controller
                 'packaging_material_unit' => $request->packaging_material_unit,
                 'packed_quantity' => $request->packed_quantity,
                 'unit_price' => $request->unit_price ?? 0,
+                'selling_price' => $request->selling_price ?? 0,
                 'status' => $status,
                 'label_code' => $labelCode,
                 'barcode_value' => $barcode,
@@ -205,6 +207,7 @@ class PackagingManagementController extends Controller
             'packaging_material_unit' => 'sometimes|string|max:30',
             'packed_quantity' => 'sometimes|numeric|min:0',
             'unit_price' => 'sometimes|numeric|min:0',
+            'selling_price' => 'sometimes|numeric|min:0',
             'expiry_date' => 'nullable|date',
             'status' => 'sometimes|in:planned,packed,dispatched',
             'notes' => 'nullable|string',
@@ -225,6 +228,7 @@ class PackagingManagementController extends Controller
                 'packaging_material_unit',
                 'packed_quantity',
                 'unit_price',
+                'selling_price',
                 'expiry_date',
                 'status',
                 'notes',
@@ -343,12 +347,17 @@ class PackagingManagementController extends Controller
         $info['last_barcode_value'] = $batch->barcode_value;
         $info['last_qr_value'] = $batch->qr_value;
         $info['last_batch_unit_price'] = (float) ($batch->unit_price ?? 0);
+        $info['last_batch_selling_price'] = (float) ($batch->selling_price ?? 0);
         $info['last_batch_expiry_date'] = optional($batch->expiry_date)->toDateString();
         $info['last_synced_at'] = Carbon::now()->toDateTimeString();
 
         $item->current_stock = round((float) $item->current_stock + $delta, 3);
         if ((float) ($batch->unit_price ?? 0) > 0) {
             $item->unit_price = (float) $batch->unit_price;
+            $item->purchase_price = (float) $batch->unit_price;
+        }
+        if ((float) ($batch->selling_price ?? 0) > 0) {
+            $item->sell_price = (float) $batch->selling_price;
         }
         if ($batch->expiry_date) {
             $item->expiry_date = $batch->expiry_date;

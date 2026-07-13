@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Employee {
   id: number;
@@ -31,6 +31,7 @@ interface AttendanceRecord {
 
 export default function AttendancePage() {
   type NoticeTone = 'success' | 'error' | 'info';
+  const todayDate = new Date().toISOString().split('T')[0];
 
   const [token, setToken] = useState('');
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -44,6 +45,7 @@ export default function AttendancePage() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [todayAttendance, setTodayAttendance] = useState<{[key: number]: AttendanceRecord}>({});
+  const [selectedAttendanceDate, setSelectedAttendanceDate] = useState(todayDate);
   const [showMarkModal, setShowMarkModal] = useState(false);
   const [markingEmployee, setMarkingEmployee] = useState<Employee | null>(null);
   const [markStatus, setMarkStatus] = useState<'present' | 'absent' | 'late' | 'half_day'>('present');
@@ -67,9 +69,13 @@ export default function AttendancePage() {
     } else {
       setToken(storedToken);
       fetchEmployees(storedToken);
-      fetchTodayAttendance(storedToken);
     }
   }, [router]);
+
+  useEffect(() => {
+    if (!token) return;
+    fetchTodayAttendance(token, selectedAttendanceDate);
+  }, [token, selectedAttendanceDate]);
 
   const fetchEmployees = async (authToken?: string) => {
     const tokenToUse = authToken || token;
@@ -91,12 +97,12 @@ export default function AttendancePage() {
     }
   };
 
-  const fetchTodayAttendance = async (authToken?: string) => {
+  const fetchTodayAttendance = async (authToken?: string, targetDate?: string) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const response = await axios.get(`/api/hr/attendance?date=${today}`, {
+      const dateToLoad = targetDate || selectedAttendanceDate;
+      const response = await axios.get(`/api/hr/attendance?date=${dateToLoad}`, {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
       const attendanceMap: {[key: number]: AttendanceRecord} = {};
@@ -112,6 +118,7 @@ export default function AttendancePage() {
   const markAttendance = async (
     employeeId: number,
     status: 'present' | 'absent' | 'late' | 'half_day',
+    attendanceDate: string,
     inTime?: string,
     outTime?: string,
     notes?: string
@@ -121,7 +128,8 @@ export default function AttendancePage() {
     try {
       const payload: any = { 
         employee_id: employeeId, 
-        status 
+        status,
+        date: attendanceDate,
       };
       
       if (inTime) payload.in_time = inTime;
@@ -134,7 +142,7 @@ export default function AttendancePage() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       openNoticeModal('success', 'Attendance Marked', `Marked ${status} successfully.`);
-      // Refresh today's attendance data
+      // Refresh attendance data for selected date
       fetchTodayAttendance();
       // Close modal if open
       setShowMarkModal(false);
@@ -176,7 +184,14 @@ export default function AttendancePage() {
   const handleMarkSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!markingEmployee) return;
-    markAttendance(markingEmployee.id, markStatus, markInTime || undefined, undefined, markNotes || undefined);
+    markAttendance(
+      markingEmployee.id,
+      markStatus,
+      selectedAttendanceDate,
+      markInTime || undefined,
+      undefined,
+      markNotes || undefined
+    );
   };
 
   const openMarkOutModal = (attendance: AttendanceRecord) => {
@@ -399,9 +414,17 @@ export default function AttendancePage() {
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full md:w-80 px-4 py-2 rounded-full border border-white/20 bg-white/70 backdrop-blur-sm text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
                 />
+                <input
+                  type="date"
+                  value={selectedAttendanceDate}
+                  onChange={(e) => setSelectedAttendanceDate(e.target.value)}
+                  max={todayDate}
+                  className="px-4 py-2 rounded-full border border-white/20 bg-white/70 backdrop-blur-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  title="Attendance date"
+                />
               </div>
               <div className="text-sm text-gray-600">
-                {loading ? 'Updating attendance...' : `${filteredEmployees.length} employees listed`}
+                {loading ? 'Updating attendance...' : `${filteredEmployees.length} employees listed for ${selectedAttendanceDate}`}
               </div>
             </div>
 
@@ -417,7 +440,7 @@ export default function AttendancePage() {
                       <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Phone</th>
                       <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">In Time</th>
                       <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Out Time</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Today's Status</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Status</th>
                       <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
@@ -703,6 +726,19 @@ export default function AttendancePage() {
               </h3>
               <form onSubmit={handleMarkSubmit}>
                 <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Attendance Date
+                    </label>
+                    <input
+                      type="date"
+                      value={selectedAttendanceDate}
+                      onChange={(e) => setSelectedAttendanceDate(e.target.value)}
+                      max={todayDate}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      required
+                    />
+                  </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
                       Status

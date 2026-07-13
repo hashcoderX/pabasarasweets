@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import axios from 'axios';
+import axios from '@/lib/http';
 
 interface Customer { id: number; shop_name: string; customer_code: string; route_id?: number | null; }
 interface Item { id: number; name: string; code: string; unit: string; sell_price: number; current_stock: number; }
@@ -91,6 +91,8 @@ interface ReturnLine {
   unit: string;
   quantity: number;
   unit_price: number;
+  amount: number;
+  is_damaged: boolean;
 }
 
 interface PendingOfflineInvoice {
@@ -225,6 +227,8 @@ export default function DistributionInvoicesPage() {
   const [showReturnSuggestions, setShowReturnSuggestions] = useState(false);
   const [returnSelectedItemId, setReturnSelectedItemId] = useState('');
   const [returnQtyInput, setReturnQtyInput] = useState('');
+  const [returnAmountInput, setReturnAmountInput] = useState('');
+  const [returnDamageInput, setReturnDamageInput] = useState(false);
   const [returnLines, setReturnLines] = useState<ReturnLine[]>([]);
 
   const [lineFreeQty, setLineFreeQty] = useState('');
@@ -1050,23 +1054,25 @@ export default function DistributionInvoicesPage() {
     );
   };
 
-  const updateReturnLine = (itemId: number, newQty: number, newPrice: number) => {
+  const updateReturnLine = (
+    itemId: number,
+    updates: Partial<Pick<ReturnLine, 'quantity' | 'unit_price' | 'amount' | 'is_damaged'>>
+  ) => {
     setReturnLines((prev) =>
       prev.map((line) => {
         if (line.inventory_item_id !== itemId) return line;
-        const qty = Math.max(0, newQty);
-        const price = Math.max(0, newPrice);
-        if (!qty || !price) {
-          return {
-            ...line,
-            quantity: qty,
-            unit_price: price,
-          };
-        }
+
+        const qty = updates.quantity !== undefined ? Math.max(0, Number(updates.quantity) || 0) : line.quantity;
+        const price = updates.unit_price !== undefined ? Math.max(0, Number(updates.unit_price) || 0) : line.unit_price;
+        const amount = updates.amount !== undefined ? Math.max(0, Number(updates.amount) || 0) : line.amount;
+        const isDamaged = updates.is_damaged !== undefined ? Boolean(updates.is_damaged) : line.is_damaged;
+
         return {
           ...line,
           quantity: qty,
           unit_price: price,
+          amount,
+          is_damaged: isDamaged,
         };
       })
     );
@@ -1267,7 +1273,7 @@ export default function DistributionInvoicesPage() {
     return Math.max(0, value);
   }, [discountType, discountValue, subtotal]);
   const totalReturnValue = useMemo(
-    () => returnLines.reduce((sum, line) => sum + line.quantity * line.unit_price, 0),
+    () => returnLines.reduce((sum, line) => sum + Number(line.amount || 0), 0),
     [returnLines]
   );
 
@@ -1321,6 +1327,8 @@ export default function DistributionInvoicesPage() {
     setShowReturnSuggestions(false);
     setReturnSelectedItemId('');
     setReturnQtyInput('');
+    setReturnAmountInput('');
+    setReturnDamageInput(false);
     setReturnLines([]);
     setInlineReturnMode('deduct');
     setAddPayment(false);
@@ -1492,6 +1500,8 @@ export default function DistributionInvoicesPage() {
     setShowReturnSuggestions(false);
     setReturnSelectedItemId('');
     setReturnQtyInput('');
+    setReturnAmountInput('');
+    setReturnDamageInput(false);
     setReturnLines([]);
     setInlineReturnMode('deduct');
 
@@ -1736,9 +1746,9 @@ export default function DistributionInvoicesPage() {
           parts.push('[ITEM RETURNS]');
           parts.push('Returned items:');
           returnLines.forEach((line) => {
-            const lineValue = line.quantity * line.unit_price;
+            const lineValue = Number(line.amount || 0);
             parts.push(
-              `- ${line.quantity.toFixed(2)} x ${line.item_name} (${line.item_code}) @ ${line.unit_price.toFixed(2)} = ${lineValue.toFixed(2)}`
+              `- ${line.quantity.toFixed(2)} x ${line.item_name} (${line.item_code}) @ ${line.unit_price.toFixed(2)} => amount ${lineValue.toFixed(2)}${line.is_damaged ? ' [DAMAGED]' : ''}`
             );
           });
           parts.push(`Total return value: ${totalReturnValue.toFixed(2)}`);
@@ -1874,6 +1884,7 @@ export default function DistributionInvoicesPage() {
 
     const queueOfflineAndFinish = () => {
       const hasReturns = returnLines.length > 0;
+      const hasDamagedReturns = returnLines.some((line) => line.is_damaged);
       const totalReturnQty = hasReturns
         ? returnLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0)
         : 0;
@@ -1889,7 +1900,7 @@ export default function DistributionInvoicesPage() {
             settlement_amount: inlineReturnMode === 'deduct' ? totalReturnValue : 0,
             exchange_inventory_item_id: null,
             exchange_quantity: 0,
-            reason: null,
+            reason: inlineReturnMode === 'deduct' && hasDamagedReturns ? 'damaged_items' : null,
             status: 'approved',
             notes: composedNotes,
           }
@@ -2013,6 +2024,7 @@ export default function DistributionInvoicesPage() {
 
       if (returnLines.length > 0 && savedInvoice?.id) {
         try {
+          const hasDamagedReturns = returnLines.some((line) => line.is_damaged);
           const totalReturnQty = returnLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
           await axios.post('/api/distribution/returns', {
             return_number: generateReturnNumber(),
@@ -2026,7 +2038,7 @@ export default function DistributionInvoicesPage() {
             settlement_amount: inlineReturnMode === 'deduct' ? totalReturnValue : 0,
             exchange_inventory_item_id: null,
             exchange_quantity: 0,
-            reason: null,
+            reason: inlineReturnMode === 'deduct' && hasDamagedReturns ? 'damaged_items' : null,
             status: 'approved',
             notes: composedNotes,
           }, { headers: { Authorization: `Bearer ${token}` } });
@@ -2059,12 +2071,17 @@ export default function DistributionInvoicesPage() {
   const handleReturnSuggestionClick = (item: Item) => {
     setReturnSelectedItemId(String(item.id));
     setReturnSearch(`${item.code} - ${item.name}`);
+    const qty = Number(returnQtyInput || 0);
+    if (qty > 0) {
+      setReturnAmountInput((qty * Number(item.sell_price || 0)).toFixed(2));
+    }
     setShowReturnSuggestions(false);
   };
 
   const addReturnLine = () => {
     const selected = items.find((item) => item.id === Number(returnSelectedItemId));
     const qty = Number(returnQtyInput);
+    const enteredAmount = Number(returnAmountInput);
 
     if (!selected) {
       setQtyWarningMessage('Please select a return item from the list.');
@@ -2078,12 +2095,27 @@ export default function DistributionInvoicesPage() {
       return;
     }
 
+    const normalizedAmount = enteredAmount > 0
+      ? enteredAmount
+      : qty * Number(selected.sell_price || 0);
+
+    if (!normalizedAmount || normalizedAmount <= 0) {
+      setQtyWarningMessage('Please enter a valid return amount.');
+      setQtyWarningOpen(true);
+      return;
+    }
+
     setReturnLines((prev) => {
       const exists = prev.find((line) => line.inventory_item_id === selected.id);
       if (exists) {
         return prev.map((line) =>
           line.inventory_item_id === selected.id
-            ? { ...line, quantity: line.quantity + qty }
+            ? {
+                ...line,
+                quantity: line.quantity + qty,
+                amount: line.amount + normalizedAmount,
+                is_damaged: inlineReturnMode === 'deduct' ? (line.is_damaged || returnDamageInput) : line.is_damaged,
+              }
             : line
         );
       }
@@ -2097,6 +2129,8 @@ export default function DistributionInvoicesPage() {
           unit: selected.unit,
           quantity: qty,
           unit_price: selected.sell_price,
+          amount: normalizedAmount,
+          is_damaged: inlineReturnMode === 'deduct' ? returnDamageInput : false,
         },
       ];
     });
@@ -2104,6 +2138,8 @@ export default function DistributionInvoicesPage() {
     setReturnSelectedItemId('');
     setReturnSearch('');
     setReturnQtyInput('');
+    setReturnAmountInput('');
+    setReturnDamageInput(false);
     setShowReturnSuggestions(false);
   };
 
@@ -3292,12 +3328,12 @@ export default function DistributionInvoicesPage() {
                         <span className="block">Return total: <span className="font-semibold text-gray-900">{totalReturnValue.toFixed(2)}</span></span>
                         <span className="block text-[10px] text-gray-500">
                           {inlineReturnMode === 'deduct'
-                            ? 'Will reduce this invoice amount.'
+                            ? 'Will reduce this invoice amount (amount field based).'
                             : 'For exchange only, invoice amount unchanged.'}
                         </span>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
                       <div className="sm:col-span-2">
                         <label className="block text-xs font-medium text-gray-700 mb-1">Return Item</label>
                         <div className="relative">
@@ -3341,10 +3377,42 @@ export default function DistributionInvoicesPage() {
                           type="number"
                           step="0.01"
                           value={returnQtyInput}
-                          onChange={(e) => setReturnQtyInput(e.target.value)}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setReturnQtyInput(value);
+                            const selected = items.find((item) => item.id === Number(returnSelectedItemId));
+                            if (selected) {
+                              const qty = Number(value || 0);
+                              setReturnAmountInput(qty > 0 ? (qty * Number(selected.sell_price || 0)).toFixed(2) : '');
+                            }
+                          }}
                             className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
                           placeholder="0.00"
                         />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Amount</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={returnAmountInput}
+                          onChange={(e) => setReturnAmountInput(e.target.value)}
+                          className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                          placeholder="0.00"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Damage Mark</label>
+                        <label className="inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
+                          <input
+                            type="checkbox"
+                            className="mr-2"
+                            checked={returnDamageInput}
+                            disabled={inlineReturnMode !== 'deduct'}
+                            onChange={(e) => setReturnDamageInput(e.target.checked)}
+                          />
+                          Damaged
+                        </label>
                       </div>
                     </div>
 
@@ -3366,14 +3434,16 @@ export default function DistributionInvoicesPage() {
                               <tr>
                                 <th className="px-3 py-1 text-left text-[11px] font-medium text-gray-500 uppercase">Item</th>
                                 <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Qty</th>
-                                <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Unit</th>
-                                <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Value</th>
+                                <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Rate</th>
+                                <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Amount</th>
+                                {inlineReturnMode === 'deduct' && (
+                                  <th className="px-3 py-1 text-center text-[11px] font-medium text-gray-500 uppercase">Damage</th>
+                                )}
                                 <th className="px-3 py-1 text-right text-[11px] font-medium text-gray-500 uppercase">Action</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 bg-white">
                               {returnLines.map((line) => {
-                                const lineValue = line.quantity * line.unit_price;
                                 const isEditing = editingReturnId === line.inventory_item_id;
                                 return (
                                   <tr key={line.inventory_item_id}>
@@ -3387,8 +3457,7 @@ export default function DistributionInvoicesPage() {
                                           onChange={(e) =>
                                             updateReturnLine(
                                               line.inventory_item_id,
-                                              Number(e.target.value) || 0,
-                                              line.unit_price
+                                              { quantity: Number(e.target.value) || 0 }
                                             )
                                           }
                                           className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
@@ -3406,8 +3475,7 @@ export default function DistributionInvoicesPage() {
                                           onChange={(e) =>
                                             updateReturnLine(
                                               line.inventory_item_id,
-                                              line.quantity,
-                                              Number(e.target.value) || 0
+                                              { unit_price: Number(e.target.value) || 0 }
                                             )
                                           }
                                           className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
@@ -3416,7 +3484,44 @@ export default function DistributionInvoicesPage() {
                                         <span>{line.unit_price.toFixed(2)}</span>
                                       )}
                                     </td>
-                                    <td className="px-3 py-1 text-[11px] text-gray-700 text-right">{lineValue.toFixed(2)}</td>
+                                    <td className="px-3 py-1 text-[11px] text-gray-700 text-right align-middle">
+                                      {isEditing ? (
+                                        <input
+                                          type="number"
+                                          step="0.01"
+                                          value={line.amount}
+                                          onChange={(e) =>
+                                            updateReturnLine(
+                                              line.inventory_item_id,
+                                              { amount: Number(e.target.value) || 0 }
+                                            )
+                                          }
+                                          className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
+                                        />
+                                      ) : (
+                                        <span>{line.amount.toFixed(2)}</span>
+                                      )}
+                                    </td>
+                                    {inlineReturnMode === 'deduct' && (
+                                      <td className="px-3 py-1 text-center align-middle">
+                                        {isEditing ? (
+                                          <input
+                                            type="checkbox"
+                                            checked={line.is_damaged}
+                                            onChange={(e) =>
+                                              updateReturnLine(
+                                                line.inventory_item_id,
+                                                { is_damaged: e.target.checked }
+                                              )
+                                            }
+                                          />
+                                        ) : (
+                                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${line.is_damaged ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
+                                            {line.is_damaged ? 'Damaged' : 'Normal'}
+                                          </span>
+                                        )}
+                                      </td>
+                                    )}
                                     <td className="px-3 py-1 text-right">
                                       <div className="flex justify-end gap-1">
                                         {isEditing ? (
@@ -3451,7 +3556,7 @@ export default function DistributionInvoicesPage() {
                             </tbody>
                             <tfoot className="bg-gray-50">
                               <tr>
-                                <td colSpan={3} className="px-3 py-1 text-right text-xs font-semibold text-gray-700">Total Return Value</td>
+                                <td colSpan={inlineReturnMode === 'deduct' ? 4 : 3} className="px-3 py-1 text-right text-xs font-semibold text-gray-700">Total Return Value</td>
                                 <td className="px-3 py-1 text-right text-xs font-bold text-gray-900">{totalReturnValue.toFixed(2)}</td>
                                 <td></td>
                               </tr>
@@ -3461,7 +3566,6 @@ export default function DistributionInvoicesPage() {
 
                         <div className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white md:hidden">
                           {returnLines.map((line) => {
-                            const lineValue = line.quantity * line.unit_price;
                             const isEditing = editingReturnId === line.inventory_item_id;
                             return (
                               <div
@@ -3481,8 +3585,7 @@ export default function DistributionInvoicesPage() {
                                         onChange={(e) =>
                                           updateReturnLine(
                                             line.inventory_item_id,
-                                            Number(e.target.value) || 0,
-                                            line.unit_price
+                                            { quantity: Number(e.target.value) || 0 }
                                           )
                                         }
                                         className="w-full rounded-md border border-gray-300 text-right text-[11px] text-black px-2 py-1"
@@ -3504,8 +3607,7 @@ export default function DistributionInvoicesPage() {
                                       onChange={(e) =>
                                         updateReturnLine(
                                           line.inventory_item_id,
-                                          line.quantity,
-                                          Number(e.target.value) || 0
+                                          { unit_price: Number(e.target.value) || 0 }
                                         )
                                       }
                                       className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
@@ -3513,8 +3615,49 @@ export default function DistributionInvoicesPage() {
                                   ) : (
                                     <div className="text-[11px] font-medium">{line.unit_price.toFixed(2)}</div>
                                   )}
+                                  <div className="text-[10px] text-gray-500 mt-1">Amount</div>
+                                  {isEditing ? (
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      value={line.amount}
+                                      onChange={(e) =>
+                                        updateReturnLine(
+                                          line.inventory_item_id,
+                                          { amount: Number(e.target.value) || 0 }
+                                        )
+                                      }
+                                      className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
+                                    />
+                                  ) : (
+                                    <div className="text-[11px] font-semibold">{line.amount.toFixed(2)}</div>
+                                  )}
+                                  {inlineReturnMode === 'deduct' && (
+                                    <div className="mt-1">
+                                      {isEditing ? (
+                                        <label className="inline-flex items-center text-[10px] text-gray-600">
+                                          <input
+                                            type="checkbox"
+                                            className="mr-1"
+                                            checked={line.is_damaged}
+                                            onChange={(e) =>
+                                              updateReturnLine(
+                                                line.inventory_item_id,
+                                                { is_damaged: e.target.checked }
+                                              )
+                                            }
+                                          />
+                                          Damaged
+                                        </label>
+                                      ) : (
+                                        <div className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${line.is_damaged ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
+                                          {line.is_damaged ? 'Damaged' : 'Normal'}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
                                   <div className="text-[10px] text-gray-500 mt-1">Value</div>
-                                  <div className="text-[11px] font-semibold">{lineValue.toFixed(2)}</div>
+                                  <div className="text-[11px] font-semibold">{line.amount.toFixed(2)}</div>
                                   <div className="mt-1 flex justify-end gap-1">
                                     {isEditing ? (
                                       <button

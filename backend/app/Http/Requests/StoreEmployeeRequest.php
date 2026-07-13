@@ -47,6 +47,7 @@ class StoreEmployeeRequest extends FormRequest
             'department_id' => 'required|exists:departments,id',
             'designation_id' => 'nullable|required_without:designation_name|exists:designations,id',
             'designation_name' => 'nullable|required_without:designation_id|string|max:255',
+            'reporting_person_id' => 'nullable|exists:employees,id',
             'branch_id' => 'required|exists:companies,id',
             'status' => 'in:active,inactive',
         ];
