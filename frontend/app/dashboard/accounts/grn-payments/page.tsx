@@ -252,25 +252,29 @@ export default function GrnPaymentsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-teal-50 via-cyan-50 to-blue-50">
+    <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(20,184,166,0.18),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(14,165,233,0.14),_transparent_30%),linear-gradient(180deg,_#f0fdfa_0%,_#ecfeff_55%,_#f8fafc_100%)]">
+      <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_10%_12%,_rgba(45,212,191,0.22),_transparent_32%),radial-gradient(circle_at_86%_8%,_rgba(56,189,248,0.2),_transparent_36%)]" />
       <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <div className="rounded-3xl border border-white/70 bg-white/90 shadow-xl p-6">
+        <div className="rounded-[30px] border border-white/70 bg-white/85 shadow-[0_28px_95px_-45px_rgba(8,145,178,0.55)] p-6 backdrop-blur-xl">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-600">Accounts</p>
-              <h1 className="text-3xl font-bold text-slate-900">GRN Payment Control</h1>
-              <p className="mt-2 text-sm text-slate-600">Review GRN financials and settle supplier payments with clear audit notes.</p>
+              <p className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-700">
+                <span className="h-2 w-2 rounded-full bg-cyan-500" />
+                Accounts
+              </p>
+              <h1 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">GRN Payment Control</h1>
+              <p className="mt-2 max-w-2xl text-sm text-slate-600">Review GRN financials and settle supplier payments with clear audit notes.</p>
             </div>
             <div className="flex gap-3">
               <Link
                 href="/dashboard/purchasing/grn"
-                className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 hover:bg-cyan-100"
+                className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:-translate-y-0.5 hover:bg-cyan-100"
               >
                 Review GRN Details
               </Link>
               <Link
                 href="/dashboard/accounts"
-                className="inline-flex items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                className="inline-flex items-center rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:-translate-y-0.5 hover:bg-slate-50"
               >
                 Back to Accounts
               </Link>
@@ -279,41 +283,41 @@ export default function GrnPaymentsPage() {
         </div>
 
         <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+          <div className="overflow-hidden rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 to-white p-4 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-rose-700">Open Payable</p>
             <p className="mt-2 text-2xl font-bold text-rose-800">LKR {money(payableTotal)}</p>
           </div>
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+          <div className="overflow-hidden rounded-2xl border border-amber-200 bg-gradient-to-br from-amber-50 to-white p-4 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-amber-700">Unpaid GRNs</p>
             <p className="mt-2 text-2xl font-bold text-amber-800">{records.filter((r) => r.payment_status === 'unpaid').length}</p>
           </div>
-          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+          <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-4 shadow-sm">
             <p className="text-xs font-semibold uppercase tracking-[0.22em] text-emerald-700">Paid GRNs</p>
             <p className="mt-2 text-2xl font-bold text-emerald-800">{records.filter((r) => r.payment_status === 'paid').length}</p>
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-          <div className="border-b border-slate-200 p-4 grid gap-3 md:grid-cols-3">
+        <div className="overflow-hidden rounded-2xl border border-white/70 bg-white/90 shadow-[0_18px_70px_-35px_rgba(8,145,178,0.45)]">
+          <div className="border-b border-cyan-100 bg-gradient-to-r from-white via-cyan-50/70 to-teal-50/70 p-4 grid gap-3 md:grid-cols-3">
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search GRN #, PO #, supplier"
-              className="rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+              className="rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
             />
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as 'all' | 'unpaid' | 'partial' | 'paid')}
-              className="rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+              className="rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
             >
               <option value="all">All statuses</option>
               <option value="unpaid">Unpaid</option>
               <option value="partial">Partial</option>
               <option value="paid">Paid</option>
             </select>
-            <div className="text-sm text-slate-600 flex items-center md:justify-end">
-              {filteredRecords.length} records
+            <div className="text-sm font-semibold text-cyan-700 flex items-center md:justify-end">
+              Showing {filteredRecords.length} records
             </div>
           </div>
 
@@ -342,7 +346,7 @@ export default function GrnPaymentsPage() {
                   filteredRecords.map((row) => {
                     const balance = Math.max(Number(row.net_amount || 0) - Number(row.paid_amount || 0), 0);
                     return (
-                      <tr key={row.id} className="hover:bg-cyan-50/35 transition">
+                      <tr key={row.id} className="transition hover:bg-cyan-50/45">
                         <td className="px-4 py-3 text-sm font-semibold text-slate-900">{row.grn_number}</td>
                         <td className="px-4 py-3 text-sm text-slate-700">{row.purchase_order?.supplier?.name || '-'}</td>
                         <td className="px-4 py-3 text-sm text-slate-700">{new Date(row.received_date).toLocaleString()}</td>
@@ -368,7 +372,7 @@ export default function GrnPaymentsPage() {
                           <button
                             onClick={() => openPaymentModal(row)}
                             disabled={balance <= 0}
-                            className="inline-flex rounded-full bg-cyan-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="inline-flex rounded-full bg-gradient-to-r from-cyan-600 to-teal-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:from-cyan-700 hover:to-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             Pay
                           </button>
@@ -385,11 +389,15 @@ export default function GrnPaymentsPage() {
 
       {selectedGrn && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-            <h3 className="text-xl font-semibold text-slate-900">Record GRN Payment</h3>
-            <p className="mt-1 text-sm text-slate-600">
-              {selectedGrn.grn_number} • Balance LKR {money(Math.max(Number(selectedGrn.net_amount || 0) - Number(selectedGrn.paid_amount || 0), 0))}
-            </p>
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="border-b border-cyan-100 bg-gradient-to-r from-cyan-50 to-teal-50 px-6 py-4">
+              <h3 className="text-xl font-semibold text-slate-900">Record GRN Payment</h3>
+              <p className="mt-1 text-sm text-slate-600">
+                {selectedGrn.grn_number} • Balance LKR {money(Math.max(Number(selectedGrn.net_amount || 0) - Number(selectedGrn.paid_amount || 0), 0))}
+              </p>
+            </div>
+
+            <div className="p-6">
 
             <div className="mt-4 space-y-4">
               <div>
@@ -400,7 +408,7 @@ export default function GrnPaymentsPage() {
                   onChange={(e) => setPayAmount(e.target.value)}
                   min="0"
                   step="0.01"
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                  className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                   placeholder="0.00"
                 />
               </div>
@@ -410,7 +418,7 @@ export default function GrnPaymentsPage() {
                 <select
                   value={payType}
                   onChange={(e) => setPayType(e.target.value as 'cash' | 'bank_transfer' | 'bank_deposit' | 'cheque' | 'party_cheque' | 'card')}
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                  className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                 >
                   <option value="cash">Cash</option>
                   <option value="bank_transfer">Bank Transfer</option>
@@ -428,7 +436,7 @@ export default function GrnPaymentsPage() {
                     type="text"
                     value={payBankName}
                     onChange={(e) => setPayBankName(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                    className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                     placeholder="Bank name"
                   />
                 </div>
@@ -460,7 +468,7 @@ export default function GrnPaymentsPage() {
                       type="text"
                       value={payChequeNumber}
                       onChange={(e) => setPayChequeNumber(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                      className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                       placeholder="Cheque #"
                     />
                   </div>
@@ -470,7 +478,7 @@ export default function GrnPaymentsPage() {
                       type="date"
                       value={payChequeDate}
                       onChange={(e) => setPayChequeDate(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                      className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                     />
                   </div>
                 </>
@@ -483,7 +491,7 @@ export default function GrnPaymentsPage() {
                     type="text"
                     value={payReference}
                     onChange={(e) => setPayReference(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                    className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                     placeholder="Transaction reference"
                   />
                 </div>
@@ -507,7 +515,7 @@ export default function GrnPaymentsPage() {
                   rows={3}
                   value={payNote}
                   onChange={(e) => setPayNote(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                  className="w-full rounded-xl border border-cyan-200 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                   placeholder="Optional payment remarks"
                 />
               </div>
@@ -517,17 +525,18 @@ export default function GrnPaymentsPage() {
             <div className="mt-6 flex justify-end gap-3">
               <button
                 onClick={closePaymentModal}
-                className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                className="rounded-full border border-slate-300 bg-white px-5 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
               >
                 Cancel
               </button>
               <button
                 onClick={submitPayment}
                 disabled={submitting}
-                className="rounded-full bg-cyan-600 px-5 py-2 text-sm font-semibold text-white hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-full bg-gradient-to-r from-cyan-600 to-teal-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:from-cyan-700 hover:to-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {submitting ? 'Saving...' : 'Confirm Payment'}
               </button>
+            </div>
             </div>
           </div>
         </div>

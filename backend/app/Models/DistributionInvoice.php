@@ -20,6 +20,14 @@ class DistributionInvoice extends Model
         'paid_amount',
         'status',
         'notes',
+        'ref_latitude',
+        'ref_longitude',
+        'ref_gps_accuracy',
+        'ref_gps_captured_at',
+        'billing_latitude',
+        'billing_longitude',
+        'billing_gps_accuracy',
+        'billing_gps_captured_at',
         'created_by',
     ];
 
@@ -30,6 +38,14 @@ class DistributionInvoice extends Model
         'discount' => 'decimal:2',
         'total' => 'decimal:2',
         'paid_amount' => 'decimal:2',
+        'ref_latitude' => 'float',
+        'ref_longitude' => 'float',
+        'ref_gps_accuracy' => 'float',
+        'ref_gps_captured_at' => 'datetime',
+        'billing_latitude' => 'float',
+        'billing_longitude' => 'float',
+        'billing_gps_accuracy' => 'float',
+        'billing_gps_captured_at' => 'datetime',
     ];
 
     public function customer(): BelongsTo

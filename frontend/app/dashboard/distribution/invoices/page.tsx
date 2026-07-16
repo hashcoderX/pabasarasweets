@@ -38,6 +38,13 @@ interface InvoiceItem {
   discount?: number;
 }
 
+interface GpsSnapshot {
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  captured_at: string;
+}
+
 interface InvoiceRecord {
   id: number;
   invoice_number: string;
@@ -52,6 +59,14 @@ interface InvoiceRecord {
   status: string;
   items: InvoiceItem[];
   notes?: string | null;
+  ref_latitude?: number | null;
+  ref_longitude?: number | null;
+  ref_gps_accuracy?: number | null;
+  ref_gps_captured_at?: string | null;
+  billing_latitude?: number | null;
+  billing_longitude?: number | null;
+  billing_gps_accuracy?: number | null;
+  billing_gps_captured_at?: string | null;
 }
 
 interface DeliveryOrderRecord {
@@ -106,6 +121,14 @@ interface PendingOfflineInvoice {
     due_date: string | null;
     discount: number;
     notes: string;
+    ref_latitude?: number | null;
+    ref_longitude?: number | null;
+    ref_gps_accuracy?: number | null;
+    ref_gps_captured_at?: string | null;
+    billing_latitude?: number | null;
+    billing_longitude?: number | null;
+    billing_gps_accuracy?: number | null;
+    billing_gps_captured_at?: string | null;
     items: {
       inventory_item_id: number | null;
       item_code: string;
@@ -243,6 +266,9 @@ export default function DistributionInvoicesPage() {
   const [paymentChequeDate, setPaymentChequeDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentBankName, setPaymentBankName] = useState('');
+  const [refGpsSnapshot, setRefGpsSnapshot] = useState<GpsSnapshot | null>(null);
+  const [billingGpsSnapshot, setBillingGpsSnapshot] = useState<GpsSnapshot | null>(null);
+  const [capturingGpsTarget, setCapturingGpsTarget] = useState<'ref' | 'billing' | null>(null);
 
   const [activeLoadId, setActiveLoadId] = useState('');
   const [availableLoads, setAvailableLoads] = useState<LoadOption[]>([]);
@@ -553,6 +579,57 @@ export default function DistributionInvoicesPage() {
   const generatePaymentNumber = () => `PAY-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
   const generateReturnNumber = () => `RET-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
 
+  const formatGpsSnapshot = (snapshot: GpsSnapshot | null) => {
+    if (!snapshot) return 'Not captured';
+    const accuracy = snapshot.accuracy === null ? 'n/a' : `${snapshot.accuracy.toFixed(1)}m`;
+    const capturedAt = new Date(snapshot.captured_at).toLocaleString();
+    return `${snapshot.latitude.toFixed(6)}, ${snapshot.longitude.toFixed(6)} (Acc: ${accuracy}) • ${capturedAt}`;
+  };
+
+  const captureGpsSnapshot = (target: 'ref' | 'billing') => {
+    if (typeof window === 'undefined' || !('geolocation' in navigator)) {
+      setQtyWarningMessage('GPS is not available on this device/browser.');
+      setQtyWarningOpen(true);
+      return;
+    }
+
+    setCapturingGpsTarget(target);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const snapshot: GpsSnapshot = {
+          latitude: Number(position.coords.latitude),
+          longitude: Number(position.coords.longitude),
+          accuracy: Number.isFinite(position.coords.accuracy) ? Number(position.coords.accuracy) : null,
+          captured_at: new Date().toISOString(),
+        };
+
+        if (target === 'ref') {
+          setRefGpsSnapshot(snapshot);
+        } else {
+          setBillingGpsSnapshot(snapshot);
+        }
+
+        setCapturingGpsTarget(null);
+      },
+      (error) => {
+        const errorMessage =
+          error.code === 1
+            ? 'GPS permission denied. Please allow location access.'
+            : error.code === 2
+              ? 'Unable to detect GPS position. Move to an open area and try again.'
+              : 'GPS request timed out. Please try again.';
+        setCapturingGpsTarget(null);
+        setQtyWarningMessage(errorMessage);
+        setQtyWarningOpen(true);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 0,
+      }
+    );
+  };
+
   const getInvoiceDueBalance = (invoice: any): number => {
     const explicitDue = Number(invoice?.due_amount ?? invoice?.balance_amount ?? 0);
     if (explicitDue > 0) return explicitDue;
@@ -596,6 +673,14 @@ export default function DistributionInvoicesPage() {
             due_date: inv.due_date,
             discount: inv.discount,
             notes: inv.notes,
+            ref_latitude: inv.ref_latitude ?? null,
+            ref_longitude: inv.ref_longitude ?? null,
+            ref_gps_accuracy: inv.ref_gps_accuracy ?? null,
+            ref_gps_captured_at: inv.ref_gps_captured_at ?? null,
+            billing_latitude: inv.billing_latitude ?? null,
+            billing_longitude: inv.billing_longitude ?? null,
+            billing_gps_accuracy: inv.billing_gps_accuracy ?? null,
+            billing_gps_captured_at: inv.billing_gps_captured_at ?? null,
             items: inv.items,
           }, { headers: { Authorization: `Bearer ${token}` } });
 
@@ -1339,6 +1424,9 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+    setRefGpsSnapshot(null);
+    setBillingGpsSnapshot(null);
+    setCapturingGpsTarget(null);
   };
 
   const refreshCompanyHeaderForPrint = async () => {
@@ -1513,6 +1601,37 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+
+    const refLat = Number((invoice as any).ref_latitude);
+    const refLng = Number((invoice as any).ref_longitude);
+    setRefGpsSnapshot(
+      Number.isFinite(refLat) && Number.isFinite(refLng)
+        ? {
+            latitude: refLat,
+            longitude: refLng,
+            accuracy: Number.isFinite(Number((invoice as any).ref_gps_accuracy))
+              ? Number((invoice as any).ref_gps_accuracy)
+              : null,
+            captured_at: (invoice as any).ref_gps_captured_at || new Date().toISOString(),
+          }
+        : null
+    );
+
+    const billingLat = Number((invoice as any).billing_latitude);
+    const billingLng = Number((invoice as any).billing_longitude);
+    setBillingGpsSnapshot(
+      Number.isFinite(billingLat) && Number.isFinite(billingLng)
+        ? {
+            latitude: billingLat,
+            longitude: billingLng,
+            accuracy: Number.isFinite(Number((invoice as any).billing_gps_accuracy))
+              ? Number((invoice as any).billing_gps_accuracy)
+              : null,
+            captured_at: (invoice as any).billing_gps_captured_at || new Date().toISOString(),
+          }
+        : null
+    );
+    setCapturingGpsTarget(null);
 
     const mappedLines: InvoiceLine[] = (invoice.items || []).map((it, index) => {
       const qty = Number(it.quantity) || 0;
@@ -1848,6 +1967,14 @@ export default function DistributionInvoicesPage() {
       due_date: dueDate || null,
       discount: payloadDiscount,
       notes: composedNotes,
+      ref_latitude: refGpsSnapshot?.latitude ?? null,
+      ref_longitude: refGpsSnapshot?.longitude ?? null,
+      ref_gps_accuracy: refGpsSnapshot?.accuracy ?? null,
+      ref_gps_captured_at: refGpsSnapshot?.captured_at ?? null,
+      billing_latitude: billingGpsSnapshot?.latitude ?? null,
+      billing_longitude: billingGpsSnapshot?.longitude ?? null,
+      billing_gps_accuracy: billingGpsSnapshot?.accuracy ?? null,
+      billing_gps_captured_at: billingGpsSnapshot?.captured_at ?? null,
       items: itemsPayload,
     };
 
@@ -1977,6 +2104,14 @@ export default function DistributionInvoicesPage() {
             discount: payloadDiscount,
             status: undefined,
             notes: composedNotes,
+            ref_latitude: refGpsSnapshot?.latitude ?? null,
+            ref_longitude: refGpsSnapshot?.longitude ?? null,
+            ref_gps_accuracy: refGpsSnapshot?.accuracy ?? null,
+            ref_gps_captured_at: refGpsSnapshot?.captured_at ?? null,
+            billing_latitude: billingGpsSnapshot?.latitude ?? null,
+            billing_longitude: billingGpsSnapshot?.longitude ?? null,
+            billing_gps_accuracy: billingGpsSnapshot?.accuracy ?? null,
+            billing_gps_captured_at: billingGpsSnapshot?.captured_at ?? null,
             items: itemsPayload,
           },
           { headers: { Authorization: `Bearer ${token}` } }
@@ -2921,6 +3056,38 @@ export default function DistributionInvoicesPage() {
                       className="w-full rounded-xl border border-cyan-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                       rows={2}
                     />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700">Ref GPS</label>
+                        <button
+                          type="button"
+                          onClick={() => captureGpsSnapshot('ref')}
+                          disabled={capturingGpsTarget !== null}
+                          className="rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-100 disabled:opacity-60"
+                        >
+                          {capturingGpsTarget === 'ref' ? 'Capturing...' : (refGpsSnapshot ? 'Recapture' : 'Capture GPS')}
+                        </button>
+                      </div>
+                      <p className="mt-2 text-[11px] text-emerald-800 break-words">{formatGpsSnapshot(refGpsSnapshot)}</p>
+                    </div>
+
+                    <div className="rounded-xl border border-cyan-200 bg-cyan-50/40 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-700">Billing GPS</label>
+                        <button
+                          type="button"
+                          onClick={() => captureGpsSnapshot('billing')}
+                          disabled={capturingGpsTarget !== null}
+                          className="rounded-lg border border-cyan-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-cyan-700 transition hover:bg-cyan-100 disabled:opacity-60"
+                        >
+                          {capturingGpsTarget === 'billing' ? 'Capturing...' : (billingGpsSnapshot ? 'Recapture' : 'Capture GPS')}
+                        </button>
+                      </div>
+                      <p className="mt-2 text-[11px] text-cyan-800 break-words">{formatGpsSnapshot(billingGpsSnapshot)}</p>
+                    </div>
                   </div>
 
                   <div className="hidden overflow-x-auto rounded-xl border border-slate-200 md:block">
@@ -4211,6 +4378,27 @@ export default function DistributionInvoicesPage() {
                   </div>
                 );
               })()}
+
+              {((viewInvoice.ref_latitude != null && viewInvoice.ref_longitude != null) ||
+                (viewInvoice.billing_latitude != null && viewInvoice.billing_longitude != null)) && (
+                <div className="rounded-lg border border-cyan-100 bg-cyan-50/50 p-3 text-xs text-slate-700 space-y-2">
+                  <div className="font-semibold text-cyan-800">GPS Tracking</div>
+                  {viewInvoice.ref_latitude != null && viewInvoice.ref_longitude != null && (
+                    <div>
+                      <span className="font-medium">Ref:</span>{' '}
+                      {Number(viewInvoice.ref_latitude).toFixed(6)}, {Number(viewInvoice.ref_longitude).toFixed(6)}
+                      {viewInvoice.ref_gps_accuracy != null ? ` (Acc: ${Number(viewInvoice.ref_gps_accuracy).toFixed(1)}m)` : ''}
+                    </div>
+                  )}
+                  {viewInvoice.billing_latitude != null && viewInvoice.billing_longitude != null && (
+                    <div>
+                      <span className="font-medium">Billing:</span>{' '}
+                      {Number(viewInvoice.billing_latitude).toFixed(6)}, {Number(viewInvoice.billing_longitude).toFixed(6)}
+                      {viewInvoice.billing_gps_accuracy != null ? ` (Acc: ${Number(viewInvoice.billing_gps_accuracy).toFixed(1)}m)` : ''}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {viewInvoice.notes && (
                 <div className="mt-2">

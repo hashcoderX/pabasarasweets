@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
 
@@ -89,6 +89,10 @@ export default function Inventory() {
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [selectedItemDetails, setSelectedItemDetails] = useState<InventoryItem | null>(null);
   const [showItemDetailsModal, setShowItemDetailsModal] = useState(false);
+  const [itemFilterQuery, setItemFilterQuery] = useState('');
+  const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_stock'>('all');
+  const [recordStatusFilter, setRecordStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [rawQualityFilter, setRawQualityFilter] = useState<'all' | 'pending' | 'accepted' | 'rejected' | 'partial'>('all');
   const router = useRouter();
 
   const toSafeNumber = (value: unknown): number => {
@@ -123,6 +127,13 @@ export default function Inventory() {
       fetchItems();
     }
   }, [token, activeTab]);
+
+  useEffect(() => {
+    setItemFilterQuery('');
+    setStockFilter('all');
+    setRecordStatusFilter('all');
+    setRawQualityFilter('all');
+  }, [activeTab]);
 
   const fetchSuppliers = async () => {
     try {
@@ -462,6 +473,35 @@ export default function Inventory() {
 
     return toSafeNumber(item.current_stock) > 0;
   });
+  const filteredVisibleItems = useMemo(() => {
+    const query = itemFilterQuery.trim().toLowerCase();
+
+    return visibleItems.filter((item) => {
+      if (query) {
+        const inName = String(item.name || '').toLowerCase().includes(query);
+        const inCode = String(item.code || '').toLowerCase().includes(query);
+        const inCategory = String(item.category || '').toLowerCase().includes(query);
+        if (!inName && !inCode && !inCategory) return false;
+      }
+
+      if (recordStatusFilter !== 'all' && item.status !== recordStatusFilter) {
+        return false;
+      }
+
+      const stockStatus = getStockStatus(item).status;
+      if (stockFilter === 'in_stock' && stockStatus !== 'In Stock') return false;
+      if (stockFilter === 'low_stock' && stockStatus !== 'Low Stock') return false;
+      if (stockFilter === 'out_stock' && stockStatus !== 'Out of Stock') return false;
+
+      if (activeTab === 'raw_material' && rawQualityFilter !== 'all') {
+        if ((item.batch_quality_status || 'pending') !== rawQualityFilter) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [visibleItems, itemFilterQuery, recordStatusFilter, stockFilter, activeTab, rawQualityFilter]);
   const totalStockValue = items.reduce((sum, item) => sum + (item.current_stock * resolveItemPrice(item)), 0);
   const lowStockItems = uniqueStockItems.filter(item => item.current_stock <= item.minimum_stock).length;
   const inStockItems = uniqueStockItems.filter(item => item.current_stock > item.minimum_stock).length;
@@ -646,12 +686,89 @@ export default function Inventory() {
             </div>
           </div>
 
+          <div className="mb-4 rounded-2xl border border-orange-100 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-[0.15em] text-orange-600">Filter Items</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setItemFilterQuery('');
+                  setStockFilter('all');
+                  setRecordStatusFilter('all');
+                  setRawQualityFilter('all');
+                }}
+                className="text-xs font-semibold text-slate-600 underline hover:text-slate-800"
+              >
+                Reset Filters
+              </button>
+            </div>
+            <div className={`grid grid-cols-1 gap-3 ${activeTab === 'raw_material' ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">Search</label>
+                <input
+                  type="text"
+                  value={itemFilterQuery}
+                  onChange={(e) => setItemFilterQuery(e.target.value)}
+                  placeholder="Name, code, or category"
+                  className="w-full rounded-xl border border-orange-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-orange-400 focus:outline-none focus:ring-4 focus:ring-orange-100"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">Stock Status</label>
+                <select
+                  value={stockFilter}
+                  onChange={(e) => setStockFilter(e.target.value as 'all' | 'in_stock' | 'low_stock' | 'out_stock')}
+                  className="w-full rounded-xl border border-orange-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-orange-400 focus:outline-none focus:ring-4 focus:ring-orange-100"
+                >
+                  <option value="all">All</option>
+                  <option value="in_stock">In Stock</option>
+                  <option value="low_stock">Low Stock</option>
+                  <option value="out_stock">Out of Stock</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-medium text-slate-600">Record Status</label>
+                <select
+                  value={recordStatusFilter}
+                  onChange={(e) => setRecordStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}
+                  className="w-full rounded-xl border border-orange-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-orange-400 focus:outline-none focus:ring-4 focus:ring-orange-100"
+                >
+                  <option value="all">All</option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
+
+              {activeTab === 'raw_material' && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Batch Quality</label>
+                  <select
+                    value={rawQualityFilter}
+                    onChange={(e) => setRawQualityFilter(e.target.value as 'all' | 'pending' | 'accepted' | 'rejected' | 'partial')}
+                    className="w-full rounded-xl border border-orange-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-orange-400 focus:outline-none focus:ring-4 focus:ring-orange-100"
+                  >
+                    <option value="all">All</option>
+                    <option value="accepted">Accepted</option>
+                    <option value="pending">Pending</option>
+                    <option value="partial">Partial</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                </div>
+              )}
+            </div>
+            <p className="mt-3 text-xs text-slate-500">
+              Showing {filteredVisibleItems.length} of {visibleItems.length} item(s)
+            </p>
+          </div>
+
           {/* Items Table */}
           {loading ? (
             <div className="flex justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600"></div>
             </div>
-          ) : visibleItems.length === 0 ? (
+          ) : filteredVisibleItems.length === 0 ? (
             <div className="text-center py-8">
               <div className="text-gray-400 text-sm">No items found in this store</div>
               <button
@@ -693,7 +810,7 @@ export default function Inventory() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-slate-200">
-                  {visibleItems.map((item) => {
+                  {filteredVisibleItems.map((item) => {
                     const stockStatus = getStockStatus(item);
                     const resolvedPrice = resolveItemPrice(item);
                     const info = resolveAdditionalInfo(item);

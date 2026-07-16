@@ -240,4 +240,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('distribution/invoices', \App\Http\Controllers\DistributionInvoiceController::class);
     Route::apiResource('distribution/returns', \App\Http\Controllers\DistributionReturnController::class);
     Route::apiResource('distribution/payments', \App\Http\Controllers\DistributionPaymentController::class);
+    Route::get('distribution/live-locations', [\App\Http\Controllers\DistributionLiveLocationController::class, 'index']);
+    Route::post('distribution/live-locations/ping', [\App\Http\Controllers\DistributionLiveLocationController::class, 'ping']);
+
+    // AI Assistant
+    Route::post('assistant/query', [\App\Http\Controllers\AssistantController::class, 'query']);
 });

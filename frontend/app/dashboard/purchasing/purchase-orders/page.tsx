@@ -212,8 +212,18 @@ export default function PurchaseOrdersPage() {
   };
 
   const updateItem = (index: number, field: keyof OrderItem, value: any) => {
+    const sanitizeNumber = (raw: unknown) => {
+      const parsed = typeof raw === 'number' ? raw : Number(raw);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const safeValue =
+      field === 'quantity' || field === 'unit_price'
+        ? sanitizeNumber(value)
+        : value;
+
     const updatedItems = [...formData.items];
-    updatedItems[index] = { ...updatedItems[index], [field]: value };
+    updatedItems[index] = { ...updatedItems[index], [field]: safeValue };
     setFormData({ ...formData, items: updatedItems });
   };
 
@@ -614,7 +624,7 @@ export default function PurchaseOrdersPage() {
                             <label className={modalLabelClass}>Unit Price (LKR)</label>
                             <input
                               type="number"
-                              value={item.unit_price}
+                              value={Number.isFinite(Number(item.unit_price)) ? item.unit_price : 0}
                               onChange={(e) => updateItem(index, 'unit_price', parseFloat(e.target.value) || 0)}
                               className={modalInputClass}
                               min="0"
@@ -628,8 +638,8 @@ export default function PurchaseOrdersPage() {
                             <label className={modalLabelClass}>Quantity</label>
                             <input
                               type="number"
-                              value={item.quantity}
-                              onChange={(e) => updateItem(index, 'quantity', parseFloat(e.target.value))}
+                              value={Number.isFinite(Number(item.quantity)) ? item.quantity : 0}
+                              onChange={(e) => updateItem(index, 'quantity', parseFloat(e.target.value) || 0)}
                               className={modalInputClass}
                               min="0.01"
                               step="0.01"
