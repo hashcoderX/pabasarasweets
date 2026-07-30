@@ -9,6 +9,8 @@ type ApprovedQcRow = {
   id: number;
   inspection_date: string;
   approved_quantity: number;
+  packed_quantity_total?: number;
+  balance_quantity?: number;
   productionOrder?: {
     id: number;
     batch_no?: string | null;
@@ -29,6 +31,17 @@ type PackagingRow = {
   id: number;
   qc_inspection_id: number;
   production_order_id: number;
+  final_product_name?: string | null;
+  materials?: Array<{
+    id?: number;
+    raw_material_id: number;
+    inventory_item_id?: number;
+    material_name?: string;
+    material_code?: string;
+    material_unit?: string;
+    quantity_per_pack: number;
+    consumed_quantity?: number;
+  }>;
   packaging_material_name: string;
   packaging_material_quantity: number;
   packaging_material_unit: string;
@@ -55,6 +68,29 @@ type PackagingRow = {
   };
 };
 
+type RawMaterialOption = {
+  id: number;
+  inventoryItem?: {
+    id: number;
+    code: string;
+    name: string;
+    unit: string;
+    current_stock: number;
+  };
+  inventory_item?: {
+    id: number;
+    code: string;
+    name: string;
+    unit: string;
+    current_stock: number;
+  };
+};
+
+type PackagingMaterialLine = {
+  raw_material_id: number;
+  quantity_per_pack: string;
+};
+
 type PackagingSummary = {
   total_batches: number;
   planned_batches: number;
@@ -70,6 +106,7 @@ export default function PackagingManagementPage() {
   const [message, setMessage] = useState('');
 
   const [approvedQc, setApprovedQc] = useState<ApprovedQcRow[]>([]);
+  const [rawMaterialOptions, setRawMaterialOptions] = useState<RawMaterialOption[]>([]);
   const [rows, setRows] = useState<PackagingRow[]>([]);
   const [summary, setSummary] = useState<PackagingSummary>({
     total_batches: 0,
@@ -80,7 +117,7 @@ export default function PackagingManagementPage() {
   });
 
   const [selectedQcId, setSelectedQcId] = useState<number>(0);
-  const [materialName, setMaterialName] = useState('Food Grade Wrapper');
+  const [finalProductName, setFinalProductName] = useState('');
   const [materialQty, setMaterialQty] = useState('100');
   const [materialUnit, setMaterialUnit] = useState('pcs');
   const [packedQty, setPackedQty] = useState('0');
@@ -89,13 +126,20 @@ export default function PackagingManagementPage() {
   const [expiryDate, setExpiryDate] = useState('');
   const [packStatus, setPackStatus] = useState<'planned' | 'packed' | 'dispatched'>('planned');
   const [packNotes, setPackNotes] = useState('');
+  const [createMaterialLines, setCreateMaterialLines] = useState<PackagingMaterialLine[]>([
+    { raw_material_id: 0, quantity_per_pack: '1' },
+  ]);
 
   const [updateRowId, setUpdateRowId] = useState<number>(0);
+  const [updateFinalProductName, setUpdateFinalProductName] = useState('');
   const [updateStatus, setUpdateStatus] = useState<'planned' | 'packed' | 'dispatched'>('planned');
   const [updatePackedQty, setUpdatePackedQty] = useState('0');
   const [updateCostingPrice, setUpdateCostingPrice] = useState('0');
   const [updateSellingPrice, setUpdateSellingPrice] = useState('0');
   const [updateExpiryDate, setUpdateExpiryDate] = useState('');
+  const [updateMaterialLines, setUpdateMaterialLines] = useState<PackagingMaterialLine[]>([
+    { raw_material_id: 0, quantity_per_pack: '1' },
+  ]);
 
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
@@ -110,6 +154,12 @@ export default function PackagingManagementPage() {
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
 
   const resolveOrder = (row: { productionOrder?: any; production_order?: any }) => row.productionOrder || row.production_order;
+  const extractList = (payload: any) => {
+    if (Array.isArray(payload?.data?.data)) return payload.data.data;
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload)) return payload;
+    return [];
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -125,7 +175,7 @@ export default function PackagingManagementPage() {
       setLoading(true);
       setMessage('');
 
-      const [approvedRes, batchRes] = await Promise.all([
+      const [approvedRes, batchRes, rawRes] = await Promise.all([
         axios.get(`${API_URL}/api/production/packaging/approved-qc-batches`, {
           headers: authHeaders(authToken),
           params: { per_page: 200 },
@@ -140,10 +190,14 @@ export default function PackagingManagementPage() {
             per_page: 300,
           },
         }),
+        axios.get(`${API_URL}/api/production/raw-materials`, {
+          headers: authHeaders(authToken),
+        }),
       ]);
 
-      setApprovedQc(approvedRes.data?.data?.data || []);
-      setRows(batchRes.data?.data?.data || []);
+      setApprovedQc(extractList(approvedRes.data));
+      setRows(extractList(batchRes.data));
+      setRawMaterialOptions(extractList(rawRes.data));
       setSummary(batchRes.data?.data?.summary || {
         total_batches: 0,
         planned_batches: 0,
@@ -169,6 +223,53 @@ export default function PackagingManagementPage() {
     loadData(token);
   }, [token]);
 
+  const resolveRawInventory = (raw: RawMaterialOption) => raw.inventoryItem || raw.inventory_item;
+
+  const normalizeMaterialLines = (lines: PackagingMaterialLine[]) => {
+    return lines
+      .map((line) => ({
+        raw_material_id: Number(line.raw_material_id || 0),
+        quantity_per_pack: Number(line.quantity_per_pack || 0),
+      }))
+      .filter((line) => line.raw_material_id > 0 && line.quantity_per_pack > 0);
+  };
+
+  const addCreateMaterialLine = () => {
+    setCreateMaterialLines((prev) => [...prev, { raw_material_id: 0, quantity_per_pack: '1' }]);
+  };
+
+  const removeCreateMaterialLine = (idx: number) => {
+    setCreateMaterialLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const updateCreateMaterialLine = (idx: number, patch: Partial<PackagingMaterialLine>) => {
+    setCreateMaterialLines((prev) => prev.map((line, i) => (i === idx ? { ...line, ...patch } : line)));
+  };
+
+  const addUpdateMaterialLine = () => {
+    setUpdateMaterialLines((prev) => [...prev, { raw_material_id: 0, quantity_per_pack: '1' }]);
+  };
+
+  const removeUpdateMaterialLine = (idx: number) => {
+    setUpdateMaterialLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const updateUpdateMaterialLine = (idx: number, patch: Partial<PackagingMaterialLine>) => {
+    setUpdateMaterialLines((prev) => prev.map((line, i) => (i === idx ? { ...line, ...patch } : line)));
+  };
+
+  useEffect(() => {
+    if (!selectedQcId) return;
+    if (finalProductName.trim()) return;
+
+    const selectedQc = approvedQc.find((qc) => qc.id === selectedQcId);
+    const order = selectedQc ? resolveOrder(selectedQc) : null;
+    const baseName = String(order?.product?.name || '').trim();
+    if (baseName) {
+      setFinalProductName(baseName);
+    }
+  }, [selectedQcId, approvedQc, finalProductName]);
+
   const applyFilters = async () => {
     if (!token) return;
     await loadData(token);
@@ -180,6 +281,16 @@ export default function PackagingManagementPage() {
       alert('Select approved QC batch first.');
       return;
     }
+    if (!finalProductName.trim()) {
+      alert('Enter final finished product name (e.g. Sesame Ball 100).');
+      return;
+    }
+
+    const materialsPayload = normalizeMaterialLines(createMaterialLines);
+    if (materialsPayload.length === 0) {
+      alert('Add at least one packaging raw material from raw material store.');
+      return;
+    }
 
     try {
       setSaving(true);
@@ -187,7 +298,8 @@ export default function PackagingManagementPage() {
         `${API_URL}/api/production/packaging/batches`,
         {
           qc_inspection_id: selectedQcId,
-          packaging_material_name: materialName,
+          final_product_name: finalProductName,
+          materials: materialsPayload,
           packaging_material_quantity: Number(materialQty || 0),
           packaging_material_unit: materialUnit,
           packed_quantity: Number(packedQty || 0),
@@ -201,7 +313,7 @@ export default function PackagingManagementPage() {
       );
 
       setSelectedQcId(0);
-      setMaterialName('Food Grade Wrapper');
+      setFinalProductName('');
       setMaterialQty('100');
       setMaterialUnit('pcs');
       setPackedQty('0');
@@ -210,6 +322,7 @@ export default function PackagingManagementPage() {
       setExpiryDate('');
       setPackStatus('planned');
       setPackNotes('');
+      setCreateMaterialLines([{ raw_material_id: 0, quantity_per_pack: '1' }]);
       setMessage('Packaging batch created successfully. Label, barcode and QR generated.');
       await loadData(token);
     } catch (error: any) {
@@ -227,12 +340,24 @@ export default function PackagingManagementPage() {
       alert('Select a packaging batch first.');
       return;
     }
+    if (!updateFinalProductName.trim()) {
+      alert('Enter final finished product name.');
+      return;
+    }
+
+    const materialsPayload = normalizeMaterialLines(updateMaterialLines);
+    if (materialsPayload.length === 0) {
+      alert('Add at least one packaging raw material from raw material store.');
+      return;
+    }
 
     try {
       setSaving(true);
       await axios.put(
         `${API_URL}/api/production/packaging/batches/${updateRowId}`,
         {
+          final_product_name: updateFinalProductName,
+          materials: materialsPayload,
           status: updateStatus,
           packed_quantity: Number(updatePackedQty || 0),
           unit_price: Number(updateCostingPrice || 0),
@@ -265,6 +390,7 @@ export default function PackagingManagementPage() {
       'Order Number',
       'Product Code',
       'Product Name',
+      'Final Product Name',
       'Packaging Material',
       'Material Qty',
       'Packed Qty',
@@ -287,6 +413,7 @@ export default function PackagingManagementPage() {
         order?.plan?.order_number || '',
         order?.product?.code || '',
         order?.product?.name || '',
+        row.final_product_name || '',
         row.packaging_material_name,
         `${Number(row.packaging_material_quantity || 0).toFixed(3)} ${row.packaging_material_unit || ''}`,
         Number(row.packed_quantity || 0).toFixed(3),
@@ -366,6 +493,9 @@ export default function PackagingManagementPage() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
           <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Create Packaging Batch</h2>
+            <p className="text-xs text-gray-500 mb-3">
+              Final sellable SKUs are created here. Example: sesame ball 200 packet / 400 packet.
+            </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div className="md:col-span-2">
                 <label className="block text-xs font-medium text-gray-600 mb-1">Approved QC Batch</label>
@@ -376,24 +506,82 @@ export default function PackagingManagementPage() {
                       const order = resolveOrder(qc);
                       return (
                     <option key={qc.id} value={qc.id}>
-                      QC #{qc.id} | {order?.batch_no || '-'} | {order?.product?.code || '-'} - {order?.product?.name || '-'} | Approved {Number(qc.approved_quantity || 0).toFixed(3)}
+                      QC #{qc.id} | {order?.batch_no || '-'} | {order?.product?.code || '-'} - {order?.product?.name || '-'} | Approved {Number(qc.approved_quantity || 0).toFixed(3)} | Balance {Number(qc.balance_quantity ?? qc.approved_quantity ?? 0).toFixed(3)}
                     </option>
                       );
                     })()
                   ))}
                 </select>
               </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Packaging Material</label>
-                <input value={materialName} onChange={(e) => setMaterialName(e.target.value)} className={inputClass} placeholder="Wrapper / Box" />
+              <div className="md:col-span-2">
+                <label className="block text-xs font-medium text-gray-600 mb-1">Final Finished Product Name</label>
+                <input value={finalProductName} onChange={(e) => setFinalProductName(e.target.value)} className={inputClass} placeholder="e.g. Sesame Ball 100" />
+                <p className="mt-1 text-[11px] text-gray-500">This name will be saved as the finished-good name in inventory.</p>
+              </div>
+              <div className="md:col-span-2 rounded-xl border border-rose-100 bg-rose-50/40 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-semibold text-gray-700">Packaging Raw Materials (from Raw Material Store)</label>
+                  <button
+                    type="button"
+                    onClick={addCreateMaterialLine}
+                    className="rounded-md border border-rose-200 bg-white px-2 py-1 text-[11px] font-semibold text-rose-700 hover:bg-rose-100"
+                  >
+                    + Add Material
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {createMaterialLines.map((line, idx) => (
+                    <div key={`create-mat-${idx}`} className="grid grid-cols-12 gap-2 items-center">
+                      <div className="col-span-7">
+                        <select
+                          value={line.raw_material_id}
+                          onChange={(e) => updateCreateMaterialLine(idx, { raw_material_id: Number(e.target.value) })}
+                          className={inputClass}
+                        >
+                          <option value={0}>Select raw material</option>
+                          {rawMaterialOptions.map((raw) => {
+                            const inv = resolveRawInventory(raw);
+                            return (
+                              <option key={raw.id} value={raw.id}>
+                                {inv?.code || '-'} - {inv?.name || `Material #${raw.id}`} (Stock: {Number(inv?.current_stock || 0).toFixed(2)} {inv?.unit || ''})
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                      <div className="col-span-4">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.0001"
+                          value={line.quantity_per_pack}
+                          onChange={(e) => updateCreateMaterialLine(idx, { quantity_per_pack: e.target.value })}
+                          className={inputClass}
+                          placeholder="Qty per pack"
+                        />
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <button
+                          type="button"
+                          disabled={createMaterialLines.length === 1}
+                          onClick={() => removeCreateMaterialLine(idx)}
+                          className="rounded-md border border-red-200 bg-white px-2 py-2 text-[11px] font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40"
+                        >
+                          X
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 text-[11px] text-gray-500">Example: for 1 packet -&gt; Polythene qty 1, Label qty 1.</p>
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Material Quantity</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Pack Size Quantity</label>
                 <input type="number" min="0" step="0.001" value={materialQty} onChange={(e) => setMaterialQty(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Material Unit</label>
-                <input value={materialUnit} onChange={(e) => setMaterialUnit(e.target.value)} className={inputClass} placeholder="pcs" />
+                <label className="block text-xs font-medium text-gray-600 mb-1">Pack Size Unit</label>
+                <input value={materialUnit} onChange={(e) => setMaterialUnit(e.target.value)} className={inputClass} placeholder="packet / g / ml" />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Packed Quantity</label>
@@ -440,11 +628,22 @@ export default function PackagingManagementPage() {
                     setUpdateRowId(id);
                     const row = rows.find((x) => x.id === id);
                     if (row) {
+                      setUpdateFinalProductName(row.final_product_name || '');
                       setUpdateStatus(row.status);
                       setUpdatePackedQty(String(row.packed_quantity ?? 0));
                       setUpdateCostingPrice(String(row.unit_price ?? 0));
                       setUpdateSellingPrice(String(row.selling_price ?? 0));
                       setUpdateExpiryDate(row.expiry_date ? String(row.expiry_date).slice(0, 10) : '');
+                      if (Array.isArray(row.materials) && row.materials.length > 0) {
+                        setUpdateMaterialLines(
+                          row.materials.map((mat) => ({
+                            raw_material_id: Number(mat.raw_material_id || 0),
+                            quantity_per_pack: String(Number(mat.quantity_per_pack || 0)),
+                          }))
+                        );
+                      } else {
+                        setUpdateMaterialLines([{ raw_material_id: 0, quantity_per_pack: '1' }]);
+                      }
                     }
                   }}
                   className={inputClass}
@@ -459,6 +658,66 @@ export default function PackagingManagementPage() {
                     })()
                   ))}
                 </select>
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs font-medium text-gray-600 mb-1">Final Finished Product Name</label>
+                <input value={updateFinalProductName} onChange={(e) => setUpdateFinalProductName(e.target.value)} className={inputClass} placeholder="e.g. Sesame Ball 100" />
+              </div>
+              <div className="md:col-span-2 rounded-xl border border-blue-100 bg-blue-50/40 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-semibold text-gray-700">Packaging Raw Materials (from Raw Material Store)</label>
+                  <button
+                    type="button"
+                    onClick={addUpdateMaterialLine}
+                    className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px] font-semibold text-blue-700 hover:bg-blue-100"
+                  >
+                    + Add Material
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {updateMaterialLines.map((line, idx) => (
+                    <div key={`update-mat-${idx}`} className="grid grid-cols-12 gap-2 items-center">
+                      <div className="col-span-7">
+                        <select
+                          value={line.raw_material_id}
+                          onChange={(e) => updateUpdateMaterialLine(idx, { raw_material_id: Number(e.target.value) })}
+                          className={inputClass}
+                        >
+                          <option value={0}>Select raw material</option>
+                          {rawMaterialOptions.map((raw) => {
+                            const inv = resolveRawInventory(raw);
+                            return (
+                              <option key={raw.id} value={raw.id}>
+                                {inv?.code || '-'} - {inv?.name || `Material #${raw.id}`} (Stock: {Number(inv?.current_stock || 0).toFixed(2)} {inv?.unit || ''})
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                      <div className="col-span-4">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.0001"
+                          value={line.quantity_per_pack}
+                          onChange={(e) => updateUpdateMaterialLine(idx, { quantity_per_pack: e.target.value })}
+                          className={inputClass}
+                          placeholder="Qty per pack"
+                        />
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <button
+                          type="button"
+                          disabled={updateMaterialLines.length === 1}
+                          onClick={() => removeUpdateMaterialLine(idx)}
+                          className="rounded-md border border-red-200 bg-white px-2 py-2 text-[11px] font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40"
+                        >
+                          X
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Status</label>
@@ -531,6 +790,7 @@ export default function PackagingManagementPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Batch No</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Final Product Name</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Packed Qty</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Costing Price</th>
@@ -543,7 +803,7 @@ export default function PackagingManagementPage() {
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {rows.length === 0 ? (
-                  <tr><td colSpan={12} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
+                  <tr><td colSpan={13} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
                 ) : (
                   rows.map((row) => {
                     const order = resolveOrder(row);
@@ -553,6 +813,7 @@ export default function PackagingManagementPage() {
                         <td className="px-4 py-2.5 text-xs text-indigo-700 font-semibold">{row.batch_no || order?.batch_no || '-'}</td>
                         <td className="px-4 py-2.5 text-sm text-indigo-700">{order?.plan?.order_number || '-'}</td>
                         <td className="px-4 py-2.5 text-sm text-gray-700">{order?.product?.code || '-'} - {order?.product?.name || '-'}</td>
+                        <td className="px-4 py-2.5 text-sm text-gray-700 font-semibold">{row.final_product_name || '-'}</td>
                         <td className="px-4 py-2.5 text-sm text-gray-700">{row.packaging_material_name} ({Number(row.packaging_material_quantity || 0).toFixed(3)} {row.packaging_material_unit})</td>
                         <td className="px-4 py-2.5 text-sm text-right text-rose-700 font-semibold">{Number(row.packed_quantity || 0).toFixed(3)}</td>
                         <td className="px-4 py-2.5 text-sm text-right text-gray-700">LKR {Number(row.unit_price || 0).toFixed(2)}</td>

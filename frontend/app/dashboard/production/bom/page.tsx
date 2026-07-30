@@ -266,7 +266,7 @@ export default function BomPage() {
   );
 
   const stepTabs: Array<{ key: StepKey; label: string }> = [
-    { key: 'step1', label: 'Step 1: Product' },
+    { key: 'step1', label: 'Step 1: Base Product' },
     { key: 'step2', label: 'Step 2: Raw Material Stock Review' },
     { key: 'step3', label: 'Step 3: BOM Recipe' },
     { key: 'step4', label: 'Step 4: Review BOM' },
@@ -324,7 +324,7 @@ export default function BomPage() {
       setNewProductUnit('pcs');
       setNewProductBatchSize('1');
       setNewProductDescription('');
-      setMessage('Finished product created successfully.');
+      setMessage('Base production product created successfully. Create sellable pack variants in Packaging.');
       setErrorMessage('');
       await loadData(token);
     } catch (error: any) {
@@ -340,7 +340,7 @@ export default function BomPage() {
   const handleCreateBom = async () => {
     if (!token) return;
     if (!bomProductId) {
-      setErrorMessage('Please select a finished product before creating BOM.');
+      setErrorMessage('Please select a base production product before creating BOM.');
       return;
     }
 
@@ -477,7 +477,7 @@ export default function BomPage() {
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h1 className="text-2xl font-semibold tracking-tight text-white">Formula Management - BOM</h1>
-                  <p className="mt-1 text-sm text-orange-100/90">Create products, define ingredients, and run batch calculations.</p>
+                  <p className="mt-1 text-sm text-orange-100/90">Create base production products, define ingredients, and run batch calculations.</p>
                 </div>
                 <span className="inline-flex items-center rounded-full border border-white/20 bg-white/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.18em] text-white/90">
                   Production Workspace
@@ -507,10 +507,11 @@ export default function BomPage() {
           <p className="font-semibold">Recommended workflow</p>
           <p className="mt-1 text-blue-900/90">Follow these steps in order to avoid wrong recipes, wrong stock checks, and incorrect production deductions.</p>
           <ol className="mt-2 space-y-1.5 text-xs text-blue-900/90">
-            <li><span className="font-semibold">Step 1 - Product:</span> Create the finished product and define its standard batch size.</li>
+            <li><span className="font-semibold">Step 1 - Base Product:</span> Create the production base item and define its standard batch size.</li>
             <li><span className="font-semibold">Step 2 - Raw Material Stock Review:</span> Verify available raw-material batches and confirm what is BOM-ready.</li>
             <li><span className="font-semibold">Step 3 - BOM Recipe:</span> Build the recipe using correct materials/batches with required quantities per batch.</li>
             <li><span className="font-semibold">Step 4 - Review BOM:</span> Re-check ingredients and quantities before running production calculations.</li>
+            <li><span className="font-semibold">Packaging Rule:</span> Final sellable SKUs (e.g. 200 packet / 400 packet) must be created in Packaging, not in BOM.</li>
             <li><span className="font-semibold">Step 5 - Calculator:</span> Calculate requirements, confirm no shortages, then start production.</li>
           </ol>
         </section>
@@ -543,7 +544,7 @@ export default function BomPage() {
 
         <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="rounded-2xl border border-orange-100 bg-gradient-to-br from-orange-50 to-white p-4 shadow-sm">
-            <div className="text-xs uppercase tracking-[0.16em] text-orange-600">Finished Products</div>
+            <div className="text-xs uppercase tracking-[0.16em] text-orange-600">Base Products</div>
             <div className="mt-2 text-2xl font-bold text-gray-900">{products.length}</div>
           </div>
           <div className="rounded-2xl border border-blue-100 bg-gradient-to-br from-blue-50 to-white p-4 shadow-sm">
@@ -562,15 +563,15 @@ export default function BomPage() {
 
         <div className={`grid grid-cols-1 gap-6 ${activeStep === 'step1' || activeStep === 'step2' ? '' : 'hidden'}`}>
           <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step1' ? '' : 'hidden'}`}>
-            <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 1: Create Finished Product</h2>
-            <p className="text-xs text-gray-500 mb-4">Define the product you manufacture before mapping BOM ingredients.</p>
+            <h2 className="text-lg font-semibold text-gray-900 mb-1">Step 1: Create Base Production Product</h2>
+            <p className="text-xs text-gray-500 mb-4">Define the base product you manufacture in production. Final sellable packet variants are created in Packaging.</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Finished Product Name</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Base Product Name</label>
                 <input value={newProductName} onChange={(e) => setNewProductName(e.target.value)} className={inputClass} placeholder="e.g. Milk Toffee" />
               </div>
               <div className="space-y-1">
-                <label className="block text-xs font-medium text-gray-600 mb-1">Finished Product Code</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Base Product Code</label>
                 <div className="flex items-center gap-2">
                   <input
                     value={newProductCode}
@@ -606,7 +607,7 @@ export default function BomPage() {
               </div>
               <div className="md:col-span-2">
                 <label className="block text-xs font-medium text-gray-600 mb-1">Product Description (Optional)</label>
-                <input value={newProductDescription} onChange={(e) => setNewProductDescription(e.target.value)} className={inputClass} placeholder="Short description for this finished product" />
+                <input value={newProductDescription} onChange={(e) => setNewProductDescription(e.target.value)} className={inputClass} placeholder="Short description for this base production product" />
               </div>
             </div>
             <button
@@ -714,9 +715,9 @@ export default function BomPage() {
           <p className="text-xs text-gray-500 mb-4">Set recipe version, base batch size, and ingredient quantities per batch.</p>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Finished Product</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Base Production Product</label>
               <select value={bomProductId} onChange={(e) => setBomProductId(Number(e.target.value))} className={inputClass}>
-                <option value={0}>Select finished product</option>
+                <option value={0}>Select base production product</option>
                 {products.map((product) => (
                   <option key={product.id} value={product.id}>{product.code} - {product.name}</option>
                 ))}

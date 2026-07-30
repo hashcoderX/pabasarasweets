@@ -55,6 +55,12 @@ export default function AttendancePage() {
   const [markingOutAttendance, setMarkingOutAttendance] = useState<AttendanceRecord | null>(null);
   const [markOutTimeInput, setMarkOutTimeInput] = useState('');
   const [markOutNotes, setMarkOutNotes] = useState('');
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingAttendance, setEditingAttendance] = useState<AttendanceRecord | null>(null);
+  const [editStatus, setEditStatus] = useState<'present' | 'absent' | 'late' | 'half_day'>('present');
+  const [editInTime, setEditInTime] = useState('');
+  const [editOutTime, setEditOutTime] = useState('');
+  const [editNotes, setEditNotes] = useState('');
   const [noticeModal, setNoticeModal] = useState<{ title: string; message: string; tone: NoticeTone } | null>(null);
   const router = useRouter();
 
@@ -199,6 +205,68 @@ export default function AttendancePage() {
     setMarkOutTimeInput('');
     setMarkOutNotes('');
     setShowMarkOutModal(true);
+  };
+
+  const normalizeTimeForInput = (raw: string | null) => {
+    if (!raw) return '';
+    const value = String(raw).trim();
+    if (!value) return '';
+    if (value.length >= 5 && value.includes(':')) {
+      return value.slice(0, 5);
+    }
+    return value;
+  };
+
+  const openEditModal = (attendance: AttendanceRecord) => {
+    setEditingAttendance(attendance);
+    setEditStatus(attendance.status);
+    setEditInTime(normalizeTimeForInput(attendance.in_time));
+    setEditOutTime(normalizeTimeForInput(attendance.out_time));
+    setEditNotes(attendance.notes || '');
+    setShowEditModal(true);
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAttendance || !token) return;
+
+    if (editOutTime && !editInTime) {
+      openNoticeModal('error', 'Edit Error', 'Please set in time before out time.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await axios.put(
+        `/api/hr/attendance/${editingAttendance.id}`,
+        {
+          status: editStatus,
+          in_time: editInTime || null,
+          out_time: editOutTime || null,
+          notes: editNotes || null,
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      openNoticeModal('success', 'Attendance Updated', 'Attendance record updated successfully.');
+      setShowEditModal(false);
+      setEditingAttendance(null);
+      fetchTodayAttendance();
+
+      if (selectedEmployee && activeTab === 'history') {
+        fetchAttendanceHistory();
+      }
+    } catch (error: any) {
+      console.error('Error updating attendance:', error);
+      const message =
+        error?.response?.data?.message ||
+        (error?.response?.data?.errors
+          ? Object.values(error.response.data.errors).flat().join(', ')
+          : 'Failed to update attendance.');
+      openNoticeModal('error', 'Update Failed', String(message));
+    } finally {
+      setLoading(false);
+    }
   };
 
   const markOut = async (attendanceId: number, outTime: string, notes?: string) => {
@@ -542,6 +610,15 @@ export default function AttendancePage() {
                                   Mark Out
                                 </button>
                               )}
+                              {isMarked && (
+                                <button
+                                  onClick={() => openEditModal(attendance)}
+                                  disabled={loading}
+                                  className="px-3 py-1 rounded-full text-xs font-medium transition-colors bg-indigo-500 text-white hover:bg-indigo-600"
+                                >
+                                  Edit
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -858,6 +935,89 @@ export default function AttendancePage() {
                     className="px-6 py-2 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-lg hover:from-purple-600 hover:to-purple-700 transition-colors disabled:opacity-50"
                   >
                     {loading ? 'Marking Out...' : 'Mark Out'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Attendance Modal */}
+      {showEditModal && editingAttendance && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4">
+            <div className="p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">
+                Edit Attendance - {editingAttendance.employee.first_name} {editingAttendance.employee.last_name}
+              </h3>
+              <p className="text-sm text-gray-600 mb-4">Date: {String(editingAttendance.date).split('T')[0]}</p>
+              <form onSubmit={handleEditSubmit}>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                    <select
+                      value={editStatus}
+                      onChange={(e) => setEditStatus(e.target.value as 'present' | 'absent' | 'late' | 'half_day')}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      required
+                    >
+                      <option value="present">Present</option>
+                      <option value="absent">Absent</option>
+                      <option value="late">Late</option>
+                      <option value="half_day">Half Day</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">In Time</label>
+                    <input
+                      type="time"
+                      value={editInTime}
+                      onChange={(e) => setEditInTime(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Out Time</label>
+                    <input
+                      type="time"
+                      value={editOutTime}
+                      onChange={(e) => setEditOutTime(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                    <textarea
+                      value={editNotes}
+                      onChange={(e) => setEditNotes(e.target.value)}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 placeholder:text-gray-500 bg-white focus:outline-none focus:ring-2 focus:ring-orange-500"
+                      placeholder="Update notes..."
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end space-x-3 mt-6">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowEditModal(false);
+                      setEditingAttendance(null);
+                    }}
+                    className="px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="px-6 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 text-white rounded-lg hover:from-indigo-600 hover:to-purple-700 transition-colors disabled:opacity-50"
+                  >
+                    {loading ? 'Updating...' : 'Update Attendance'}
                   </button>
                 </div>
               </form>

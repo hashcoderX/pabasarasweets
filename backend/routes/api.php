@@ -243,6 +243,13 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('distribution/live-locations', [\App\Http\Controllers\DistributionLiveLocationController::class, 'index']);
     Route::post('distribution/live-locations/ping', [\App\Http\Controllers\DistributionLiveLocationController::class, 'ping']);
 
+    // Dashboard widget visibility permissions
+    Route::get('dashboard/widgets/me', [\App\Http\Controllers\DashboardWidgetPermissionController::class, 'me']);
+    Route::put('dashboard/widgets/me', [\App\Http\Controllers\DashboardWidgetPermissionController::class, 'updateMe']);
+    Route::get('dashboard/widgets/users', [\App\Http\Controllers\DashboardWidgetPermissionController::class, 'users']);
+    Route::get('dashboard/widgets/users/{userId}', [\App\Http\Controllers\DashboardWidgetPermissionController::class, 'show']);
+    Route::put('dashboard/widgets/users/{userId}', [\App\Http\Controllers\DashboardWidgetPermissionController::class, 'update']);
+
     // AI Assistant
     Route::post('assistant/query', [\App\Http\Controllers\AssistantController::class, 'query']);
 });

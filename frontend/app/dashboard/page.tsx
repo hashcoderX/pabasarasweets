@@ -20,8 +20,16 @@ export default function Dashboard() {
   const [token, setToken] = useState('');
   const [userRoles, setUserRoles] = useState<string[]>([]);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [accessReady, setAccessReady] = useState(false);
+  const [showWidgetPermissionModal, setShowWidgetPermissionModal] = useState(false);
+  const [widgetUsers, setWidgetUsers] = useState<any[]>([]);
+  const [selectedWidgetUserId, setSelectedWidgetUserId] = useState('');
+  const [widgetPermissionForm, setWidgetPermissionForm] = useState<Record<string, boolean>>({});
+  const [widgetPermissionLoading, setWidgetPermissionLoading] = useState(false);
+  const [widgetPermissionSaving, setWidgetPermissionSaving] = useState(false);
+  const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
   const router = useRouter();
   const apiClient = createApiClient();
 
@@ -86,11 +94,23 @@ export default function Dashboard() {
         setUserRoles(Array.from(new Set(roleNames)));
         setUserPermissions(Array.from(new Set(permissionNames.filter(Boolean))));
         setIsAdminUser(adminUser);
+
+        try {
+          const widgetRes = await apiClient.get('/dashboard/widgets/me', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const widgetMap = widgetRes.data?.data?.widgets || {};
+          setWidgetVisibility(widgetMap);
+        } catch (widgetError) {
+          console.error('Error fetching widget visibility:', widgetError);
+          setWidgetVisibility({});
+        }
       } catch (error) {
         console.error('Error fetching dashboard access profile:', error);
         setUserRoles([]);
         setUserPermissions([]);
         setIsAdminUser(false);
+        setWidgetVisibility({});
       } finally {
         setAccessReady(true);
       }
@@ -192,12 +212,149 @@ export default function Dashboard() {
 
   const visibleModules = modules.filter((module) => {
     if (module.adminOnly) return isAdminUser;
+    const widgetAllowed = widgetVisibility[module.id] !== false;
+    if (!widgetAllowed) return false;
     if (module.id === 'hrm') {
       // Keep HRM entry visible so every employee can access leave requests.
       return true;
     }
-    return hasModuleAccess(module.accessKeywords);
+    if (isAdminUser) return true;
+    const roleAllowed = hasModuleAccess(module.accessKeywords);
+    return roleAllowed && widgetAllowed;
   });
+
+  const fetchWidgetUsers = async () => {
+    const usersRes = await apiClient.get('/dashboard/widgets/users', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const users = Array.isArray(usersRes.data?.data) ? usersRes.data.data : [];
+    setWidgetUsers(users);
+
+    if (users.length > 0) {
+      const firstUserId = String(users[0].id);
+      setSelectedWidgetUserId(firstUserId);
+      await fetchWidgetPermissionsForUser(firstUserId);
+    }
+  };
+
+  const fetchWidgetPermissionsForUser = async (userId: string) => {
+    if (!userId) return;
+    const permissionRes = await apiClient.get(`/dashboard/widgets/users/${userId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const widgets = permissionRes.data?.data?.widgets || {};
+    setWidgetPermissionForm(widgets);
+  };
+
+  const openWidgetPermissionManager = async () => {
+    if (!isAdminUser) return;
+    try {
+      setWidgetPermissionLoading(true);
+      setShowWidgetPermissionModal(true);
+      await fetchWidgetUsers();
+    } catch (error) {
+      console.error('Error loading widget permission manager:', error);
+      alert('Failed to load widget permission manager.');
+      setShowWidgetPermissionModal(false);
+    } finally {
+      setWidgetPermissionLoading(false);
+    }
+  };
+
+  const handleWidgetUserChange = async (userId: string) => {
+    setSelectedWidgetUserId(userId);
+    if (!userId) return;
+    try {
+      setWidgetPermissionLoading(true);
+      await fetchWidgetPermissionsForUser(userId);
+    } catch (error) {
+      console.error('Error loading user widget permissions:', error);
+      alert('Failed to load selected user widget permissions.');
+    } finally {
+      setWidgetPermissionLoading(false);
+    }
+  };
+
+  const saveWidgetPermissions = async () => {
+    if (!selectedWidgetUserId) return;
+    try {
+      setWidgetPermissionSaving(true);
+      await apiClient.put(
+        `/dashboard/widgets/users/${selectedWidgetUserId}`,
+        { widgets: widgetPermissionForm },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      alert('Widget permissions updated successfully.');
+    } catch (error) {
+      console.error('Error saving widget permissions:', error);
+      alert('Failed to save widget permissions.');
+    } finally {
+      setWidgetPermissionSaving(false);
+    }
+  };
+
+  const setMyWidgetVisibility = async (widgetKey: string, isVisible: boolean) => {
+    try {
+      setWidgetToggleLoadingKey(widgetKey);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: isVisible,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      setWidgetVisibility((prev) => ({
+        ...prev,
+        [widgetKey]: isVisible,
+      }));
+    } catch (error) {
+      console.error('Error updating own widget visibility:', error);
+      alert('Failed to update widget visibility.');
+    } finally {
+      setWidgetToggleLoadingKey('');
+    }
+  };
+
+  const restoreAllHiddenWidgets = async () => {
+    const hiddenKeys = modules
+      .map((module) => module.id)
+      .filter((moduleId) => widgetVisibility[moduleId] === false);
+
+    if (hiddenKeys.length === 0) return;
+
+    try {
+      for (const key of hiddenKeys) {
+        await apiClient.put(
+          '/dashboard/widgets/me',
+          {
+            widget_key: key,
+            is_visible: true,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+      }
+
+      setWidgetVisibility((prev) => {
+        const next = { ...prev };
+        hiddenKeys.forEach((key) => {
+          next[key] = true;
+        });
+        return next;
+      });
+    } catch (error) {
+      console.error('Error restoring hidden widgets:', error);
+      alert('Failed to restore widgets.');
+    }
+  };
+
+  const hiddenWidgetCount = modules.filter((module) => widgetVisibility[module.id] === false).length;
 
   const handleModuleClick = (module: DashboardModule) => {
     if (module.path) {
@@ -282,6 +439,15 @@ export default function Dashboard() {
               <span>Real-time Updates</span>
             </div>
           </div>
+          {hiddenWidgetCount > 0 && (
+            <button
+              type="button"
+              onClick={restoreAllHiddenWidgets}
+              className="mt-4 rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+            >
+              Restore Hidden Widgets ({hiddenWidgetCount})
+            </button>
+          )}
         </div>
 
         {/* Module Cards */}
@@ -294,6 +460,20 @@ export default function Dashboard() {
                 module.name === 'HRM (Human Resource Management)' ? 'ring-2 ring-red-500/50' : ''
               }`}
             >
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (widgetToggleLoadingKey) return;
+                  setMyWidgetVisibility(module.id, false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label={`Disable ${module.name}`}
+              >
+                {widgetToggleLoadingKey === module.id ? '...' : '×'}
+              </button>
+
               {/* Gradient Background */}
               <div className={`absolute inset-0 bg-gradient-to-br ${module.bgColor} opacity-0 group-hover:opacity-100 transition-opacity duration-500`}></div>
 
@@ -409,6 +589,91 @@ export default function Dashboard() {
                     </div>
                   </div>
                 ))}
+              </div>
+
+              <div className="mt-4 border-t border-red-100 pt-4">
+                <button
+                  type="button"
+                  onClick={openWidgetPermissionManager}
+                  className="inline-flex items-center rounded-xl bg-gradient-to-r from-fuchsia-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-fuchsia-200/70 transition hover:from-fuchsia-700 hover:to-pink-700"
+                >
+                  Manage Employee Widget Access
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showWidgetPermissionModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-2xl rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+                <h3 className="text-lg font-semibold text-gray-900">Employee Widget Access Control</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowWidgetPermissionModal(false)}
+                  className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-4">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Employee/User</label>
+                  <select
+                    value={selectedWidgetUserId}
+                    onChange={(e) => handleWidgetUserChange(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  >
+                    {widgetUsers.map((user) => (
+                      <option key={user.id} value={user.id}>
+                        {user.employee_code ? `${user.employee_code} - ` : ''}
+                        {user.employee_name || user.name || user.email}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {widgetPermissionLoading ? (
+                  <div className="text-sm text-gray-500">Loading widget permissions...</div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {modules.map((module) => (
+                      <label key={module.id} className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
+                        <span className="text-sm font-medium text-gray-800">{module.name}</span>
+                        <input
+                          type="checkbox"
+                          checked={widgetPermissionForm[module.id] !== false}
+                          onChange={(e) =>
+                            setWidgetPermissionForm((prev) => ({
+                              ...prev,
+                              [module.id]: e.target.checked,
+                            }))
+                          }
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-5 flex justify-end gap-2 border-t border-gray-200 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowWidgetPermissionModal(false)}
+                  className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={widgetPermissionSaving || !selectedWidgetUserId}
+                  onClick={saveWidgetPermissions}
+                  className="rounded-xl bg-gradient-to-r from-red-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white hover:from-red-700 hover:to-pink-700 disabled:opacity-60"
+                >
+                  {widgetPermissionSaving ? 'Saving...' : 'Save Widget Access'}
+                </button>
               </div>
             </div>
           </div>
