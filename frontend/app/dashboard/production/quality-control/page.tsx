@@ -56,6 +56,8 @@ export default function QualityControlPage() {
 
   const [completedBatches, setCompletedBatches] = useState<BatchRow[]>([]);
   const [qcRows, setQcRows] = useState<QcInspection[]>([]);
+  const [statusDrafts, setStatusDrafts] = useState<Record<number, 'approved' | 'rejected' | 'hold'>>({});
+  const [updatingStatusId, setUpdatingStatusId] = useState<number>(0);
   const [summary, setSummary] = useState<QcSummary>({
     total_inspections: 0,
     approved_batches: 0,
@@ -174,6 +176,18 @@ export default function QualityControlPage() {
     loadData(token);
   }, [token]);
 
+  useEffect(() => {
+    setStatusDrafts((prev) => {
+      const next = { ...prev };
+      qcRows.forEach((row) => {
+        if (!next[row.id]) {
+          next[row.id] = row.quality_status;
+        }
+      });
+      return next;
+    });
+  }, [qcRows]);
+
   const applyFilters = async () => {
     if (!token) return;
     await loadData(token);
@@ -230,6 +244,35 @@ export default function QualityControlPage() {
       alert(firstError?.[0] || apiMessage);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const updateInspectionStatus = async (row: QcInspection) => {
+    if (!token) return;
+
+    const nextStatus = statusDrafts[row.id] || row.quality_status;
+    if (nextStatus === row.quality_status) {
+      setMessage('No status change to update.');
+      return;
+    }
+
+    try {
+      setUpdatingStatusId(row.id);
+      setMessage('');
+      await axios.put(
+        `${API_URL}/api/production/qc-inspections/${row.id}`,
+        { quality_status: nextStatus },
+        { headers: authHeaders(token) }
+      );
+
+      setMessage(`QC status updated to ${nextStatus}.`);
+      await loadData(token);
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to update QC status.';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      alert(firstError?.[0] || apiMessage);
+    } finally {
+      setUpdatingStatusId(0);
     }
   };
 
@@ -456,12 +499,13 @@ export default function QualityControlPage() {
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Approved</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Rejected</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Update Status</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Food Safety</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {qcRows.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">No QC records found.</td></tr>
+                  <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">No QC records found.</td></tr>
                 ) : (
                   qcRows.map((row) => {
                     const productionOrder = row.productionOrder || row.production_order;
@@ -477,6 +521,27 @@ export default function QualityControlPage() {
                         <td className="px-4 py-2.5 text-sm text-right text-red-700 font-medium">{Number(row.rejected_quantity || 0).toFixed(3)}</td>
                         <td className="px-4 py-2.5 text-sm font-semibold">
                           <span className={row.quality_status === 'approved' ? 'text-emerald-700' : row.quality_status === 'rejected' ? 'text-red-700' : 'text-amber-700'}>{row.quality_status}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-sm">
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={statusDrafts[row.id] || row.quality_status}
+                              onChange={(e) => setStatusDrafts((prev) => ({ ...prev, [row.id]: e.target.value as 'approved' | 'rejected' | 'hold' }))}
+                              className="rounded-md border border-violet-200 bg-white px-2 py-1 text-xs text-gray-800"
+                            >
+                              <option value="hold">Hold</option>
+                              <option value="approved">Approved</option>
+                              <option value="rejected">Rejected</option>
+                            </select>
+                            <button
+                              type="button"
+                              disabled={updatingStatusId === row.id}
+                              onClick={() => updateInspectionStatus(row)}
+                              className="rounded-md border border-violet-200 bg-violet-50 px-2.5 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+                            >
+                              {updatingStatusId === row.id ? 'Saving...' : 'Save'}
+                            </button>
+                          </div>
                         </td>
                         <td className="px-4 py-2.5 text-xs text-gray-600">
                           T:{row.food_safety_checklist?.temperature_check ? 'Y' : 'N'} |

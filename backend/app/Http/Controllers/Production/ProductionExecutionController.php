@@ -33,12 +33,21 @@ class ProductionExecutionController extends Controller
 
     public function activeBatches(): JsonResponse
     {
+        $latestStartedPerPlan = ProductionOrder::query()
+            ->selectRaw('MAX(id)')
+            ->where('status', 'started')
+            ->whereNotNull('production_plan_id')
+            ->groupBy('production_plan_id');
+
         $orders = ProductionOrder::with([
             'product:id,name,code,unit',
             'bom:id,product_id,version,batch_size',
             'plan:id,plan_date,shift,order_number,status',
         ])
             ->where('status', 'started')
+            ->whereNotNull('production_plan_id')
+            ->whereHas('plan')
+            ->whereIn('id', $latestStartedPerPlan)
             ->orderByDesc('started_at')
             ->get();
 
@@ -116,53 +125,64 @@ class ProductionExecutionController extends Controller
             ], 422);
         }
 
-        $plan = ProductionPlan::with(['product', 'bom.items.material.inventoryItem'])->findOrFail((int) $request->production_plan_id);
-
-        if (!in_array($plan->status, ['scheduled', 'order_created'], true)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Only scheduled or order-created plans can be started.',
-            ], 422);
-        }
-
-        $bom = $plan->bom;
-        if (!$bom) {
-            $bom = BomHeader::with(['items.material.inventoryItem'])
-                ->where('product_id', $plan->product_id)
-                ->where('is_active', true)
-                ->orderByDesc('id')
-                ->first();
-        }
-
-        if (!$bom) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No BOM found for this plan/product.',
-            ], 422);
-        }
-
-        if ((float) $bom->batch_size <= 0) {
-            return response()->json([
-                'success' => false,
-                'message' => 'BOM batch size must be greater than zero.',
-            ], 422);
-        }
-
-        $productionQuantity = (float) $plan->target_quantity;
-        $multiplier = $productionQuantity / (float) $bom->batch_size;
-        $baseRequirements = $bom->items->map(function ($item) use ($multiplier) {
-            return [
-                'material_id' => $item->material_id,
-                'inventory_item_id' => (int) $item->material->inventory_item_id,
-                'material_name' => (string) $item->material->inventoryItem->name,
-                'material_code' => (string) $item->material->inventoryItem->code,
-                'unit' => (string) $item->unit,
-                'required_quantity' => round((float) $item->quantity * $multiplier, 4),
-            ];
-        })->values()->all();
-
         try {
-            $order = DB::transaction(function () use ($request, $plan, $bom, $productionQuantity, $multiplier, $baseRequirements) {
+            $order = DB::transaction(function () use ($request) {
+                $plan = ProductionPlan::where('id', (int) $request->production_plan_id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                if (!in_array($plan->status, ['scheduled', 'order_created'], true)) {
+                    throw ValidationException::withMessages([
+                        'production_plan_id' => ['This plan is already started or no longer available in queue.'],
+                    ]);
+                }
+
+                $existingStarted = ProductionOrder::where('production_plan_id', $plan->id)
+                    ->where('status', 'started')
+                    ->exists();
+
+                if ($existingStarted) {
+                    throw ValidationException::withMessages([
+                        'production_plan_id' => ['An active batch already exists for this production plan.'],
+                    ]);
+                }
+
+                $plan->load(['product', 'bom.items.material.inventoryItem']);
+
+                $bom = $plan->bom;
+                if (!$bom) {
+                    $bom = BomHeader::with(['items.material.inventoryItem'])
+                        ->where('product_id', $plan->product_id)
+                        ->where('is_active', true)
+                        ->orderByDesc('id')
+                        ->first();
+                }
+
+                if (!$bom) {
+                    throw ValidationException::withMessages([
+                        'production_plan_id' => ['No BOM found for this plan/product.'],
+                    ]);
+                }
+
+                if ((float) $bom->batch_size <= 0) {
+                    throw ValidationException::withMessages([
+                        'production_plan_id' => ['BOM batch size must be greater than zero.'],
+                    ]);
+                }
+
+                $productionQuantity = (float) $plan->target_quantity;
+                $multiplier = $productionQuantity / (float) $bom->batch_size;
+                $baseRequirements = $bom->items->map(function ($item) use ($multiplier) {
+                    return [
+                        'material_id' => $item->material_id,
+                        'inventory_item_id' => (int) $item->material->inventory_item_id,
+                        'material_name' => (string) $item->material->inventoryItem->name,
+                        'material_code' => (string) $item->material->inventoryItem->code,
+                        'unit' => (string) $item->unit,
+                        'required_quantity' => round((float) $item->quantity * $multiplier, 4),
+                    ];
+                })->values()->all();
+
                 $inventoryIds = collect($baseRequirements)->pluck('inventory_item_id')->unique()->values();
                 $stockMap = InventoryItem::whereIn('id', $inventoryIds)->lockForUpdate()->get()->keyBy('id');
 
