@@ -18,7 +18,7 @@ class PackagingManagementController extends Controller
 {
     public function approvedQcBatches(Request $request): JsonResponse
     {
-        $packedQtyExpr = "COALESCE((SELECT SUM(pb.packed_quantity) FROM packaging_batches pb WHERE pb.qc_inspection_id = qc_inspections.id), 0)";
+        $packedQtyExpr = "COALESCE((SELECT SUM(pb.packed_quantity * COALESCE(NULLIF(pb.packaging_material_quantity, 0), 1)) FROM packaging_batches pb WHERE pb.qc_inspection_id = qc_inspections.id AND pb.status IN ('packed','dispatched')), 0)";
 
         $query = QcInspection::with([
             'productionOrder:id,product_id,batch_no,produced_quantity,status,started_at,completed_at',
@@ -157,24 +157,34 @@ class PackagingManagementController extends Controller
             ], 422);
         }
 
-        $alreadyPacked = (float) PackagingBatch::where('qc_inspection_id', $inspection->id)->sum('packed_quantity');
-        $availableBalance = round(max(0, (float) ($inspection->approved_quantity ?? 0) - $alreadyPacked), 3);
-        $requestedPackedQty = round((float) $request->packed_quantity, 3);
-        if ($requestedPackedQty > $availableBalance) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Packed quantity exceeds available approved balance for this QC batch.',
-                'errors' => [
-                    'packed_quantity' => ["Available balance is {$availableBalance}."],
-                ],
-            ], 422);
+        $status = $request->status ?? 'planned';
+        if (in_array($status, ['packed', 'dispatched'], true)) {
+            $alreadyPacked = (float) PackagingBatch::where('qc_inspection_id', $inspection->id)
+                ->whereIn('status', ['packed', 'dispatched'])
+                ->selectRaw('COALESCE(SUM(packed_quantity * COALESCE(NULLIF(packaging_material_quantity, 0), 1)), 0) as consumed_qty')
+                ->value('consumed_qty');
+            $availableBalance = round(max(0, (float) ($inspection->approved_quantity ?? 0) - $alreadyPacked), 3);
+            $requestedPackedQty = round((float) $request->packed_quantity, 3);
+            $requestedPackSizeQty = round((float) ($request->packaging_material_quantity ?? 1), 3);
+            if ($requestedPackSizeQty <= 0) {
+                $requestedPackSizeQty = 1;
+            }
+            $requestedConsumedQty = round($requestedPackedQty * $requestedPackSizeQty, 3);
+            if ($requestedConsumedQty > $availableBalance) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Packed quantity exceeds available approved balance for this QC batch.',
+                    'errors' => [
+                        'packed_quantity' => ["Available balance is {$availableBalance} after applying pack size quantity."],
+                    ],
+                ], 422);
+            }
         }
 
         $labelCode = $this->generateLabelCode($inspection->productionOrder?->product?->code ?? 'PACK');
         $barcode = $this->generateBarcodeValue($inspection->production_order_id, $labelCode);
         $qr = $this->generateQrValue($inspection->production_order_id, $labelCode);
 
-        $status = $request->status ?? 'planned';
         $packedAt = in_array($status, ['packed', 'dispatched'], true) ? now() : null;
 
         $materialPayload = collect($request->materials)
@@ -309,25 +319,37 @@ class PackagingManagementController extends Controller
             ], 422);
         }
 
-        $requestedPackedQty = $request->has('packed_quantity')
-            ? round((float) $request->packed_quantity, 3)
-            : round((float) ($batch->packed_quantity ?? 0), 3);
+        $targetStatus = (string) ($request->status ?? $batch->status ?? 'planned');
+        if (in_array($targetStatus, ['packed', 'dispatched'], true)) {
+            $requestedPackedQty = $request->has('packed_quantity')
+                ? round((float) $request->packed_quantity, 3)
+                : round((float) ($batch->packed_quantity ?? 0), 3);
+            $requestedPackSizeQty = $request->has('packaging_material_quantity')
+                ? round((float) $request->packaging_material_quantity, 3)
+                : round((float) ($batch->packaging_material_quantity ?? 1), 3);
+            if ($requestedPackSizeQty <= 0) {
+                $requestedPackSizeQty = 1;
+            }
+            $requestedConsumedQty = round($requestedPackedQty * $requestedPackSizeQty, 3);
 
-        $inspection = QcInspection::find($batch->qc_inspection_id);
-        if ($inspection) {
-            $packedByOthers = (float) PackagingBatch::where('qc_inspection_id', $batch->qc_inspection_id)
-                ->where('id', '!=', $batch->id)
-                ->sum('packed_quantity');
+            $inspection = QcInspection::find($batch->qc_inspection_id);
+            if ($inspection) {
+                $packedByOthers = (float) PackagingBatch::where('qc_inspection_id', $batch->qc_inspection_id)
+                    ->where('id', '!=', $batch->id)
+                    ->whereIn('status', ['packed', 'dispatched'])
+                    ->selectRaw('COALESCE(SUM(packed_quantity * COALESCE(NULLIF(packaging_material_quantity, 0), 1)), 0) as consumed_qty')
+                    ->value('consumed_qty');
 
-            $availableBalance = round(max(0, (float) ($inspection->approved_quantity ?? 0) - $packedByOthers), 3);
-            if ($requestedPackedQty > $availableBalance) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Packed quantity exceeds available approved balance for this QC batch.',
-                    'errors' => [
-                        'packed_quantity' => ["Available balance is {$availableBalance}."],
-                    ],
-                ], 422);
+                $availableBalance = round(max(0, (float) ($inspection->approved_quantity ?? 0) - $packedByOthers), 3);
+                if ($requestedConsumedQty > $availableBalance) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Packed quantity exceeds available approved balance for this QC batch.',
+                        'errors' => [
+                            'packed_quantity' => ["Available balance is {$availableBalance} after applying pack size quantity."],
+                        ],
+                    ], 422);
+                }
             }
         }
 
