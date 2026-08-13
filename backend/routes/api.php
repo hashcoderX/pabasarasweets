@@ -224,6 +224,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'index']);
     Route::post('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'store']);
     Route::put('production/packaging/batches/{id}', [\App\Http\Controllers\Production\PackagingManagementController::class, 'update']);
+    Route::delete('production/packaging/batches/{id}', [\App\Http\Controllers\Production\PackagingManagementController::class, 'destroy']);
 
     // Vehicle Loading Routes
     Route::apiResource('vehicle-loading/vehicles', \App\Http\Controllers\VehicleController::class);

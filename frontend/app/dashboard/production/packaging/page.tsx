@@ -103,6 +103,7 @@ export default function PackagingManagementPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deletingBatchId, setDeletingBatchId] = useState(0);
   const [message, setMessage] = useState('');
 
   const [approvedQc, setApprovedQc] = useState<ApprovedQcRow[]>([]);
@@ -375,6 +376,41 @@ export default function PackagingManagementPage() {
       alert(firstError?.[0] || apiMessage);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const removeBatch = async (row: PackagingRow) => {
+    if (!token) return;
+
+    const confirmDelete = window.confirm(
+      `Remove packaging batch #${row.id}? This will rollback packed stock/material deductions for this batch.`
+    );
+    if (!confirmDelete) return;
+
+    try {
+      setDeletingBatchId(row.id);
+      await axios.delete(`${API_URL}/api/production/packaging/batches/${row.id}`, {
+        headers: authHeaders(token),
+      });
+
+      if (updateRowId === row.id) {
+        setUpdateRowId(0);
+        setUpdateFinalProductName('');
+        setUpdateStatus('planned');
+        setUpdatePackedQty('0');
+        setUpdateCostingPrice('0');
+        setUpdateSellingPrice('0');
+        setUpdateExpiryDate('');
+        setUpdateMaterialLines([{ raw_material_id: 0, quantity_per_pack: '1' }]);
+      }
+
+      setMessage('Packaging batch removed successfully. Quantities were rolled back.');
+      await loadData(token);
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to remove packaging batch.';
+      alert(apiMessage);
+    } finally {
+      setDeletingBatchId(0);
     }
   };
 
@@ -799,11 +835,12 @@ export default function PackagingManagementPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Label</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Barcode / QR</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {rows.length === 0 ? (
-                  <tr><td colSpan={13} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
+                  <tr><td colSpan={14} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
                 ) : (
                   rows.map((row) => {
                     const order = resolveOrder(row);
@@ -823,6 +860,16 @@ export default function PackagingManagementPage() {
                         <td className="px-4 py-2.5 text-xs text-gray-600">BAR: {row.barcode_value || '-'}<br />QR: {row.qr_value || '-'}</td>
                         <td className="px-4 py-2.5 text-sm font-semibold">
                           <span className={row.status === 'dispatched' ? 'text-indigo-700' : row.status === 'packed' ? 'text-emerald-700' : 'text-slate-700'}>{row.status}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-sm">
+                          <button
+                            type="button"
+                            onClick={() => removeBatch(row)}
+                            disabled={deletingBatchId === row.id}
+                            className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                          >
+                            {deletingBatchId === row.id ? 'Removing...' : 'Remove'}
+                          </button>
                         </td>
                       </tr>
                     );

@@ -461,6 +461,37 @@ class PackagingManagementController extends Controller
         ]);
     }
 
+    public function destroy(int $id): JsonResponse
+    {
+        $batch = PackagingBatch::with([
+            'materials',
+            'productionOrder.product',
+        ])->find($id);
+
+        if (!$batch) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Packaging batch not found',
+            ], 404);
+        }
+
+        DB::transaction(function () use ($batch) {
+            // Return consumed packaging materials before deleting the lines.
+            $this->syncBatchPackagingMaterials($batch, 0);
+
+            // Reverse finished-good stock synced to main store for this batch.
+            $this->rollbackBatchMainStoreSync($batch);
+
+            $batch->materials()->delete();
+            $batch->delete();
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Packaging batch removed and stock rollback completed successfully',
+        ]);
+    }
+
     private function buildMaterialSummary(array $materialPayload, $rawMaterials): array
     {
         if (count($materialPayload) === 0) {
@@ -653,6 +684,46 @@ class PackagingManagementController extends Controller
             'main_store_synced_at' => now(),
             'main_store_synced_quantity' => $targetSyncedQty,
         ]);
+    }
+
+    private function rollbackBatchMainStoreSync(PackagingBatch $batch): void
+    {
+        $syncedQty = round((float) ($batch->main_store_synced_quantity ?? 0), 3);
+        if ($syncedQty <= 0) {
+            return;
+        }
+
+        $batch->loadMissing('productionOrder.product');
+        $product = $batch->productionOrder?->product;
+        if (!$product) {
+            return;
+        }
+
+        $variantMeta = $this->buildVariantMeta($product, $batch);
+
+        $item = InventoryItem::where('type', 'finished_good')
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(additional_info, '$.production_product_id')) = ?", [(string) $product->id])
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(additional_info, '$.packaging_variant_key')) = ?", [$variantMeta['variant_key']])
+            ->first();
+
+        if (!$item) {
+            $item = InventoryItem::where('type', 'finished_good')
+                ->where('code', $variantMeta['inventory_code'])
+                ->first();
+        }
+
+        if (!$item) {
+            return;
+        }
+
+        $currentStock = (float) ($item->current_stock ?? 0);
+        $item->current_stock = round(max(0, $currentStock - $syncedQty), 3);
+
+        $info = $item->additional_info ?? [];
+        $info['last_unsynced_batch_id'] = $batch->id;
+        $info['last_unsynced_at'] = Carbon::now()->toDateTimeString();
+        $item->additional_info = $info;
+        $item->save();
     }
 
     private function buildVariantMeta($product, PackagingBatch $batch): array
