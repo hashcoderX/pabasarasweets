@@ -20,6 +20,22 @@ class DashboardWidgetPermissionController extends Controller
         'vehicle-loading',
         'distribution',
         'accounts',
+        'company-settings',
+        'user-management',
+        'system-settings',
+        'security-settings',
+        'backup-restore',
+        'hrm-employees',
+        'hrm-departments',
+        'hrm-designations',
+        'hrm-attendance',
+        'hrm-leaves',
+        'hrm-roles',
+        'hrm-payroll',
+        'hrm-quick-add-employee',
+        'hrm-quick-view-reports',
+        'hrm-quick-mark-attendance',
+        'hrm-quick-process-payroll',
     ];
 
     private function isAdminUser($user): bool

@@ -99,12 +99,22 @@ type PackagingSummary = {
   total_packed_quantity: number;
 };
 
+type AppModalState = {
+  variant: 'alert' | 'confirm';
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  onConfirm?: () => void | Promise<void>;
+};
+
 export default function PackagingManagementPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deletingBatchId, setDeletingBatchId] = useState(0);
   const [message, setMessage] = useState('');
+  const [modal, setModal] = useState<AppModalState | null>(null);
 
   const [approvedQc, setApprovedQc] = useState<ApprovedQcRow[]>([]);
   const [rawMaterialOptions, setRawMaterialOptions] = useState<RawMaterialOption[]>([]);
@@ -160,6 +170,27 @@ export default function PackagingManagementPage() {
     if (Array.isArray(payload?.data)) return payload.data;
     if (Array.isArray(payload)) return payload;
     return [];
+  };
+  const showAlertModal = (text: string, title = 'Alert') => {
+    setModal({ variant: 'alert', title, message: text, confirmLabel: 'OK' });
+  };
+  const showConfirmModal = (text: string, onConfirm: () => void | Promise<void>, title = 'Confirm Action') => {
+    setModal({
+      variant: 'confirm',
+      title,
+      message: text,
+      confirmLabel: 'Yes',
+      cancelLabel: 'Cancel',
+      onConfirm,
+    });
+  };
+  const closeModal = () => setModal(null);
+  const handleModalConfirm = async () => {
+    const action = modal?.onConfirm;
+    setModal(null);
+    if (action) {
+      await action();
+    }
   };
 
   useEffect(() => {
@@ -279,17 +310,17 @@ export default function PackagingManagementPage() {
   const createBatch = async () => {
     if (!token) return;
     if (!selectedQcId) {
-      alert('Select approved QC batch first.');
+      showAlertModal('Select approved QC batch first.');
       return;
     }
     if (!finalProductName.trim()) {
-      alert('Enter final finished product name (e.g. Sesame Ball 100).');
+      showAlertModal('Enter final finished product name (e.g. Sesame Ball 100).');
       return;
     }
 
     const materialsPayload = normalizeMaterialLines(createMaterialLines);
     if (materialsPayload.length === 0) {
-      alert('Add at least one packaging raw material from raw material store.');
+      showAlertModal('Add at least one packaging raw material from raw material store.');
       return;
     }
 
@@ -329,7 +360,7 @@ export default function PackagingManagementPage() {
     } catch (error: any) {
       const apiMessage = error?.response?.data?.message || 'Failed to create packaging batch.';
       const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      alert(firstError?.[0] || apiMessage);
+      showAlertModal(firstError?.[0] || apiMessage);
     } finally {
       setSaving(false);
     }
@@ -338,17 +369,17 @@ export default function PackagingManagementPage() {
   const updateBatch = async () => {
     if (!token) return;
     if (!updateRowId) {
-      alert('Select a packaging batch first.');
+      showAlertModal('Select a packaging batch first.');
       return;
     }
     if (!updateFinalProductName.trim()) {
-      alert('Enter final finished product name.');
+      showAlertModal('Enter final finished product name.');
       return;
     }
 
     const materialsPayload = normalizeMaterialLines(updateMaterialLines);
     if (materialsPayload.length === 0) {
-      alert('Add at least one packaging raw material from raw material store.');
+      showAlertModal('Add at least one packaging raw material from raw material store.');
       return;
     }
 
@@ -373,19 +404,14 @@ export default function PackagingManagementPage() {
     } catch (error: any) {
       const apiMessage = error?.response?.data?.message || 'Failed to update packaging batch.';
       const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      alert(firstError?.[0] || apiMessage);
+      showAlertModal(firstError?.[0] || apiMessage);
     } finally {
       setSaving(false);
     }
   };
 
-  const removeBatch = async (row: PackagingRow) => {
+  const executeBatchRemoval = async (row: PackagingRow) => {
     if (!token) return;
-
-    const confirmDelete = window.confirm(
-      `Remove packaging batch #${row.id}? This will rollback packed stock/material deductions for this batch.`
-    );
-    if (!confirmDelete) return;
 
     try {
       setDeletingBatchId(row.id);
@@ -408,15 +434,27 @@ export default function PackagingManagementPage() {
       await loadData(token);
     } catch (error: any) {
       const apiMessage = error?.response?.data?.message || 'Failed to remove packaging batch.';
-      alert(apiMessage);
+      showAlertModal(apiMessage);
     } finally {
       setDeletingBatchId(0);
     }
   };
 
+  const removeBatch = async (row: PackagingRow) => {
+    if (!token) return;
+
+    showConfirmModal(
+      `Remove packaging batch #${row.id}? This will rollback packed stock/material deductions for this batch.`,
+      async () => {
+        await executeBatchRemoval(row);
+      },
+      'Remove Packaging Batch'
+    );
+  };
+
   const exportCsv = () => {
     if (rows.length === 0) {
-      alert('No packaging rows to export.');
+      showAlertModal('No packaging rows to export.');
       return;
     }
 
@@ -880,6 +918,33 @@ export default function PackagingManagementPage() {
           </div>
         </section>
       </main>
+
+      {modal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-md rounded-2xl border border-rose-100 bg-white p-5 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-900">{modal.title}</h3>
+            <p className="mt-2 text-sm text-gray-700">{modal.message}</p>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              {modal.variant === 'confirm' && (
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  {modal.cancelLabel || 'Cancel'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleModalConfirm}
+                className="rounded-md bg-gradient-to-r from-rose-600 to-pink-600 px-4 py-2 text-sm font-medium text-white hover:from-rose-700 hover:to-pink-700"
+              >
+                {modal.confirmLabel || 'OK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

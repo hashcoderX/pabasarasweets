@@ -220,6 +220,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('production/qc-inspections', [\App\Http\Controllers\Production\QualityControlController::class, 'index']);
     Route::post('production/qc-inspections', [\App\Http\Controllers\Production\QualityControlController::class, 'store']);
     Route::put('production/qc-inspections/{id}', [\App\Http\Controllers\Production\QualityControlController::class, 'update']);
+    Route::delete('production/qc-inspections/{id}', [\App\Http\Controllers\Production\QualityControlController::class, 'destroy']);
     Route::get('production/packaging/approved-qc-batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'approvedQcBatches']);
     Route::get('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'index']);
     Route::post('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'store']);

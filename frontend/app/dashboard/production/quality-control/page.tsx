@@ -58,6 +58,7 @@ export default function QualityControlPage() {
   const [qcRows, setQcRows] = useState<QcInspection[]>([]);
   const [statusDrafts, setStatusDrafts] = useState<Record<number, 'approved' | 'rejected' | 'hold'>>({});
   const [updatingStatusId, setUpdatingStatusId] = useState<number>(0);
+  const [deletingInspectionId, setDeletingInspectionId] = useState<number>(0);
   const [summary, setSummary] = useState<QcSummary>({
     total_inspections: 0,
     approved_batches: 0,
@@ -273,6 +274,28 @@ export default function QualityControlPage() {
       alert(firstError?.[0] || apiMessage);
     } finally {
       setUpdatingStatusId(0);
+    }
+  };
+
+  const removeInspection = async (row: QcInspection) => {
+    if (!token) return;
+
+    const canDelete = window.confirm(`Remove QC inspection #${row.id}?`);
+    if (!canDelete) return;
+
+    try {
+      setDeletingInspectionId(row.id);
+      await axios.delete(`${API_URL}/api/production/qc-inspections/${row.id}`, {
+        headers: authHeaders(token),
+      });
+
+      setMessage('QC inspection removed successfully.');
+      await loadData(token);
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to remove QC inspection.';
+      alert(apiMessage);
+    } finally {
+      setDeletingInspectionId(0);
     }
   };
 
@@ -501,11 +524,12 @@ export default function QualityControlPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Update Status</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Food Safety</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {qcRows.length === 0 ? (
-                  <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-gray-500">No QC records found.</td></tr>
+                  <tr><td colSpan={11} className="px-4 py-8 text-center text-sm text-gray-500">No QC records found.</td></tr>
                 ) : (
                   qcRows.map((row) => {
                     const productionOrder = row.productionOrder || row.production_order;
@@ -548,6 +572,16 @@ export default function QualityControlPage() {
                           H:{row.food_safety_checklist?.hygiene_check ? 'Y' : 'N'} |
                           P:{row.food_safety_checklist?.packaging_check ? 'Y' : 'N'} |
                           L:{row.food_safety_checklist?.label_check ? 'Y' : 'N'}
+                        </td>
+                        <td className="px-4 py-2.5 text-sm">
+                          <button
+                            type="button"
+                            disabled={deletingInspectionId === row.id}
+                            onClick={() => removeInspection(row)}
+                            className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                          >
+                            {deletingInspectionId === row.id ? 'Removing...' : 'Remove'}
+                          </button>
                         </td>
                       </tr>
                     );

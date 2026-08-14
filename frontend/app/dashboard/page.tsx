@@ -14,6 +14,7 @@ type DashboardModule = {
   comingSoon?: boolean;
   adminOnly?: boolean;
   accessKeywords: string[];
+  description?: string;
 };
 
 export default function Dashboard() {
@@ -210,6 +211,66 @@ export default function Dashboard() {
     },
   ];
 
+  const adminSettingCards: DashboardModule[] = [
+    {
+      id: 'company-settings',
+      name: 'Company Settings',
+      icon: '🏢',
+      color: 'from-blue-500 to-cyan-500',
+      bgColor: 'from-blue-50 to-cyan-50',
+      path: '/dashboard/company-settings',
+      accessKeywords: [],
+      adminOnly: true,
+      description: 'Manage company profile for invoices and documents',
+    },
+    {
+      id: 'user-management',
+      name: 'User Management',
+      icon: '👥',
+      color: 'from-green-500 to-emerald-500',
+      bgColor: 'from-green-50 to-emerald-50',
+      path: '/dashboard/hrm/roles',
+      accessKeywords: [],
+      adminOnly: true,
+      description: 'Manage users and permissions',
+    },
+    {
+      id: 'system-settings',
+      name: 'System Settings',
+      icon: '⚙️',
+      color: 'from-purple-500 to-indigo-500',
+      bgColor: 'from-purple-50 to-indigo-50',
+      path: '/dashboard/system-settings',
+      accessKeywords: [],
+      adminOnly: true,
+      description: 'Configure system preferences',
+    },
+    {
+      id: 'security-settings',
+      name: 'Security Settings',
+      icon: '🔒',
+      color: 'from-red-500 to-pink-500',
+      bgColor: 'from-red-50 to-pink-50',
+      path: '/dashboard/security-settings',
+      accessKeywords: [],
+      adminOnly: true,
+      description: 'Manage security configurations',
+    },
+    {
+      id: 'backup-restore',
+      name: 'Backup & Restore',
+      icon: '💾',
+      color: 'from-teal-500 to-green-500',
+      bgColor: 'from-teal-50 to-green-50',
+      path: '/dashboard/backup-restore',
+      accessKeywords: [],
+      adminOnly: true,
+      description: 'Manage data backups',
+    },
+  ];
+
+  const allWidgetCards = [...modules, ...adminSettingCards];
+
   const visibleModules = modules.filter((module) => {
     if (module.adminOnly) return isAdminUser;
     const widgetAllowed = widgetVisibility[module.id] !== false;
@@ -222,6 +283,8 @@ export default function Dashboard() {
     const roleAllowed = hasModuleAccess(module.accessKeywords);
     return roleAllowed && widgetAllowed;
   });
+
+  const visibleAdminSettingCards = adminSettingCards.filter((card) => widgetVisibility[card.id] !== false);
 
   const fetchWidgetUsers = async () => {
     const usersRes = await apiClient.get('/dashboard/widgets/users', {
@@ -321,9 +384,9 @@ export default function Dashboard() {
   };
 
   const restoreAllHiddenWidgets = async () => {
-    const hiddenKeys = modules
-      .map((module) => module.id)
-      .filter((moduleId) => widgetVisibility[moduleId] === false);
+    const hiddenKeys = allWidgetCards
+      .map((card) => card.id)
+      .filter((cardId) => widgetVisibility[cardId] === false);
 
     if (hiddenKeys.length === 0) return;
 
@@ -354,7 +417,7 @@ export default function Dashboard() {
     }
   };
 
-  const hiddenWidgetCount = modules.filter((module) => widgetVisibility[module.id] === false).length;
+  const hiddenWidgetCount = allWidgetCards.filter((card) => widgetVisibility[card.id] === false).length;
 
   const handleModuleClick = (module: DashboardModule) => {
     if (module.path) {
@@ -550,13 +613,7 @@ export default function Dashboard() {
 
             <div className="p-6">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {[
-                  { icon: '🏢', title: 'Company Settings', desc: 'Manage company profile for invoices and documents', color: 'from-blue-500 to-cyan-500', path: '/dashboard/company-settings' },
-                  { icon: '👥', title: 'User Management', desc: 'Manage users and permissions', color: 'from-green-500 to-emerald-500', path: '/dashboard/hrm/roles' },
-                  { icon: '⚙️', title: 'System Settings', desc: 'Configure system preferences', color: 'from-purple-500 to-indigo-500', path: '/dashboard/system-settings' },
-                  { icon: '🔒', title: 'Security Settings', desc: 'Manage security configurations', color: 'from-red-500 to-pink-500', path: '/dashboard/security-settings' },
-                  { icon: '💾', title: 'Backup & Restore', desc: 'Manage data backups', color: 'from-teal-500 to-green-500', path: '/dashboard/backup-restore' },
-                ].map((setting, index) => (
+                {visibleAdminSettingCards.map((setting, index) => (
                   <div
                     key={index}
                     onClick={() => {
@@ -567,18 +624,32 @@ export default function Dashboard() {
 
                       
                     }}
-                    className="group bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105"
+                    className="group relative bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105"
                   >
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (widgetToggleLoadingKey) return;
+                        setMyWidgetVisibility(setting.id, false);
+                      }}
+                      className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label={`Disable ${setting.name}`}
+                    >
+                      {widgetToggleLoadingKey === setting.id ? '...' : '×'}
+                    </button>
+
                     <div className="flex items-center space-x-3">
                       <div className={`w-12 h-12 bg-gradient-to-r ${setting.color} rounded-lg flex items-center justify-center text-xl shadow-lg group-hover:scale-110 transition-transform duration-300`}>
                         {setting.icon}
                       </div>
                       <div className="flex-1">
                         <h4 className="font-semibold text-gray-900 group-hover:text-gray-800 transition-colors duration-300">
-                          {setting.title}
+                          {setting.name}
                         </h4>
                         <p className="text-sm text-gray-600 group-hover:text-gray-700 transition-colors duration-300">
-                          {setting.desc}
+                          {setting.description || 'System setting card'}
                         </p>
                       </div>
                       <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-300">
@@ -639,7 +710,7 @@ export default function Dashboard() {
                   <div className="text-sm text-gray-500">Loading widget permissions...</div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {modules.map((module) => (
+                    {allWidgetCards.map((module) => (
                       <label key={module.id} className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
                         <span className="text-sm font-medium text-gray-800">{module.name}</span>
                         <input

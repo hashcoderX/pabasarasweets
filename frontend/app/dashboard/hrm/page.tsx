@@ -5,12 +5,33 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createApiClient } from '@/lib/apiClient';
 
+type HrmModuleCard = {
+  id: string;
+  name: string;
+  icon: string;
+  path: string;
+  description: string;
+  color: string;
+  bgColor: string;
+  getStats: () => string;
+  accessKeywords: string[];
+};
+
+type HrmQuickActionCard = {
+  id: string;
+  icon: string;
+  title: string;
+  desc: string;
+};
+
 export default function HRM() {
   const [token, setToken] = useState('');
   const [userRoles, setUserRoles] = useState<string[]>([]);
   const [userPermissions, setUserPermissions] = useState<string[]>([]);
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [accessReady, setAccessReady] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
   const [activeEmployees, setActiveEmployees] = useState(0);
   const [attendanceRate, setAttendanceRate] = useState(0);
   const [departmentsCount, setDepartmentsCount] = useState(0);
@@ -80,11 +101,23 @@ export default function HRM() {
       setUserRoles(Array.from(new Set(roleNames)));
       setUserPermissions(Array.from(new Set(permissionNames.filter(Boolean))));
       setIsAdminUser(adminUser);
+
+      try {
+        const widgetRes = await apiClient.get('/dashboard/widgets/me', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const widgetMap = widgetRes.data?.data?.widgets || {};
+        setWidgetVisibility(widgetMap);
+      } catch (widgetError) {
+        console.error('Error fetching HRM widget visibility:', widgetError);
+        setWidgetVisibility({});
+      }
     } catch (error) {
       console.error('Error fetching HRM access profile:', error);
       setUserRoles([]);
       setUserPermissions([]);
       setIsAdminUser(false);
+      setWidgetVisibility({});
     } finally {
       setAccessReady(true);
     }
@@ -195,8 +228,9 @@ export default function HRM() {
     return userPermissions.some((permission) => keywords.some((keyword) => permission.includes(keyword)));
   };
 
-  const hrmModules = [
+  const hrmModules: HrmModuleCard[] = [
     {
+      id: 'hrm-employees',
       name: 'Employees',
       icon: '👥',
       path: '/dashboard/hrm/employees',
@@ -207,6 +241,7 @@ export default function HRM() {
       accessKeywords: ['view_employees', 'create_employees', 'edit_employees', 'delete_employees']
     },
     {
+      id: 'hrm-departments',
       name: 'Departments',
       icon: '🏢',
       path: '/dashboard/hrm/departments',
@@ -217,6 +252,7 @@ export default function HRM() {
       accessKeywords: ['view_departments', 'create_departments', 'edit_departments', 'delete_departments']
     },
     {
+      id: 'hrm-designations',
       name: 'Designations',
       icon: '👔',
       path: '/dashboard/hrm/designations',
@@ -227,6 +263,7 @@ export default function HRM() {
       accessKeywords: ['view_designations', 'create_designations', 'edit_designations', 'delete_designations']
     },
     {
+      id: 'hrm-attendance',
       name: 'Attendance',
       icon: '📅',
       path: '/dashboard/hrm/attendance',
@@ -237,6 +274,7 @@ export default function HRM() {
       accessKeywords: ['view_attendance', 'create_attendance', 'edit_attendance', 'delete_attendance']
     },
     {
+      id: 'hrm-leaves',
       name: 'Leaves',
       icon: '🏖️',
       path: '/dashboard/hrm/leaves',
@@ -247,6 +285,7 @@ export default function HRM() {
       accessKeywords: ['view_leaves', 'create_leaves', 'approve_leaves', 'reject_leaves']
     },
     {
+      id: 'hrm-roles',
       name: 'Roles & Privileges',
       icon: '🔐',
       path: '/dashboard/hrm/roles',
@@ -257,6 +296,7 @@ export default function HRM() {
       accessKeywords: ['view_roles', 'create_roles', 'edit_roles', 'delete_roles', 'assign_roles', 'view_permissions', 'create_permissions', 'edit_permissions', 'delete_permissions']
     },
     {
+      id: 'hrm-payroll',
       name: 'Payroll',
       icon: '💰',
       path: '/dashboard/hrm/payroll',
@@ -268,10 +308,18 @@ export default function HRM() {
     },
   ];
 
+  const hrmQuickActions: HrmQuickActionCard[] = [
+    { id: 'hrm-quick-add-employee', icon: '➕', title: 'Add Employee', desc: 'New hire' },
+    { id: 'hrm-quick-view-reports', icon: '📊', title: 'View Reports', desc: 'Analytics' },
+    { id: 'hrm-quick-mark-attendance', icon: '📅', title: 'Mark Attendance', desc: 'Daily check-in' },
+    { id: 'hrm-quick-process-payroll', icon: '💰', title: 'Process Payroll', desc: 'Monthly run' },
+  ];
+
   const isSalesRefOnly =
     !isAdminUser && userRoles.length > 0 && userRoles.every((role) => role === 'sales ref');
 
   const visibleHrmModules = hrmModules.filter((module) => {
+    if (widgetVisibility[module.id] === false) return false;
     if (isAdminUser) return true;
     if (module.name === 'Leaves') {
       // All employees should be able to open leave requests.
@@ -282,6 +330,66 @@ export default function HRM() {
     }
     return hasAnyPermission(module.accessKeywords);
   });
+
+  const visibleQuickActions = hrmQuickActions.filter((action) => widgetVisibility[action.id] !== false);
+
+  const setMyWidgetVisibility = async (widgetKey: string, isVisible: boolean) => {
+    try {
+      setWidgetToggleLoadingKey(widgetKey);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: isVisible,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      setWidgetVisibility((prev) => ({
+        ...prev,
+        [widgetKey]: isVisible,
+      }));
+    } catch (error) {
+      console.error('Error updating HRM widget visibility:', error);
+    } finally {
+      setWidgetToggleLoadingKey('');
+    }
+  };
+
+  const allHrmWidgetKeys = [...hrmModules.map((module) => module.id), ...hrmQuickActions.map((action) => action.id)];
+  const hiddenWidgetCount = allHrmWidgetKeys.filter((key) => widgetVisibility[key] === false).length;
+
+  const restoreAllHiddenWidgets = async () => {
+    const hiddenKeys = allHrmWidgetKeys.filter((key) => widgetVisibility[key] === false);
+    if (hiddenKeys.length === 0) return;
+
+    try {
+      for (const key of hiddenKeys) {
+        await apiClient.put(
+          '/dashboard/widgets/me',
+          {
+            widget_key: key,
+            is_visible: true,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+      }
+
+      setWidgetVisibility((prev) => {
+        const next = { ...prev };
+        hiddenKeys.forEach((key) => {
+          next[key] = true;
+        });
+        return next;
+      });
+    } catch (error) {
+      console.error('Error restoring HRM widgets:', error);
+    }
+  };
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -374,6 +482,15 @@ export default function HRM() {
               <div className="text-sm text-gray-500">Departments</div>
             </div>
           </div>
+          {hiddenWidgetCount > 0 && (
+            <button
+              type="button"
+              onClick={restoreAllHiddenWidgets}
+              className="mt-4 rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+            >
+              Restore Hidden Widgets ({hiddenWidgetCount})
+            </button>
+          )}
         </div>
 
         {/* HRM Module Cards */}
@@ -384,6 +501,21 @@ export default function HRM() {
               href={module.path}
               className="group relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 cursor-pointer border border-white/20 overflow-hidden transform hover:-translate-y-2 hover:scale-105"
             >
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (widgetToggleLoadingKey) return;
+                  setMyWidgetVisibility(module.id, false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label={`Disable ${module.name}`}
+              >
+                {widgetToggleLoadingKey === module.id ? '...' : 'x'}
+              </button>
+
               {/* Gradient Background */}
               <div className={`absolute inset-0 bg-gradient-to-br ${module.bgColor} opacity-0 group-hover:opacity-100 transition-opacity duration-500`}></div>
 
@@ -442,16 +574,23 @@ export default function HRM() {
 
           <div className="p-6">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {[
-                { icon: '➕', title: 'Add Employee', desc: 'New hire' },
-                { icon: '📊', title: 'View Reports', desc: 'Analytics' },
-                { icon: '📅', title: 'Mark Attendance', desc: 'Daily check-in' },
-                { icon: '💰', title: 'Process Payroll', desc: 'Monthly run' },
-              ].map((action, index) => (
+              {visibleQuickActions.map((action, index) => (
                 <div
                   key={index}
-                  className="group bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105 text-center"
+                  className="group relative bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105 text-center"
                 >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (widgetToggleLoadingKey) return;
+                      setMyWidgetVisibility(action.id, false);
+                    }}
+                    className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label={`Disable ${action.title}`}
+                  >
+                    {widgetToggleLoadingKey === action.id ? '...' : 'x'}
+                  </button>
                   <div className="text-2xl mb-2">{action.icon}</div>
                   <h4 className="font-semibold text-gray-900 group-hover:text-gray-800 transition-colors duration-300 text-sm">
                     {action.title}

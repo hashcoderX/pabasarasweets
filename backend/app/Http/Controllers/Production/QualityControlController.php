@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Production;
 
 use App\Http\Controllers\Controller;
+use App\Models\PackagingBatch;
 use App\Models\QcInspection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -176,6 +177,32 @@ class QualityControlController extends Controller
                 'productionOrder.plan:id,order_number,plan_date,shift',
             ]),
             'message' => 'QC inspection updated successfully',
+        ]);
+    }
+
+    public function destroy(int $id): JsonResponse
+    {
+        $inspection = QcInspection::find($id);
+        if (!$inspection) {
+            return response()->json([
+                'success' => false,
+                'message' => 'QC inspection not found',
+            ], 404);
+        }
+
+        $linkedPackagingCount = PackagingBatch::where('qc_inspection_id', $inspection->id)->count();
+        if ($linkedPackagingCount > 0) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cannot remove this QC inspection because packaging batches are already linked to it.',
+            ], 422);
+        }
+
+        $inspection->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'QC inspection removed successfully',
         ]);
     }
 }
