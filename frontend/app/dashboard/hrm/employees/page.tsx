@@ -245,6 +245,12 @@ export default function Employees() {
   // Actions menu state
   const [openMenuFor, setOpenMenuFor] = useState<number | null>(null);
   const [openAttendanceFor, setOpenAttendanceFor] = useState<number | null>(null);
+  const [showResetPasswordModal, setShowResetPasswordModal] = useState(false);
+  const [resetPasswordEmployee, setResetPasswordEmployee] = useState<Employee | null>(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState('');
+  const [resetPasswordConfirmValue, setResetPasswordConfirmValue] = useState('');
+  const [resetPasswordSaving, setResetPasswordSaving] = useState(false);
+  const [showResetPasswordText, setShowResetPasswordText] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const filteredEmployees = useMemo(() => {
@@ -685,6 +691,67 @@ export default function Employees() {
     } catch (error) {
       console.error('Error deleting employee:', error);
       showNotice('Error', 'Failed to delete employee. Please try again.', 'error');
+    }
+  };
+
+  const openResetPassword = (employee: Employee) => {
+    setResetPasswordEmployee(employee);
+    setResetPasswordValue('');
+    setResetPasswordConfirmValue('');
+    setShowResetPasswordText(false);
+    setShowResetPasswordModal(true);
+  };
+
+  const closeResetPassword = () => {
+    setShowResetPasswordModal(false);
+    setResetPasswordEmployee(null);
+    setResetPasswordValue('');
+    setResetPasswordConfirmValue('');
+    setShowResetPasswordText(false);
+    setResetPasswordSaving(false);
+  };
+
+  const submitResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetPasswordEmployee) return;
+
+    if (resetPasswordValue.length < 8) {
+      showNotice('Validation Error', 'Password must be at least 8 characters.', 'error');
+      return;
+    }
+
+    if (resetPasswordValue !== resetPasswordConfirmValue) {
+      showNotice('Validation Error', 'Password confirmation does not match.', 'error');
+      return;
+    }
+
+    try {
+      setResetPasswordSaving(true);
+      await axios.post(
+        `/api/hr/employees/${resetPasswordEmployee.id}/reset-password`,
+        {
+          password: resetPasswordValue,
+          password_confirmation: resetPasswordConfirmValue,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      closeResetPassword();
+      showNotice(
+        'Success',
+        `Password reset successfully for ${resetPasswordEmployee.first_name} ${resetPasswordEmployee.last_name}.`,
+        'success'
+      );
+    } catch (error: any) {
+      const backendMessage =
+        error?.response?.data?.message ||
+        (error?.response?.data?.errors?.password?.[0] as string | undefined) ||
+        'Failed to reset employee password. Please try again.';
+      showNotice('Error', backendMessage, 'error');
+    } finally {
+      setResetPasswordSaving(false);
     }
   };
 
@@ -1345,6 +1412,10 @@ export default function Employees() {
                             <button role="menuitem" onClick={() => { openLeaveManagement(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
                               <span className="w-4 h-4">📅</span>
                               <span>Leave Management</span>
+                            </button>
+                            <button role="menuitem" onClick={() => { openResetPassword(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
+                              <span className="w-4 h-4">🔑</span>
+                              <span>Reset Password</span>
                             </button>
                             <div className="my-1 h-px bg-gray-200" />
                             <div className="relative">
@@ -2894,6 +2965,75 @@ export default function Employees() {
                 Confirm
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Password Modal */}
+      {showResetPasswordModal && resetPasswordEmployee && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeResetPassword} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900">Reset Employee Password</h3>
+              <button onClick={closeResetPassword} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+
+            <p className="text-sm text-gray-600 mb-4">
+              Employee: <span className="font-semibold text-gray-900">{resetPasswordEmployee.first_name} {resetPasswordEmployee.last_name}</span>
+            </p>
+
+            <form onSubmit={submitResetPassword} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+                <input
+                  type={showResetPasswordText ? 'text' : 'password'}
+                  value={resetPasswordValue}
+                  onChange={(e) => setResetPasswordValue(e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900"
+                  minLength={8}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Confirm New Password</label>
+                <input
+                  type={showResetPasswordText ? 'text' : 'password'}
+                  value={resetPasswordConfirmValue}
+                  onChange={(e) => setResetPasswordConfirmValue(e.target.value)}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900"
+                  minLength={8}
+                  required
+                />
+              </div>
+
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={showResetPasswordText}
+                  onChange={(e) => setShowResetPasswordText(e.target.checked)}
+                />
+                Show password
+              </label>
+
+              <div className="flex justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  onClick={closeResetPassword}
+                  className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetPasswordSaving}
+                  className="px-5 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60"
+                >
+                  {resetPasswordSaving ? 'Resetting...' : 'Reset Password'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

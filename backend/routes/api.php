@@ -90,6 +90,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('designations', DesignationController::class);
         Route::apiResource('employees', EmployeeController::class);
+        Route::post('employees/{employee}/reset-password', [EmployeeController::class, 'resetPassword']);
         Route::apiResource('candidates', CandidateController::class);
         // Candidate nested resources
         Route::get('candidates/{candidate}/documents', [CandidateDocumentController::class, 'index']);

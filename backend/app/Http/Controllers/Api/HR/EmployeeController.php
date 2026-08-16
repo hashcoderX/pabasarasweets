@@ -393,4 +393,25 @@ class EmployeeController extends Controller
 
         return response()->json(['message' => 'Employee deleted successfully']);
     }
+
+    public function resetPassword(Request $request, Employee $employee): JsonResponse
+    {
+        $validated = $request->validate([
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = User::where('employee_id', $employee->id)->first();
+        if (!$user) {
+            return response()->json([
+                'message' => 'No linked user account found for this employee.',
+            ], 404);
+        }
+
+        $user->password = Hash::make($validated['password']);
+        $user->save();
+
+        return response()->json([
+            'message' => 'Employee password reset successfully.',
+        ]);
+    }
 }
