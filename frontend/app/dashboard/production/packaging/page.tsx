@@ -140,6 +140,10 @@ export default function PackagingManagementPage() {
   const [createMaterialLines, setCreateMaterialLines] = useState<PackagingMaterialLine[]>([
     { raw_material_id: 0, quantity_per_pack: '1' },
   ]);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferTargetQcId, setTransferTargetQcId] = useState<number>(0);
+  const [transferQuantity, setTransferQuantity] = useState('0');
+  const [transferSaving, setTransferSaving] = useState(false);
 
   const [updateRowId, setUpdateRowId] = useState<number>(0);
   const [updateFinalProductName, setUpdateFinalProductName] = useState('');
@@ -301,6 +305,79 @@ export default function PackagingManagementPage() {
       setFinalProductName(baseName);
     }
   }, [selectedQcId, approvedQc, finalProductName]);
+
+  const selectedQc = approvedQc.find((qc) => qc.id === selectedQcId) || null;
+  const selectedQcBalance = Number(selectedQc?.balance_quantity ?? selectedQc?.approved_quantity ?? 0);
+  const transferTargetOptions = approvedQc.filter((qc) => qc.id !== selectedQcId);
+
+  const openTransferModal = () => {
+    if (!selectedQcId) {
+      showAlertModal('Select approved QC batch first.');
+      return;
+    }
+
+    if (selectedQcBalance <= 0) {
+      showAlertModal('Selected QC batch has no transferable balance.');
+      return;
+    }
+
+    if (transferTargetOptions.length === 0) {
+      showAlertModal('No target QC batch available for transfer.');
+      return;
+    }
+
+    setTransferTargetQcId(transferTargetOptions[0].id);
+    setTransferQuantity(selectedQcBalance.toFixed(3));
+    setShowTransferModal(true);
+  };
+
+  const closeTransferModal = () => {
+    setShowTransferModal(false);
+    setTransferTargetQcId(0);
+    setTransferQuantity('0');
+    setTransferSaving(false);
+  };
+
+  const submitTransferBalance = async () => {
+    if (!token) return;
+    if (!selectedQcId) {
+      showAlertModal('Select approved QC batch first.');
+      return;
+    }
+    if (!transferTargetQcId) {
+      showAlertModal('Select target QC batch.');
+      return;
+    }
+
+    const qty = Number(transferQuantity || 0);
+    if (qty <= 0) {
+      showAlertModal('Transfer quantity must be greater than zero.');
+      return;
+    }
+
+    try {
+      setTransferSaving(true);
+      await axios.post(
+        `${API_URL}/api/production/packaging/transfer-qc-balance`,
+        {
+          source_qc_inspection_id: selectedQcId,
+          target_qc_inspection_id: transferTargetQcId,
+          transfer_quantity: qty,
+        },
+        { headers: authHeaders(token) }
+      );
+
+      closeTransferModal();
+      setMessage('QC balance transferred successfully.');
+      await loadData(token);
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to transfer QC balance.';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      showAlertModal(firstError?.[0] || apiMessage);
+    } finally {
+      setTransferSaving(false);
+    }
+  };
 
   const applyFilters = async () => {
     if (!token) return;
@@ -586,6 +663,20 @@ export default function PackagingManagementPage() {
                     })()
                   ))}
                 </select>
+                {selectedQc && (
+                  <div className="mt-2 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50/70 p-2.5 text-xs text-amber-900 sm:flex-row sm:items-center sm:justify-between">
+                    <span>
+                      Balance: <span className="font-semibold">{selectedQcBalance.toFixed(3)}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={openTransferModal}
+                      className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100"
+                    >
+                      Transfer Balance to Other QC Batch
+                    </button>
+                  </div>
+                )}
               </div>
               <div className="md:col-span-2">
                 <label className="block text-xs font-medium text-gray-600 mb-1">Final Finished Product Name</label>
@@ -940,6 +1031,83 @@ export default function PackagingManagementPage() {
                 className="rounded-md bg-gradient-to-r from-rose-600 to-pink-600 px-4 py-2 text-sm font-medium text-white hover:from-rose-700 hover:to-pink-700"
               >
                 {modal.confirmLabel || 'OK'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showTransferModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-amber-100 bg-white p-5 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-900">Transfer QC Balance</h3>
+            <p className="mt-1 text-sm text-gray-700">
+              Move leftover approved quantity from selected QC batch to another approved QC batch.
+            </p>
+
+            <div className="mt-4 grid grid-cols-1 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Source QC Batch</label>
+                <input
+                  value={selectedQc ? `QC #${selectedQc.id}` : '-'}
+                  disabled
+                  className={`${inputClass} bg-gray-100 text-gray-600 cursor-not-allowed`}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Available Balance</label>
+                <input
+                  value={selectedQcBalance.toFixed(3)}
+                  disabled
+                  className={`${inputClass} bg-gray-100 text-gray-600 cursor-not-allowed`}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Target QC Batch</label>
+                <select
+                  value={transferTargetQcId}
+                  onChange={(e) => setTransferTargetQcId(Number(e.target.value))}
+                  className={inputClass}
+                >
+                  <option value={0}>Select target QC batch</option>
+                  {transferTargetOptions.map((qc) => {
+                    const order = resolveOrder(qc);
+                    return (
+                      <option key={qc.id} value={qc.id}>
+                        QC #{qc.id} | {order?.batch_no || '-'} | {order?.product?.code || '-'} - {order?.product?.name || '-'}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Transfer Quantity</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={transferQuantity}
+                  onChange={(e) => setTransferQuantity(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeTransferModal}
+                className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitTransferBalance}
+                disabled={transferSaving}
+                className="rounded-md bg-gradient-to-r from-amber-600 to-orange-600 px-4 py-2 text-sm font-medium text-white hover:from-amber-700 hover:to-orange-700 disabled:opacity-50"
+              >
+                {transferSaving ? 'Transferring...' : 'Transfer Balance'}
               </button>
             </div>
           </div>

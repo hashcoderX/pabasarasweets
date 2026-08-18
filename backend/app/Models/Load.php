@@ -15,6 +15,7 @@ class Load extends Model
         'sales_ref_id',
         'route_id',
         'status',
+        'has_vehicle_balance',
         'load_date',
         'delivery_date',
         'total_weight',
@@ -25,6 +26,7 @@ class Load extends Model
         'load_date' => 'date',
         'delivery_date' => 'date',
         'total_weight' => 'decimal:2',
+        'has_vehicle_balance' => 'boolean',
     ];
 
     public function vehicle(): BelongsTo

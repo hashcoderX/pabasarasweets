@@ -171,6 +171,8 @@ Route::middleware('auth:sanctum')->group(function () {
     // Stock Management Routes
     Route::apiResource('stock/suppliers', \App\Http\Controllers\SupplierController::class);
     Route::apiResource('stock/inventory', \App\Http\Controllers\InventoryController::class);
+    Route::get('stock/inventory-categories', [\App\Http\Controllers\InventoryCategoryController::class, 'index']);
+    Route::post('stock/inventory-categories', [\App\Http\Controllers\InventoryCategoryController::class, 'store']);
     Route::apiResource('stock/transfers', \App\Http\Controllers\StockTransferController::class)->only(['index', 'store']);
     Route::get('stock/transfers/reference/{reference}', [\App\Http\Controllers\StockTransferController::class, 'detailsByReference']);
 
@@ -200,6 +202,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Production - Formula Management (BOM)
     Route::get('production/products', [\App\Http\Controllers\Production\BomController::class, 'products']);
     Route::post('production/products', [\App\Http\Controllers\Production\BomController::class, 'storeProduct']);
+    Route::delete('production/products/{product}', [\App\Http\Controllers\Production\BomController::class, 'destroyProduct']);
     Route::get('production/raw-materials', [\App\Http\Controllers\Production\BomController::class, 'rawMaterials']);
     Route::post('production/raw-materials', [\App\Http\Controllers\Production\BomController::class, 'storeRawMaterial']);
     Route::delete('production/raw-materials/{rawMaterial}', [\App\Http\Controllers\Production\BomController::class, 'destroyRawMaterial']);
@@ -223,6 +226,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('production/qc-inspections/{id}', [\App\Http\Controllers\Production\QualityControlController::class, 'update']);
     Route::delete('production/qc-inspections/{id}', [\App\Http\Controllers\Production\QualityControlController::class, 'destroy']);
     Route::get('production/packaging/approved-qc-batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'approvedQcBatches']);
+    Route::post('production/packaging/transfer-qc-balance', [\App\Http\Controllers\Production\PackagingManagementController::class, 'transferQcBalance']);
     Route::get('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'index']);
     Route::post('production/packaging/batches', [\App\Http\Controllers\Production\PackagingManagementController::class, 'store']);
     Route::put('production/packaging/batches/{id}', [\App\Http\Controllers\Production\PackagingManagementController::class, 'update']);
@@ -232,6 +236,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('vehicle-loading/vehicles', \App\Http\Controllers\VehicleController::class);
     Route::apiResource('vehicle-loading/routes', \App\Http\Controllers\RouteController::class);
     Route::apiResource('vehicle-loading/loads', LoadController::class);
+    Route::post('vehicle-loading/loads/{load}/complete', [LoadController::class, 'complete']);
     Route::get('vehicle-loading/loads/{load}/delivery-summary', [LoadController::class, 'deliverySummary']);
     Route::get('vehicle-loading/loads/{load}/expenses', [LoadExpenseController::class, 'index']);
     Route::post('vehicle-loading/loads/{load}/expenses', [LoadExpenseController::class, 'store']);

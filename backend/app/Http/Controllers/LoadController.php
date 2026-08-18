@@ -4,10 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\DistributionInvoice;
 use App\Models\DistributionPayment;
+use App\Models\InventoryItem;
 use App\Models\Load;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 
 class LoadController extends Controller
 {
@@ -273,6 +277,133 @@ class LoadController extends Controller
                 ],
                 'items' => $itemSalesCollection->values(),
             ],
+        ]);
+    }
+
+    public function complete(Request $request, Load $load): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'add_balance_to_main_stock' => 'required|boolean',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $addBalanceToMainStock = (bool) $request->boolean('add_balance_to_main_stock');
+
+        if (in_array($load->status, ['delivered', 'cancelled'], true)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This load is already completed or cancelled.',
+            ], 422);
+        }
+
+        try {
+            DB::transaction(function () use ($load, $addBalanceToMainStock) {
+                $lockedLoad = Load::where('id', $load->id)->lockForUpdate()->firstOrFail();
+                $items = $lockedLoad->loadItems()->lockForUpdate()->get();
+
+                $remainingQty = round((float) $items->sum('qty'), 2);
+
+                if ($addBalanceToMainStock && $remainingQty > 0) {
+                    foreach ($items as $item) {
+                        $qty = round((float) ($item->qty ?? 0), 2);
+                        if ($qty <= 0) {
+                            continue;
+                        }
+
+                        // Prefer exact variant by product code + load batch no, fallback to product code.
+                        $inventory = InventoryItem::where('code', $item->product_code)
+                            ->where(function ($q) use ($lockedLoad) {
+                                $q->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(additional_info, '$.batch_no')) = ?", [$lockedLoad->load_number])
+                                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(additional_info, '$.last_batch_no')) = ?", [$lockedLoad->load_number])
+                                    ->orWhereRaw("JSON_UNQUOTE(JSON_EXTRACT(additional_info, '$.vehicle_load_batch_no')) = ?", [$lockedLoad->load_number]);
+                            })
+                            ->lockForUpdate()
+                            ->first();
+
+                        if (!$inventory) {
+                            $inventory = InventoryItem::where('code', $item->product_code)
+                                ->lockForUpdate()
+                                ->first();
+                        }
+
+                        if (!$inventory) {
+                            $inventory = InventoryItem::create([
+                                'name' => $item->name,
+                                'code' => $item->product_code,
+                                'description' => 'Auto-created from load completion stock return.',
+                                'type' => 'finished_good',
+                                'category' => 'Main Store',
+                                'unit' => 'pcs',
+                                'current_stock' => 0,
+                                'minimum_stock' => 0,
+                                'maximum_stock' => null,
+                                'unit_price' => (float) ($item->out_price ?? 0),
+                                'purchase_price' => (float) ($item->out_price ?? 0),
+                                'sell_price' => (float) ($item->sell_price ?? 0),
+                                'location' => 'Main Store',
+                                'status' => 'active',
+                                'additional_info' => [
+                                    'batch_no' => $lockedLoad->load_number,
+                                    'vehicle_load_batch_no' => $lockedLoad->load_number,
+                                    'source' => 'load_complete_return',
+                                ],
+                            ]);
+                        }
+
+                        $info = $inventory->additional_info ?? [];
+                        $info['batch_no'] = $info['batch_no'] ?? $lockedLoad->load_number;
+                        $info['vehicle_load_batch_no'] = $lockedLoad->load_number;
+                        $info['last_returned_load_id'] = $lockedLoad->id;
+                        $info['last_returned_at'] = now()->toDateTimeString();
+                        $inventory->additional_info = $info;
+
+                        $inventory->current_stock = round((float) ($inventory->current_stock ?? 0) + $qty, 2);
+                        $inventory->save();
+
+                        $item->qty = 0;
+                        $item->save();
+                    }
+
+                    $remainingQty = 0;
+                }
+
+                $today = now()->startOfDay();
+                $loadDate = $lockedLoad->load_date ? \Carbon\Carbon::parse($lockedLoad->load_date)->startOfDay() : $today;
+                $deliveryDate = $loadDate->greaterThan($today) ? $loadDate : $today;
+
+                $updatePayload = [
+                    'status' => 'delivered',
+                    'delivery_date' => $deliveryDate->toDateString(),
+                ];
+
+                // Backward compatibility: allow completion even before new column migration is applied.
+                if (Schema::hasColumn('loads', 'has_vehicle_balance')) {
+                    $updatePayload['has_vehicle_balance'] = $remainingQty > 0;
+                }
+
+                $lockedLoad->update($updatePayload);
+            });
+        } catch (ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $e->errors(),
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => $addBalanceToMainStock
+                ? 'Load completed and remaining vehicle quantities moved to main stock.'
+                : 'Load completed without stock return. Remaining balance is marked in vehicle.',
+            'load' => $load->fresh(['vehicle', 'driver', 'salesRef', 'route']),
         ]);
     }
 }

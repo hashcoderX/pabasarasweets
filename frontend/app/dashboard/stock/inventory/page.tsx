@@ -93,6 +93,8 @@ export default function Inventory() {
   const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_stock'>('all');
   const [recordStatusFilter, setRecordStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [rawQualityFilter, setRawQualityFilter] = useState<'all' | 'pending' | 'accepted' | 'rejected' | 'partial'>('all');
+  const [dbCategorySuggestions, setDbCategorySuggestions] = useState<string[]>([]);
+  const [savingCategory, setSavingCategory] = useState(false);
   const router = useRouter();
 
   const toSafeNumber = (value: unknown): number => {
@@ -112,6 +114,17 @@ export default function Inventory() {
     return unitPrice || purchasePrice || sellPrice || 0;
   };
 
+  const suggestedCategories = useMemo(() => {
+    const fromItems = items
+      .map((item) => String(item.category || '').trim())
+      .filter((category) => category.length > 0);
+
+    const merged = [...fromItems, ...dbCategorySuggestions];
+    return Array.from(new Set(merged.map((value) => value.toLowerCase())))
+      .map((lowerValue) => merged.find((value) => value.toLowerCase() === lowerValue) || lowerValue)
+      .sort((a, b) => a.localeCompare(b));
+  }, [items, dbCategorySuggestions]);
+
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     if (!storedToken) {
@@ -125,6 +138,7 @@ export default function Inventory() {
     if (token) {
       fetchSuppliers();
       fetchItems();
+      fetchCategorySuggestions();
     }
   }, [token, activeTab]);
 
@@ -254,6 +268,64 @@ export default function Inventory() {
       setItems(mockItems);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchCategorySuggestions = async () => {
+    try {
+      const response = await axios.get('/api/stock/inventory-categories', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { type: activeTab, status: 'active' },
+      });
+
+      if (response.data?.success) {
+        const categories = Array.isArray(response.data.data) ? response.data.data : [];
+        setDbCategorySuggestions(
+          categories
+            .map((category: { name?: string }) => String(category?.name || '').trim())
+            .filter((name: string) => name.length > 0)
+        );
+      }
+    } catch (error) {
+      console.error('Error fetching inventory categories:', error);
+    }
+  };
+
+  const addCategorySuggestion = async () => {
+    const normalized = formData.category.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      alert('Type a category name first.');
+      return;
+    }
+
+    try {
+      setSavingCategory(true);
+      const response = await axios.post('/api/stock/inventory-categories', {
+        name: normalized,
+        type: activeTab,
+        status: 'active',
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || 'Failed to save category.');
+      }
+
+      const savedName = String(response.data?.data?.name || normalized).trim();
+      setFormData((prev) => ({ ...prev, category: savedName }));
+      setDbCategorySuggestions((prev) => {
+        if (prev.some((item) => item.toLowerCase() === savedName.toLowerCase())) return prev;
+        return [...prev, savedName];
+      });
+      alert('Category saved successfully.');
+    } catch (error: any) {
+      console.error('Error saving category:', error);
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      alert(firstError?.[0] || error?.response?.data?.message || error?.message || 'Failed to save category.');
+    } finally {
+      setSavingCategory(false);
     }
   };
 
@@ -1116,7 +1188,23 @@ export default function Inventory() {
                           onChange={(e) => setFormData({ ...formData, category: e.target.value })}
                           className={modalInputClass}
                           placeholder="Enter category"
+                          list="inventory-category-suggestions"
                         />
+                        <datalist id="inventory-category-suggestions">
+                          {suggestedCategories.map((category) => (
+                            <option key={category} value={category} />
+                          ))}
+                        </datalist>
+                        {activeTab === 'raw_material' && (
+                          <button
+                            type="button"
+                            onClick={addCategorySuggestion}
+                            disabled={savingCategory}
+                            className="mt-2 inline-flex items-center rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-semibold text-orange-700 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {savingCategory ? 'Saving...' : 'Add Category'}
+                          </button>
+                        )}
                       </div>
 
                       <div>

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\InventoryCategory;
 use App\Models\InventoryItem;
 use App\Models\GrnItem;
 use App\Models\Product;
@@ -240,6 +241,7 @@ class InventoryController extends Controller
             ]);
 
             $this->syncProductionReferences($item);
+            $this->syncInventoryCategory($item->category, $item->type);
 
             return response()->json([
                 'success' => true,
@@ -335,6 +337,7 @@ class InventoryController extends Controller
             ]);
 
             $this->syncProductionReferences($item, $originalCode);
+            $this->syncInventoryCategory($item->category, $item->type);
 
             return response()->json([
                 'success' => true,
@@ -438,5 +441,21 @@ class InventoryController extends Controller
             'description' => $item->description,
             'status' => $item->status ?? 'active',
         ]);
+    }
+
+    private function syncInventoryCategory(?string $categoryName, ?string $type): void
+    {
+        $normalized = preg_replace('/\s+/', ' ', trim((string) $categoryName));
+        if (!$normalized) {
+            return;
+        }
+
+        $allowedTypes = ['raw_material', 'finished_good', 'office_asset'];
+        $resolvedType = in_array((string) $type, $allowedTypes, true) ? (string) $type : 'raw_material';
+
+        InventoryCategory::updateOrCreate(
+            ['name' => $normalized, 'type' => $resolvedType],
+            ['status' => 'active']
+        );
     }
 }

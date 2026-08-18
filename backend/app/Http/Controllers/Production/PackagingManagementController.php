@@ -492,6 +492,67 @@ class PackagingManagementController extends Controller
         ]);
     }
 
+    public function transferQcBalance(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'source_qc_inspection_id' => 'required|exists:qc_inspections,id',
+            'target_qc_inspection_id' => 'required|different:source_qc_inspection_id|exists:qc_inspections,id',
+            'transfer_quantity' => 'required|numeric|min:0.001',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $sourceId = (int) $request->source_qc_inspection_id;
+        $targetId = (int) $request->target_qc_inspection_id;
+        $transferQty = round((float) $request->transfer_quantity, 3);
+
+        DB::transaction(function () use ($sourceId, $targetId, $transferQty) {
+            $source = QcInspection::where('id', $sourceId)->lockForUpdate()->first();
+            $target = QcInspection::where('id', $targetId)->lockForUpdate()->first();
+
+            if (!$source || !$target) {
+                throw ValidationException::withMessages([
+                    'source_qc_inspection_id' => ['Selected QC batch not found.'],
+                ]);
+            }
+
+            if ($source->quality_status !== 'approved' || $target->quality_status !== 'approved') {
+                throw ValidationException::withMessages([
+                    'target_qc_inspection_id' => ['Only approved QC batches can participate in balance transfer.'],
+                ]);
+            }
+
+            $sourceConsumed = (float) PackagingBatch::where('qc_inspection_id', $source->id)
+                ->whereIn('status', ['packed', 'dispatched'])
+                ->selectRaw('COALESCE(SUM(packed_quantity * COALESCE(NULLIF(packaging_material_quantity, 0), 1)), 0) as consumed_qty')
+                ->value('consumed_qty');
+
+            $sourceAvailable = round(max(0, (float) $source->approved_quantity - $sourceConsumed), 3);
+            if ($transferQty > $sourceAvailable) {
+                throw ValidationException::withMessages([
+                    'transfer_quantity' => ["Source QC balance is {$sourceAvailable}. Enter a lower quantity."],
+                ]);
+            }
+
+            $source->approved_quantity = round((float) $source->approved_quantity - $transferQty, 3);
+            $target->approved_quantity = round((float) $target->approved_quantity + $transferQty, 3);
+
+            $source->save();
+            $target->save();
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'QC balance transferred successfully.',
+        ]);
+    }
+
     private function buildMaterialSummary(array $materialPayload, $rawMaterials): array
     {
         if (count($materialPayload) === 0) {

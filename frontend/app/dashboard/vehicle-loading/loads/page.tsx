@@ -35,6 +35,7 @@ interface Load {
   sales_ref_id?: number | null;
   route_id: number;
   status: 'pending' | 'in_transit' | 'delivered' | 'cancelled';
+  has_vehicle_balance?: boolean;
   load_date: string;
   delivery_date: string | null;
   total_weight: number;
@@ -122,6 +123,14 @@ interface LoadDeliverySummary {
   }>;
 }
 
+interface ItemReturnRow {
+  item_code: string;
+  item_name: string;
+  unit: string;
+  return_qty: number;
+  return_value: number;
+}
+
 interface DistributionInvoiceListResponse {
   data?: {
     data?: DistributionInvoiceRecord[];
@@ -160,6 +169,14 @@ interface SoldItemProfitRow {
   out_price: number;
   cost_value: number;
   profit: number;
+}
+
+interface LoadBalanceRow {
+  item_code: string;
+  item_name: string;
+  loaded_qty: number;
+  sold_qty: number;
+  balance_qty: number;
 }
 
 interface DistributionPaymentListResponse {
@@ -227,6 +244,8 @@ export default function LoadsPage() {
   const [showModal, setShowModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsMode, setDetailsMode] = useState<'view' | 'complete'>('view');
+  const [detailsCompleting, setDetailsCompleting] = useState(false);
   const [selectedLoadDetails, setSelectedLoadDetails] = useState<Load | null>(null);
   const [selectedLoadItems, setSelectedLoadItems] = useState<LoadItem[]>([]);
   const [soldItemProfitRows, setSoldItemProfitRows] = useState<SoldItemProfitRow[]>([]);
@@ -237,7 +256,8 @@ export default function LoadsPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [salesRefs, setSalesRefs] = useState<Driver[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
-  const [confirmAction, setConfirmAction] = useState<{ type: 'delete' | 'complete'; load: Load } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{ type: 'delete'; load: Load } | null>(null);
+  const [completeDecisionOpen, setCompleteDecisionOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | Load['status']>('all');
@@ -278,6 +298,45 @@ export default function LoadsPage() {
       { gross: 0, discount: 0, net: 0, cost: 0, profit: 0 }
     );
   }, [soldItemProfitRows]);
+
+  const loadBalanceRows = useMemo<LoadBalanceRow[]>(() => {
+    const soldByCode = new Map<string, SoldItemProfitRow>();
+    soldItemProfitRows.forEach((row) => {
+      soldByCode.set(String(row.item_code || '').trim(), row);
+    });
+
+    return selectedLoadItems
+      .map((item) => {
+        const code = String(item.product_code || '').trim();
+        const sold = soldByCode.get(code);
+        const loadedQty = Number(item.qty || 0);
+        const soldQty = Number(sold?.sold_qty || 0);
+
+        return {
+          item_code: code,
+          item_name: String(item.name || '-'),
+          loaded_qty: loadedQty,
+          sold_qty: soldQty,
+          balance_qty: loadedQty - soldQty,
+        };
+      })
+      .sort((a, b) => b.balance_qty - a.balance_qty);
+  }, [selectedLoadItems, soldItemProfitRows]);
+
+  const itemReturnRows = useMemo<ItemReturnRow[]>(() => {
+    const rows = deliverySummary?.items || [];
+
+    return rows
+      .filter((row) => Number(row.return_qty || 0) > 0 || Number(row.return_value || 0) > 0)
+      .map((row) => ({
+        item_code: String(row.item_code || '-'),
+        item_name: String(row.item_name || '-'),
+        unit: String(row.unit || ''),
+        return_qty: Number(row.return_qty || 0),
+        return_value: Number(row.return_value || 0),
+      }))
+      .sort((a, b) => b.return_value - a.return_value);
+  }, [deliverySummary]);
 
   const customerBaseRows = useMemo<LoadCustomerBaseRow[]>(() => {
     const grouped = new Map<number, LoadCustomerBaseRow>();
@@ -586,38 +645,16 @@ export default function LoadsPage() {
     }
   };
 
-  const handleCompleteLoad = async (load: Load) => {
-    try {
-      const today = new Date();
-      const loadDate = new Date(load.load_date);
-      const effectiveDate = loadDate > today ? loadDate : today;
-      const year = effectiveDate.getFullYear();
-      const month = String(effectiveDate.getMonth() + 1).padStart(2, '0');
-      const day = String(effectiveDate.getDate()).padStart(2, '0');
-      const deliveryDate = `${year}-${month}-${day}`;
+  const handleCompleteLoad = async (load: Load, addBalanceToMainStock: boolean) => {
+    await axios.post(`/api/vehicle-loading/loads/${load.id}/complete`, {
+      add_balance_to_main_stock: addBalanceToMainStock,
+    }, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
 
-      await axios.put(`/api/vehicle-loading/loads/${load.id}`, {
-        load_number: load.load_number,
-        vehicle_id: load.vehicle_id,
-        driver_id: load.driver_id,
-        sales_ref_id: load.sales_ref_id ?? null,
-        route_id: load.route_id,
-        status: 'delivered',
-        load_date: load.load_date,
-        delivery_date: deliveryDate,
-        total_weight: load.total_weight,
-        notes: load.notes,
-      }, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      fetchLoads();
-    } catch (error) {
-      console.error('Error completing load:', error);
-      alert('Failed to complete load');
-    }
+    await fetchLoads();
   };
 
   const computeSoldItemsProfit = (
@@ -703,10 +740,12 @@ export default function LoadsPage() {
     return { rows, totals };
   };
 
-  const handleViewDetails = async (loadId: number) => {
+  const handleViewDetails = async (loadId: number, mode: 'view' | 'complete' = 'view') => {
     try {
+      setDetailsMode(mode);
       setShowDetailsModal(true);
       setDetailsLoading(true);
+      setDetailsCompleting(false);
       setSelectedLoadDetails(null);
       setSelectedLoadItems([]);
       setSoldItemProfitRows([]);
@@ -728,29 +767,34 @@ export default function LoadsPage() {
           headers: {
             Authorization: `Bearer ${token}`,
           },
+          timeout: 30000,
         }),
         axios.get('/api/vehicle-loading/load-items', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
           params: { load_id: loadId },
+          timeout: 30000,
         }),
         axios.get(`/api/vehicle-loading/loads/${loadId}/delivery-summary`, {
           headers: {
             Authorization: `Bearer ${token}`,
           },
+          timeout: 30000,
         }).catch(() => null),
         axios.get<DistributionInvoiceListResponse>('/api/distribution/invoices', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
-          params: { per_page: 1000 },
+          params: { load_id: loadId, per_page: 500 },
+          timeout: 30000,
         }).catch(() => null),
         axios.get<DistributionPaymentListResponse>('/api/distribution/payments', {
           headers: {
             Authorization: `Bearer ${token}`,
           },
-          params: { per_page: 1000 },
+          params: { load_id: loadId, per_page: 500 },
+          timeout: 30000,
         }).catch(() => null),
       ]);
 
@@ -758,12 +802,10 @@ export default function LoadsPage() {
       const loadItems = Array.isArray(itemsRes.data) ? itemsRes.data : [];
       setSelectedLoadItems(loadItems);
 
-      const allInvoices = invoicesRes?.data?.data?.data || [];
-      const loadInvoices = allInvoices.filter((inv) => Number(inv.load_id) === Number(loadId));
+      const loadInvoices = invoicesRes?.data?.data?.data || [];
       setLoadInvoices(loadInvoices);
 
-      const allPayments = paymentsRes?.data?.data?.data || [];
-      const loadPayments = allPayments.filter((pay) => Number(pay.load_id) === Number(loadId));
+      const loadPayments = paymentsRes?.data?.data?.data || [];
       setLoadPayments(loadPayments);
 
       const soldProfit = computeSoldItemsProfit(loadItems, loadInvoices);
@@ -779,6 +821,37 @@ export default function LoadsPage() {
       setShowDetailsModal(false);
     } finally {
       setDetailsLoading(false);
+    }
+  };
+
+  const handleCompleteFromDetails = async () => {
+    if (!selectedLoadDetails) return;
+    setCompleteDecisionOpen(true);
+  };
+
+  const completeWithDecision = async (addBalanceToMainStock: boolean) => {
+    if (!selectedLoadDetails) return;
+
+    try {
+      setDetailsCompleting(true);
+      await handleCompleteLoad(selectedLoadDetails, addBalanceToMainStock);
+      setCompleteDecisionOpen(false);
+      setShowDetailsModal(false);
+      setSelectedLoadDetails(null);
+      setSelectedLoadItems([]);
+      setSoldItemProfitRows([]);
+      setLoadInvoices([]);
+      setLoadPayments([]);
+      setLoadExpenses([]);
+      setExpenseError('');
+      setExpenseSuccess('');
+    } catch (error: any) {
+      console.error('Error completing load:', error);
+      const apiMessage = error?.response?.data?.message || 'Failed to complete load';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      alert(firstError?.[0] || apiMessage);
+    } finally {
+      setDetailsCompleting(false);
     }
   };
 
@@ -958,7 +1031,12 @@ export default function LoadsPage() {
     URL.revokeObjectURL(url);
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (load: Load) => {
+    const status = load.status;
+    if (status === 'delivered' && load.has_vehicle_balance) {
+      return 'border border-orange-200 bg-orange-100 text-orange-700';
+    }
+
     switch (status) {
       case 'pending': return 'border border-amber-200 bg-amber-100 text-amber-700';
       case 'in_transit': return 'border border-blue-200 bg-blue-100 text-blue-700';
@@ -1128,8 +1206,10 @@ export default function LoadsPage() {
                     {load.route?.name || '-'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase ${getStatusColor(load.status)}`}>
-                      {load.status.replace('_', ' ')}
+                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase ${getStatusColor(load)}`}>
+                      {load.status === 'delivered' && load.has_vehicle_balance
+                        ? 'delivered (balance in vehicle)'
+                        : load.status.replace('_', ' ')}
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
@@ -1150,7 +1230,7 @@ export default function LoadsPage() {
                     </button>
                     {load.status !== 'delivered' && load.status !== 'cancelled' && (
                       <button
-                        onClick={() => setConfirmAction({ type: 'complete', load })}
+                        onClick={() => handleViewDetails(load.id, 'complete')}
                         className="text-emerald-600 hover:text-emerald-900 mr-4"
                       >
                         Complete
@@ -1271,6 +1351,7 @@ export default function LoadsPage() {
                     setLoadInvoices([]);
                     setLoadPayments([]);
                     setLoadExpenses([]);
+                    setCompleteDecisionOpen(false);
                     setExpenseError('');
                     setExpenseSuccess('');
                   }}
@@ -1650,6 +1731,60 @@ export default function LoadsPage() {
 
                   <div className={detailsTableWrapClass}>
                     <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Item Returns Details (By Load)</span>
+                    </div>
+                    <table className="min-w-full divide-y divide-gray-200 text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Item</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Return Qty</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Return Value</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {itemReturnRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={3} className="px-4 py-8 text-center text-sm text-gray-500">
+                              No item return records found for this load.
+                            </td>
+                          </tr>
+                        ) : (
+                          itemReturnRows.map((row) => (
+                            <tr key={`${row.item_code}-${row.item_name}`}>
+                              <td className="px-4 py-2 text-gray-700">
+                                <div className="flex flex-col">
+                                  <span>{row.item_name}</span>
+                                  <span className="text-[10px] text-gray-500">{row.item_code}</span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-right text-gray-700">
+                                {row.return_qty.toFixed(2)} {row.unit}
+                              </td>
+                              <td className="px-4 py-2 text-right font-semibold text-amber-700">
+                                {row.return_value.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      {itemReturnRows.length > 0 && (
+                        <tfoot className="bg-gray-50 border-t border-gray-200">
+                          <tr>
+                            <td className="px-4 py-2 font-semibold text-gray-800">Total</td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                              {itemReturnRows.reduce((sum, row) => sum + Number(row.return_qty || 0), 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-900">
+                              {itemReturnRows.reduce((sum, row) => sum + Number(row.return_value || 0), 0).toFixed(2)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+
+                  <div className={detailsTableWrapClass}>
+                    <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
                       <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Customer Base Summary (By Load)</span>
                     </div>
                     <table className="min-w-full divide-y divide-gray-200 text-xs">
@@ -1819,7 +1954,74 @@ export default function LoadsPage() {
                     </table>
                   </div>
 
+                  <div className={detailsTableWrapClass}>
+                    <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Load Balance (By Product)</span>
+                    </div>
+                    <table className="min-w-full divide-y divide-gray-200 text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Item</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Loaded Qty</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Sold Qty</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Balance Qty</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {loadBalanceRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">
+                              No load balance data found for this load.
+                            </td>
+                          </tr>
+                        ) : (
+                          loadBalanceRows.map((row) => (
+                            <tr key={row.item_code || row.item_name}>
+                              <td className="px-4 py-2 text-gray-700">
+                                <div className="flex flex-col">
+                                  <span>{row.item_name}</span>
+                                  <span className="text-[10px] text-gray-500">{row.item_code}</span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-right text-gray-700">{Number(row.loaded_qty).toFixed(2)}</td>
+                              <td className="px-4 py-2 text-right text-gray-700">{Number(row.sold_qty).toFixed(2)}</td>
+                              <td className={`px-4 py-2 text-right font-semibold ${row.balance_qty < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                                {Number(row.balance_qty).toFixed(2)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      {loadBalanceRows.length > 0 && (
+                        <tfoot className="bg-gray-50 border-t border-gray-200">
+                          <tr>
+                            <td className="px-4 py-2 font-semibold text-gray-800">Total</td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                              {loadBalanceRows.reduce((sum, row) => sum + Number(row.loaded_qty || 0), 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                              {loadBalanceRows.reduce((sum, row) => sum + Number(row.sold_qty || 0), 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-900">
+                              {loadBalanceRows.reduce((sum, row) => sum + Number(row.balance_qty || 0), 0).toFixed(2)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+
                   <div className="flex justify-end gap-3">
+                    {detailsMode === 'complete' && selectedLoadDetails.status !== 'delivered' && selectedLoadDetails.status !== 'cancelled' && (
+                      <button
+                        type="button"
+                        onClick={handleCompleteFromDetails}
+                        disabled={detailsCompleting}
+                        className="rounded-xl bg-gradient-to-r from-emerald-600 to-green-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-200/70 transition hover:from-emerald-700 hover:to-green-700 disabled:opacity-50"
+                      >
+                        {detailsCompleting ? 'Completing...' : 'Confirm Complete Load'}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={handlePrintDetails}
@@ -1847,12 +2049,10 @@ export default function LoadsPage() {
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50 flex items-center justify-center">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-11/12 p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-3">
-              {confirmAction.type === 'complete' ? 'Complete Load' : 'Delete Load'}
+              Delete Load
             </h3>
             <p className="text-sm text-gray-700 mb-4">
-              {confirmAction.type === 'complete'
-                ? `Mark load ${confirmAction.load.load_number} as delivered and end this route?`
-                : `Are you sure you want to delete load ${confirmAction.load.load_number}? This action cannot be undone.`}
+              {`Are you sure you want to delete load ${confirmAction.load.load_number}? This action cannot be undone.`}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -1873,28 +2073,62 @@ export default function LoadsPage() {
                   if (!confirmAction) return;
                   setConfirming(true);
                   try {
-                    if (confirmAction.type === 'delete') {
-                      await handleDelete(confirmAction.load.id);
-                    } else {
-                      await handleCompleteLoad(confirmAction.load);
-                    }
+                    await handleDelete(confirmAction.load.id);
                     setConfirmAction(null);
                   } finally {
                     setConfirming(false);
                   }
                 }}
-                className={`px-4 py-2 rounded-md text-sm font-medium text-white disabled:opacity-50 ${
-                  confirmAction.type === 'complete' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-red-600 hover:bg-red-700'
-                }`}
+                className="px-4 py-2 rounded-md text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
               >
-                {confirming ? 'Please wait...' : confirmAction.type === 'complete' ? 'Yes, Complete' : 'Yes, Delete'}
+                {confirming ? 'Please wait...' : 'Yes, Delete'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Modal */}
+      {completeDecisionOpen && selectedLoadDetails && (
+        <div className="fixed inset-0 z-[60] bg-slate-900/55 flex items-center justify-center px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/70 bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-slate-900">Complete Load Confirmation</h3>
+            <p className="mt-3 text-sm text-slate-700">
+              Whould you like add balance qty to main stock?
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              Load: {selectedLoadDetails.load_number}
+            </p>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => setCompleteDecisionOpen(false)}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => completeWithDecision(false)}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {detailsCompleting ? 'Please wait...' : 'No, Complete Without Stock Add'}
+              </button>
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => completeWithDecision(true)}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {detailsCompleting ? 'Please wait...' : 'Yes, Add to Main Stock & Complete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showModal && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
           <div className="mx-auto w-full max-w-5xl">

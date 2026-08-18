@@ -52,6 +52,10 @@ class DistributionInvoiceController extends Controller
             $query->where('status', $request->status);
         }
 
+        if ($request->filled('load_id')) {
+            $query->where('load_id', (int) $request->load_id);
+        }
+
         $invoices = $query->orderByDesc('invoice_date')->orderByDesc('id')->paginate($request->get('per_page', 15));
 
         return response()->json([

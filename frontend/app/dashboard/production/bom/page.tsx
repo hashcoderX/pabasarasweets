@@ -12,6 +12,8 @@ type Product = {
   unit: string;
   standard_batch_size: number;
   status: string;
+  can_delete?: boolean;
+  delete_block_reason?: string | null;
 };
 
 type InventoryItem = {
@@ -169,6 +171,9 @@ export default function BomPage() {
   const [calculation, setCalculation] = useState<CalculationResult | null>(null);
   const [startingProduction, setStartingProduction] = useState(false);
   const [activeStep, setActiveStep] = useState<StepKey>('step1');
+  const [deletingProductId, setDeletingProductId] = useState<number | null>(null);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [productPendingDelete, setProductPendingDelete] = useState<Product | null>(null);
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
@@ -333,6 +338,42 @@ export default function BomPage() {
       setErrorMessage(firstError?.[0] || apiMessage);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const openDeleteProductConfirm = (product: Product) => {
+    setProductPendingDelete(product);
+    setConfirmDeleteOpen(true);
+  };
+
+  const closeDeleteProductConfirm = () => {
+    setConfirmDeleteOpen(false);
+    setProductPendingDelete(null);
+  };
+
+  const handleDeleteProduct = async () => {
+    if (!token || !productPendingDelete) return;
+
+    try {
+      setDeletingProductId(productPendingDelete.id);
+      setErrorMessage('');
+      await axios.delete(`${API_URL}/api/production/products/${productPendingDelete.id}`, {
+        headers: authHeaders(token),
+      });
+
+      if (bomProductId === productPendingDelete.id) {
+        setBomProductId(0);
+      }
+
+      setMessage(`Base product ${productPendingDelete.code} - ${productPendingDelete.name} removed successfully.`);
+      closeDeleteProductConfirm();
+      await loadData(token);
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to remove base product.';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      setErrorMessage(firstError?.[0] || apiMessage);
+    } finally {
+      setDeletingProductId(null);
     }
   };
 
@@ -618,6 +659,67 @@ export default function BomPage() {
             >
               Add Product
             </button>
+
+            <div className="mt-6 rounded-2xl border border-orange-100 bg-orange-50/30 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-900">Existing Base Products</h3>
+                <span className="text-xs font-medium text-gray-500">{products.length} total</span>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-orange-100 bg-white">
+                <table className="min-w-full divide-y divide-orange-100">
+                  <thead className="bg-orange-50">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-orange-700">Code</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-orange-700">Name</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-orange-700">Unit</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-orange-700">Batch Size</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-orange-700">Delete Status</th>
+                      <th className="px-3 py-2 text-right text-xs font-medium uppercase tracking-wide text-orange-700">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-orange-50 bg-white">
+                    {products.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="px-3 py-4 text-center text-sm text-gray-500">No base products found.</td>
+                      </tr>
+                    ) : (
+                      products.map((product) => (
+                        <tr key={product.id}>
+                          <td className="px-3 py-2 text-sm font-medium text-gray-800">{product.code}</td>
+                          <td className="px-3 py-2 text-sm text-gray-800">{product.name}</td>
+                          <td className="px-3 py-2 text-sm text-gray-700">{product.unit}</td>
+                          <td className="px-3 py-2 text-right text-sm text-gray-700">{Number(product.standard_batch_size || 0).toFixed(3)}</td>
+                          <td className="px-3 py-2 text-sm text-gray-700">
+                            {product.can_delete === false ? (
+                              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700" title={product.delete_block_reason || ''}>
+                                Locked
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                Removable
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => openDeleteProductConfirm(product)}
+                              disabled={deletingProductId === product.id}
+                              title={product.can_delete === false ? (product.delete_block_reason || 'This product may be blocked by linked records.') : 'Remove this base product'}
+                              className="inline-flex items-center rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {deletingProductId === product.id ? 'Removing...' : 'Delete'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-2 text-[11px] text-gray-500">Products already linked with BOM, plans, or production orders cannot be removed.</p>
+            </div>
           </section>
 
           <section className={`rounded-3xl border border-orange-100 bg-white p-5 shadow-sm ${activeStep === 'step2' ? '' : 'hidden'}`}>
@@ -908,6 +1010,44 @@ export default function BomPage() {
           </section>
         </div>
       </main>
+
+      {confirmDeleteOpen && productPendingDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeDeleteProductConfirm} />
+          <div className="relative w-full max-w-md rounded-2xl border border-orange-100 bg-white p-6 shadow-2xl">
+            <div className="flex items-start justify-between mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Remove Base Product</h3>
+              <button
+                type="button"
+                onClick={closeDeleteProductConfirm}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-sm text-gray-700 mb-6">
+              Are you sure you want to remove <span className="font-semibold">{productPendingDelete.code} - {productPendingDelete.name}</span>?
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteProductConfirm}
+                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteProduct}
+                disabled={deletingProductId === productPendingDelete.id}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {deletingProductId === productPendingDelete.id ? 'Removing...' : 'Confirm Remove'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

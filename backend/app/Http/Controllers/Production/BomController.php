@@ -11,6 +11,7 @@ use App\Models\ProductionOrder;
 use App\Models\RawMaterial;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
@@ -18,9 +19,32 @@ use Illuminate\Validation\ValidationException;
 
 class BomController extends Controller
 {
+    private function resolveProductDeleteBlockReason(Product $product): ?string
+    {
+        $hasProductionOrders = ProductionOrder::where('product_id', $product->id)->exists();
+        if ($hasProductionOrders) {
+            return 'Production orders already exist for this product.';
+        }
+
+        return null;
+    }
+
     public function products(): JsonResponse
     {
-        $products = Product::orderBy('name')->get();
+        $products = Product::orderBy('name')->get()->map(function (Product $product) {
+            $blockReason = $this->resolveProductDeleteBlockReason($product);
+
+            return [
+                'id' => $product->id,
+                'name' => $product->name,
+                'code' => $product->code,
+                'unit' => $product->unit,
+                'standard_batch_size' => $product->standard_batch_size,
+                'status' => $product->status,
+                'can_delete' => $blockReason === null,
+                'delete_block_reason' => $blockReason,
+            ];
+        })->values();
 
         return response()->json([
             'success' => true,
@@ -62,6 +86,39 @@ class BomController extends Controller
             'data' => $product,
             'message' => 'Product created successfully',
         ], 201);
+    }
+
+    public function destroyProduct(Product $product): JsonResponse
+    {
+        $blockReason = $this->resolveProductDeleteBlockReason($product);
+        if ($blockReason !== null) {
+            return response()->json([
+                'success' => false,
+                'message' => "Cannot remove this base product because {$blockReason}",
+            ], 422);
+        }
+
+        try {
+            DB::transaction(function () use ($product) {
+                DB::table('production_plans')
+                    ->where('product_id', $product->id)
+                    ->delete();
+
+                BomHeader::where('product_id', $product->id)->delete();
+
+                $product->delete();
+            });
+        } catch (QueryException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cannot remove this base product because it is linked to other records.',
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Base product removed successfully.',
+        ]);
     }
 
     public function rawMaterials(): JsonResponse

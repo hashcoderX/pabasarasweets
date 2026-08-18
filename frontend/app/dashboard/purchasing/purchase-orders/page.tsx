@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import axios from '@/lib/http';
 import { useRouter } from 'next/navigation';
 
@@ -64,15 +64,61 @@ interface OrderItem {
   quantity: number;
 }
 
+interface RawMaterialFormData {
+  name: string;
+  code: string;
+  category: string;
+  unit: string;
+  description: string;
+  current_stock: number;
+  minimum_stock: number;
+  maximum_stock: number;
+  status: 'active' | 'inactive';
+  unit_price: number;
+  sell_price: string;
+  supplier_id: string;
+}
+
+interface AlertModalState {
+  open: boolean;
+  title: string;
+  message: string;
+  tone: 'info' | 'success' | 'error';
+}
+
+interface ConfirmModalState {
+  open: boolean;
+  title: string;
+  message: string;
+}
+
 export default function PurchaseOrdersPage() {
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [showRawMaterialModal, setShowRawMaterialModal] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<PurchaseOrder | null>(null);
   const [showOrderDetails, setShowOrderDetails] = useState(false);
   const [showPrintModal, setShowPrintModal] = useState(false);
+  const [savingRawMaterial, setSavingRawMaterial] = useState(false);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [rawMaterialSkuManuallyEdited, setRawMaterialSkuManuallyEdited] = useState(false);
+  const [customRawMaterialCategories, setCustomRawMaterialCategories] = useState<string[]>([]);
+  const [dbRawMaterialCategories, setDbRawMaterialCategories] = useState<string[]>([]);
+  const [alertModal, setAlertModal] = useState<AlertModalState>({
+    open: false,
+    title: '',
+    message: '',
+    tone: 'info',
+  });
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState>({
+    open: false,
+    title: '',
+    message: '',
+  });
+  const [confirmAction, setConfirmAction] = useState<(() => void) | null>(null);
   const router = useRouter();
   const [token, setToken] = useState('');
   const [formData, setFormData] = useState({
@@ -84,6 +130,51 @@ export default function PurchaseOrdersPage() {
   });
   const [activeSuggestionRow, setActiveSuggestionRow] = useState<number | null>(null);
   const [highlightedSuggestionIndex, setHighlightedSuggestionIndex] = useState<number>(-1);
+  const [rawMaterialFormData, setRawMaterialFormData] = useState<RawMaterialFormData>({
+    name: '',
+    code: '',
+    category: '',
+    unit: '',
+    description: '',
+    current_stock: 0,
+    minimum_stock: 0,
+    maximum_stock: 0,
+    status: 'active',
+    unit_price: 0,
+    sell_price: '',
+    supplier_id: '',
+  });
+
+  const suggestedRawMaterialCategories = useMemo(() => {
+    const existing = inventoryItems
+      .map((item) => String(item.category || '').trim())
+      .filter((category) => category.length > 0);
+
+    const merged = [...existing, ...dbRawMaterialCategories, ...customRawMaterialCategories];
+    return Array.from(new Set(merged.map((value) => value.toLowerCase())))
+      .map((lowerValue) => merged.find((value) => value.toLowerCase() === lowerValue) || lowerValue)
+      .sort((a, b) => a.localeCompare(b));
+  }, [inventoryItems, dbRawMaterialCategories, customRawMaterialCategories]);
+
+  const showAlertModal = (title: string, message: string, tone: 'info' | 'success' | 'error' = 'info') => {
+    setAlertModal({ open: true, title, message, tone });
+  };
+
+  const openConfirmModal = (title: string, message: string, action: () => void) => {
+    setConfirmAction(() => action);
+    setConfirmModal({ open: true, title, message });
+  };
+
+  const closeConfirmModal = () => {
+    setConfirmModal({ open: false, title: '', message: '' });
+    setConfirmAction(null);
+  };
+
+  const runConfirmAction = () => {
+    const action = confirmAction;
+    closeConfirmModal();
+    if (action) action();
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -99,6 +190,7 @@ export default function PurchaseOrdersPage() {
       fetchPurchaseOrders();
       fetchSuppliers();
       fetchInventoryItems();
+      fetchRawMaterialCategories();
     }
   }, [token]);
 
@@ -154,11 +246,31 @@ export default function PurchaseOrdersPage() {
     }
   };
 
+  const fetchRawMaterialCategories = async () => {
+    try {
+      const response = await axios.get('/api/stock/inventory-categories', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { type: 'raw_material', status: 'active' },
+      });
+
+      if (response.data?.success) {
+        const list = Array.isArray(response.data.data) ? response.data.data : [];
+        setDbRawMaterialCategories(
+          list
+            .map((category: { name?: string }) => String(category?.name || '').trim())
+            .filter((name: string) => name.length > 0)
+        );
+      }
+    } catch (error) {
+      console.error('Error fetching inventory categories:', error);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (formData.items.length === 0) {
-      alert('Please add at least one order item.');
+      showAlertModal('Validation', 'Please add at least one order item.', 'error');
       return;
     }
 
@@ -169,7 +281,7 @@ export default function PurchaseOrdersPage() {
     });
 
     if (invalidIndex >= 0) {
-      alert(`Item ${invalidIndex + 1}: select an available stock item or type a new item name.`);
+      showAlertModal('Validation', `Item ${invalidIndex + 1}: select an available stock item or type a new item name.`, 'error');
       return;
     }
 
@@ -200,7 +312,7 @@ export default function PurchaseOrdersPage() {
     } catch (error: any) {
       console.error('Error creating purchase order:', error);
       const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      alert(firstError?.[0] || error?.response?.data?.message || 'Failed to create purchase order.');
+      showAlertModal('Create Purchase Order Failed', firstError?.[0] || error?.response?.data?.message || 'Failed to create purchase order.', 'error');
     }
   };
 
@@ -318,6 +430,198 @@ export default function PurchaseOrdersPage() {
     window.print();
   };
 
+  const resetRawMaterialForm = () => {
+    setRawMaterialSkuManuallyEdited(false);
+    setRawMaterialFormData({
+      name: '',
+      code: '',
+      category: '',
+      unit: '',
+      description: '',
+      current_stock: 0,
+      minimum_stock: 0,
+      maximum_stock: 0,
+      status: 'active',
+      unit_price: 0,
+      sell_price: '',
+      supplier_id: '',
+    });
+  };
+
+  const generateRawMaterialSkuCode = (name: string) => {
+    const prefix = 'RM';
+    const cleanedName = String(name || '').toUpperCase().replace(/[^A-Z0-9 ]+/g, ' ').trim();
+    const words = cleanedName.split(/\s+/).filter(Boolean);
+    const core = cleanedName
+      ? words.length > 1
+        ? words.slice(0, 3).map((word) => word.slice(0, 2)).join('')
+        : cleanedName.replace(/\s+/g, '').slice(0, 6)
+      : 'ITEM';
+
+    const normalizedCore = core.replace(/[^A-Z0-9]/g, '') || 'ITEM';
+    const escapedCore = normalizedCore.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${prefix}-${escapedCore}-(\\d{3})$`);
+
+    const nextSerial = inventoryItems
+      .map((item) => {
+        const match = String(item.code || '').toUpperCase().match(pattern);
+        return match ? Number(match[1]) : 0;
+      })
+      .reduce((max, current) => Math.max(max, current), 0) + 1;
+
+    return `${prefix}-${normalizedCore}-${String(nextSerial).padStart(3, '0')}`;
+  };
+
+  useEffect(() => {
+    if (!showRawMaterialModal || rawMaterialSkuManuallyEdited) return;
+
+    const autoCode = generateRawMaterialSkuCode(rawMaterialFormData.name);
+    setRawMaterialFormData((prev) => {
+      if (prev.code === autoCode) return prev;
+      return { ...prev, code: autoCode };
+    });
+  }, [rawMaterialFormData.name, showRawMaterialModal, rawMaterialSkuManuallyEdited, inventoryItems]);
+
+  const submitRawMaterial = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (!rawMaterialFormData.name.trim() || !rawMaterialFormData.code.trim()) {
+      showAlertModal('Validation', 'Item name and item code are required.', 'error');
+      return;
+    }
+
+    try {
+      setSavingRawMaterial(true);
+      const payload = {
+        name: rawMaterialFormData.name.trim(),
+        code: rawMaterialFormData.code.trim().toUpperCase(),
+        description: rawMaterialFormData.description.trim() || null,
+        type: 'raw_material',
+        category: rawMaterialFormData.category.trim(),
+        unit: rawMaterialFormData.unit,
+        current_stock: Number(rawMaterialFormData.current_stock) || 0,
+        minimum_stock: Number(rawMaterialFormData.minimum_stock) || 0,
+        maximum_stock: Number(rawMaterialFormData.maximum_stock) || 0,
+        unit_price: Number(rawMaterialFormData.unit_price) || 0,
+        sell_price: rawMaterialFormData.sell_price.trim() === '' ? null : Number(rawMaterialFormData.sell_price),
+        supplier_id: rawMaterialFormData.supplier_id ? Number(rawMaterialFormData.supplier_id) : null,
+        supplier_name: suppliers.find((supplier) => String(supplier.id) === rawMaterialFormData.supplier_id)?.name || '',
+        location: '',
+        expiry_date: null,
+        status: rawMaterialFormData.status,
+      };
+
+      const response = await axios.post('/api/stock/inventory', payload, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || 'Failed to create raw material item.');
+      }
+
+      await fetchInventoryItems();
+      setShowRawMaterialModal(false);
+      resetRawMaterialForm();
+      showAlertModal('Raw Material Added', 'Raw material registered successfully. You can now select it in Order Items.', 'success');
+    } catch (error: any) {
+      console.error('Error creating raw material item:', error);
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      showAlertModal('Create Raw Material Failed', firstError?.[0] || error?.response?.data?.message || error?.message || 'Failed to create raw material item.', 'error');
+    } finally {
+      setSavingRawMaterial(false);
+    }
+  };
+
+  const addCategorySuggestion = async () => {
+    const normalized = rawMaterialFormData.category.trim().replace(/\s+/g, ' ');
+
+    if (!normalized) {
+      showAlertModal('Validation', 'Type a category name first.', 'error');
+      return;
+    }
+
+    try {
+      setSavingCategory(true);
+      const response = await axios.post('/api/stock/inventory-categories', {
+        name: normalized,
+        type: 'raw_material',
+        status: 'active',
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!response.data?.success) {
+        throw new Error(response.data?.message || 'Failed to save category.');
+      }
+
+      const savedName = String(response.data?.data?.name || normalized).trim();
+
+      setRawMaterialFormData((prev) => ({ ...prev, category: savedName }));
+      setDbRawMaterialCategories((prev) => {
+        if (prev.some((item) => item.toLowerCase() === savedName.toLowerCase())) {
+          return prev;
+        }
+        return [...prev, savedName];
+      });
+      setCustomRawMaterialCategories((prev) => prev.filter((item) => item.toLowerCase() !== savedName.toLowerCase()));
+      showAlertModal('Category Saved', 'Category saved to database successfully.', 'success');
+    } catch (error: any) {
+      console.error('Error saving category:', error);
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      showAlertModal('Save Category Failed', firstError?.[0] || error?.response?.data?.message || error?.message || 'Failed to save category.', 'error');
+    } finally {
+      setSavingCategory(false);
+    }
+  };
+
+  const isPurchaseOrderFormDirty =
+    formData.supplier_id !== '' ||
+    formData.expected_delivery_date !== '' ||
+    formData.notes.trim() !== '' ||
+    formData.items.length > 0;
+
+  const isRawMaterialFormDirty =
+    rawMaterialFormData.name.trim() !== '' ||
+    rawMaterialFormData.code.trim() !== '' ||
+    rawMaterialFormData.category.trim() !== '' ||
+    rawMaterialFormData.unit !== '' ||
+    rawMaterialFormData.description.trim() !== '' ||
+    Number(rawMaterialFormData.current_stock) > 0 ||
+    Number(rawMaterialFormData.minimum_stock) > 0 ||
+    Number(rawMaterialFormData.maximum_stock) > 0 ||
+    Number(rawMaterialFormData.unit_price) > 0 ||
+    rawMaterialFormData.sell_price.trim() !== '' ||
+    rawMaterialFormData.supplier_id !== '';
+
+  const requestClosePurchaseOrderForm = () => {
+    if (!isPurchaseOrderFormDirty) {
+      setShowForm(false);
+      return;
+    }
+
+    openConfirmModal(
+      'Discard Purchase Order Draft?',
+      'You have unsaved purchase order details. Do you want to close this form without saving?',
+      () => setShowForm(false)
+    );
+  };
+
+  const requestCloseRawMaterialForm = () => {
+    if (!isRawMaterialFormDirty) {
+      setShowRawMaterialModal(false);
+      return;
+    }
+
+    openConfirmModal(
+      'Discard Raw Material Draft?',
+      'You have unsaved raw material details. Do you want to close this form without saving?',
+      () => {
+        setShowRawMaterialModal(false);
+        resetRawMaterialForm();
+      }
+    );
+  };
+
   if (loading) {
     return <div className="text-center py-8">Loading...</div>;
   }
@@ -403,7 +707,7 @@ export default function PurchaseOrdersPage() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setShowForm(false)}
+                  onClick={requestClosePurchaseOrderForm}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/25 bg-white/10 text-white transition hover:bg-white/20"
                 >
                   <span className="text-2xl">&times;</span>
@@ -468,13 +772,25 @@ export default function PurchaseOrdersPage() {
                       <h4 className="text-md font-semibold text-gray-900">Order Items</h4>
                       <p className="text-xs text-gray-500">Build line items using inventory suggestions or manual entries.</p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={addItem}
-                      className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-lg text-blue-700 bg-blue-100 hover:bg-blue-200"
-                    >
-                      Add Item
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetRawMaterialForm();
+                          setShowRawMaterialModal(true);
+                        }}
+                        className="inline-flex items-center px-3 py-1.5 border border-amber-200 text-sm font-medium rounded-lg text-amber-700 bg-amber-50 hover:bg-amber-100"
+                      >
+                        New Product
+                      </button>
+                      <button
+                        type="button"
+                        onClick={addItem}
+                        className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-lg text-blue-700 bg-blue-100 hover:bg-blue-200"
+                      >
+                        Add Item
+                      </button>
+                    </div>
                   </div>
                   <div className="space-y-4">
                     {formData.items.map((item, index) => (
@@ -658,7 +974,7 @@ export default function PurchaseOrdersPage() {
                 <div className="sticky bottom-0 -mx-6 flex justify-end space-x-3 border-t border-blue-100 bg-white/95 px-6 py-4 sm:-mx-8 sm:px-8">
                   <button
                     type="button"
-                    onClick={() => setShowForm(false)}
+                    onClick={requestClosePurchaseOrderForm}
                     className="px-5 py-2.5 border border-blue-200 rounded-xl text-sm font-semibold text-gray-700 hover:bg-blue-50"
                   >
                     Cancel
@@ -668,6 +984,248 @@ export default function PurchaseOrdersPage() {
                     className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-cyan-600 border border-transparent rounded-xl text-sm font-semibold text-white hover:from-blue-700 hover:to-cyan-700"
                   >
                     Create Order
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRawMaterialModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-md">
+          <div className="relative w-full max-w-5xl overflow-hidden rounded-[30px] border border-white/20 bg-white shadow-[0_34px_120px_-40px_rgba(234,88,12,0.55)]">
+            <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.36),_transparent_45%),linear-gradient(125deg,_rgba(194,65,12,0.95)_0%,_rgba(234,88,12,0.94)_45%,_rgba(249,115,22,0.9)_100%)]"></div>
+            <div className="relative max-h-[90vh] overflow-y-auto">
+              <div className="flex items-start justify-between gap-4 px-6 pb-6 pt-7 text-white sm:px-8">
+                <div>
+                  <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-white/25 bg-white/15 text-2xl">📦</div>
+                  <h3 className="text-2xl font-semibold tracking-tight sm:text-3xl">Add Item to Raw Material Store</h3>
+                  <p className="mt-2 max-w-2xl text-sm text-white/85 sm:text-base">
+                    Capture stock identity, controls, and pricing in one polished workspace built for daily inventory operations.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={requestCloseRawMaterialForm}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/25 bg-white/10 text-white transition hover:bg-white/20"
+                >
+                  <span className="text-2xl">&times;</span>
+                </button>
+              </div>
+
+              <form onSubmit={submitRawMaterial} className="px-6 pb-6 sm:px-8 sm:pb-8">
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+                  <section className="rounded-3xl border border-orange-100 bg-white p-5 shadow-sm">
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-orange-500">Item Identity</p>
+                    <h4 className="mt-2 text-lg font-semibold text-gray-900">Core information</h4>
+                    <p className="mt-1 text-sm text-gray-500">Define item identity and classification for better store-level visibility.</p>
+
+                    <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div>
+                        <label className={modalLabelClass}>Item Name *</label>
+                        <input
+                          type="text"
+                          required
+                          value={rawMaterialFormData.name}
+                          onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, name: e.target.value }))}
+                          className={modalInputClass}
+                          placeholder="Enter item name"
+                        />
+                      </div>
+
+                      <div>
+                        <label className={modalLabelClass}>Item Code/SKU *</label>
+                        <input
+                          type="text"
+                          required
+                          value={rawMaterialFormData.code}
+                          onChange={(e) => {
+                            setRawMaterialSkuManuallyEdited(true);
+                            setRawMaterialFormData((prev) => ({ ...prev, code: e.target.value.toUpperCase() }));
+                          }}
+                          className={modalInputClass}
+                          placeholder="Enter unique code"
+                        />
+                      </div>
+
+                      <div>
+                        <label className={modalLabelClass}>Category</label>
+                        <input
+                          type="text"
+                          value={rawMaterialFormData.category}
+                          onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, category: e.target.value }))}
+                          className={modalInputClass}
+                          placeholder="Enter category"
+                          list="raw-material-category-suggestions"
+                        />
+                        <datalist id="raw-material-category-suggestions">
+                          {suggestedRawMaterialCategories.map((category) => (
+                            <option key={category} value={category} />
+                          ))}
+                        </datalist>
+                        <button
+                          type="button"
+                          onClick={addCategorySuggestion}
+                          disabled={savingCategory}
+                          className="mt-2 inline-flex items-center rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-semibold text-orange-700 transition hover:bg-orange-100"
+                        >
+                          {savingCategory ? 'Saving...' : 'Add Category'}
+                        </button>
+                      </div>
+
+                      <div>
+                        <label className={modalLabelClass}>Unit *</label>
+                        <select
+                          required
+                          value={rawMaterialFormData.unit}
+                          onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, unit: e.target.value }))}
+                          className={modalSelectClass}
+                        >
+                          <option value="">Select unit</option>
+                          <option value="pieces">Pieces</option>
+                          <option value="kg">Kilograms (kg)</option>
+                          <option value="g">Grams (g)</option>
+                          <option value="liters">Liters</option>
+                          <option value="ml">Milliliters (ml)</option>
+                          <option value="bags">Bags</option>
+                          <option value="boxes">Boxes</option>
+                          <option value="meters">Meters</option>
+                          <option value="feet">Feet</option>
+                        </select>
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <label className={modalLabelClass}>Description</label>
+                        <textarea
+                          rows={4}
+                          value={rawMaterialFormData.description}
+                          onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, description: e.target.value }))}
+                          className={`${modalInputClass} min-h-[110px]`}
+                          placeholder="Enter item description"
+                        />
+                      </div>
+                    </div>
+                  </section>
+
+                  <div className="space-y-6">
+                    <section className="rounded-3xl border border-orange-100 bg-white p-5 shadow-sm">
+                      <p className="text-xs font-semibold uppercase tracking-[0.24em] text-orange-500">Stock Controls</p>
+                      <h4 className="mt-2 text-lg font-semibold text-gray-900">Quantities and status</h4>
+                      <div className="mt-5 grid grid-cols-1 gap-4">
+                        <div>
+                          <label className={modalLabelClass}>Current Stock *</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            required
+                            value={rawMaterialFormData.current_stock}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, current_stock: Number(e.target.value) || 0 }))}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Minimum Stock *</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            required
+                            value={rawMaterialFormData.minimum_stock}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, minimum_stock: Number(e.target.value) || 0 }))}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Maximum Stock</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={rawMaterialFormData.maximum_stock}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, maximum_stock: Number(e.target.value) || 0 }))}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Status</label>
+                          <select
+                            value={rawMaterialFormData.status}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, status: e.target.value as 'active' | 'inactive' }))}
+                            className={modalSelectClass}
+                          >
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                          </select>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section className="rounded-3xl border border-orange-200 bg-gradient-to-br from-orange-50 via-amber-50 to-white p-5 shadow-sm">
+                      <p className="text-xs font-semibold uppercase tracking-[0.24em] text-orange-500">Commercial Details</p>
+                      <h4 className="mt-2 text-lg font-semibold text-gray-900">Pricing and supply</h4>
+                      <div className="mt-5 grid grid-cols-1 gap-4">
+                        <div>
+                          <label className={modalLabelClass}>Unit Price (LKR) *</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            required
+                            value={rawMaterialFormData.unit_price}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, unit_price: Number(e.target.value) || 0 }))}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Sell Price (LKR)</label>
+                          <input
+                            type="text"
+                            value={rawMaterialFormData.sell_price}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, sell_price: e.target.value }))}
+                            className={modalInputClass}
+                            placeholder="0.00"
+                          />
+                        </div>
+                        <div>
+                          <label className={modalLabelClass}>Supplier</label>
+                          <select
+                            value={rawMaterialFormData.supplier_id}
+                            onChange={(e) => setRawMaterialFormData((prev) => ({ ...prev, supplier_id: e.target.value }))}
+                            className={modalSelectClass}
+                          >
+                            <option value="">Select supplier</option>
+                            {suppliers.map((supplier) => (
+                              <option key={supplier.id} value={supplier.id}>
+                                {supplier.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+
+                <div className="sticky bottom-0 -mx-6 mt-6 flex justify-end gap-3 border-t border-orange-100 bg-white/95 px-6 py-4 sm:-mx-8 sm:px-8">
+                  <button
+                    type="button"
+                    onClick={requestCloseRawMaterialForm}
+                    className="rounded-xl border border-orange-200 bg-orange-50 px-5 py-2.5 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingRawMaterial}
+                    className="rounded-xl bg-gradient-to-r from-orange-600 to-amber-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:from-orange-700 hover:to-amber-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {savingRawMaterial ? 'Saving...' : 'Save Raw Material'}
                   </button>
                 </div>
               </form>
@@ -956,6 +1514,53 @@ export default function PurchaseOrdersPage() {
                 className="px-4 py-2 bg-blue-600 border border-transparent rounded-md text-sm font-medium text-white hover:bg-blue-700"
               >
                 Print
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmModal.open && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-6 shadow-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-600">Confirmation</p>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">{confirmModal.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-slate-600">{confirmModal.message}</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeConfirmModal}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={runConfirmAction}
+                className="rounded-xl bg-gradient-to-r from-amber-600 to-orange-500 px-4 py-2 text-sm font-semibold text-white hover:from-amber-700 hover:to-orange-600"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {alertModal.open && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
+              {alertModal.tone === 'success' ? 'Success' : alertModal.tone === 'error' ? 'Error' : 'Notice'}
+            </p>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">{alertModal.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-slate-600">{alertModal.message}</p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setAlertModal({ open: false, title: '', message: '', tone: 'info' })}
+                className="rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:from-blue-700 hover:to-cyan-700"
+              >
+                OK
               </button>
             </div>
           </div>

@@ -53,6 +53,10 @@ class DistributionPaymentController extends Controller
             $query->where('customer_id', $request->customer_id);
         }
 
+        if ($request->filled('load_id')) {
+            $query->where('load_id', (int) $request->load_id);
+        }
+
         $payments = $query->orderByDesc('payment_date')->orderByDesc('id')->paginate($request->get('per_page', 15));
 
         return response()->json([

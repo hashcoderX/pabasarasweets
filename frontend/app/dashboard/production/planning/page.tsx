@@ -211,10 +211,20 @@ export default function ProductionPlanningPage() {
     });
   }, [plans, planProductId]);
 
+  const sortedPlans = useMemo(() => {
+    return [...plans].sort((a, b) => {
+      const aDate = new Date(String(a.plan_date)).getTime();
+      const bDate = new Date(String(b.plan_date)).getTime();
+
+      if (aDate !== bDate) return bDate - aDate;
+      return Number(b.id) - Number(a.id);
+    });
+  }, [plans]);
+
   const todayPlans = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
-    return plans.filter((plan) => String(plan.plan_date).slice(0, 10) === today);
-  }, [plans]);
+    return sortedPlans.filter((plan) => String(plan.plan_date).slice(0, 10) === today);
+  }, [sortedPlans]);
 
   useEffect(() => {
     if (!latestPlanForSelectedProduct) return;
@@ -710,10 +720,10 @@ export default function ProductionPlanningPage() {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
-                {plans.length === 0 ? (
+                {sortedPlans.length === 0 ? (
                   <tr><td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">No production plans found.</td></tr>
                 ) : (
-                  plans.map((plan) => (
+                  sortedPlans.map((plan) => (
                     <tr key={plan.id} className="hover:bg-emerald-50/40 transition-colors">
                       <td className="px-4 py-2.5 text-sm text-gray-700">{String(plan.plan_date).slice(0, 10)}</td>
                       <td className="px-4 py-2.5 text-sm text-gray-800 font-medium">{plan.product?.code || '-'} - {plan.product?.name || '-'}</td>
