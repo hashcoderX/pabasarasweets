@@ -20,6 +20,8 @@ class GoodsReceivedNote extends Model
         'payment_status',
         'payment_timing',
         'payment_type',
+        'payment_company_id',
+        'payment_breakdown',
         'payment_reference',
         'paid_amount',
         'paid_at',
@@ -33,6 +35,7 @@ class GoodsReceivedNote extends Model
         'discount_amount' => 'decimal:2',
         'net_amount' => 'decimal:2',
         'paid_amount' => 'decimal:2',
+        'payment_breakdown' => 'array',
     ];
 
     public function purchaseOrder(): BelongsTo
@@ -43,6 +46,11 @@ class GoodsReceivedNote extends Model
     public function grnItems(): HasMany
     {
         return $this->hasMany(GrnItem::class, 'grn_id');
+    }
+
+    public function paymentCompany(): BelongsTo
+    {
+        return $this->belongsTo(Company::class, 'payment_company_id');
     }
 
     protected static function boot()

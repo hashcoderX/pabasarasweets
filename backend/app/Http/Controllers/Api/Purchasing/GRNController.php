@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\Purchasing;
 
 use App\Http\Controllers\Controller;
+use App\Models\Company;
 use App\Models\GoodsReceivedNote;
 use App\Models\CompanyBankAccount;
 use App\Models\MainCashTransaction;
@@ -37,9 +38,16 @@ class GRNController extends Controller
             'notes' => 'nullable|string',
             'discount_amount' => 'nullable|numeric|min:0',
             'payment_timing' => 'required|in:post_payment,on_time',
-            'payment_type' => 'nullable|required_if:payment_timing,on_time|string|max:120',
-            'payment_reference' => 'nullable|required_if:payment_timing,on_time|string|max:255',
-            'paid_amount' => 'nullable|required_if:payment_timing,on_time|numeric|min:0',
+            'payment_type' => 'nullable|string|max:120',
+            'payment_company_id' => 'nullable|integer|exists:companies,id',
+            'payment_reference' => 'nullable|string|max:255',
+            'paid_amount' => 'nullable|numeric|min:0',
+            'payment_breakdown' => 'nullable|array',
+            'payment_breakdown.*.payment_type' => 'required_with:payment_breakdown|in:cash,bank_transfer,bank_deposit,cheque,party_cheque,card',
+            'payment_breakdown.*.amount' => 'required_with:payment_breakdown|numeric|min:0.01',
+            'payment_breakdown.*.company_id' => 'nullable|integer|exists:companies,id',
+            'payment_breakdown.*.bank_account_id' => 'nullable|integer|exists:company_bank_accounts,id',
+            'payment_breakdown.*.reference' => 'nullable|string|max:255',
             'items' => 'required|array',
             'items.*.purchase_order_item_id' => 'required|exists:purchase_order_items,id',
             'items.*.received_quantity' => 'required|numeric|min:0',
@@ -67,7 +75,25 @@ class GRNController extends Controller
         }
 
         $amounts = $this->calculateFinancials($validated['items'], $purchaseOrder, (float) ($validated['discount_amount'] ?? 0));
-        if (($validated['payment_timing'] ?? 'post_payment') === 'on_time' && (float) ($validated['paid_amount'] ?? 0) <= 0) {
+        $paymentTiming = (string) ($validated['payment_timing'] ?? 'post_payment');
+        $paymentBreakdown = [];
+        if ($paymentTiming === 'on_time') {
+            $paymentBreakdown = collect($validated['payment_breakdown'] ?? [])->map(function ($line) {
+                return [
+                    'payment_type' => (string) ($line['payment_type'] ?? ''),
+                    'amount' => round((float) ($line['amount'] ?? 0), 2),
+                    'company_id' => isset($line['company_id']) && $line['company_id'] !== null ? (int) $line['company_id'] : null,
+                    'bank_account_id' => isset($line['bank_account_id']) && $line['bank_account_id'] !== null ? (int) $line['bank_account_id'] : null,
+                    'reference' => isset($line['reference']) ? trim((string) $line['reference']) : null,
+                ];
+            })->filter(fn ($line) => (float) ($line['amount'] ?? 0) > 0)->values()->all();
+        }
+
+        $inputPaidAmount = !empty($paymentBreakdown)
+            ? (float) collect($paymentBreakdown)->sum('amount')
+            : (float) ($validated['paid_amount'] ?? 0);
+
+        if ($paymentTiming === 'on_time' && $inputPaidAmount <= 0) {
             return response()->json([
                 'message' => 'Validation failed',
                 'errors' => [
@@ -76,18 +102,65 @@ class GRNController extends Controller
             ], 422);
         }
 
-        $inputPaidAmount = (float) ($validated['paid_amount'] ?? 0);
+        if ($paymentTiming === 'on_time' && empty($paymentBreakdown)) {
+            if (empty($validated['payment_type'])) {
+                return response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_type' => ['Payment type is required for on-time payment.'],
+                    ],
+                ], 422);
+            }
+
+            if (empty(trim((string) ($validated['payment_reference'] ?? '')))) {
+                return response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_reference' => ['Payment reference is required for on-time payment.'],
+                    ],
+                ], 422);
+            }
+
+            if ((int) ($validated['payment_company_id'] ?? 0) <= 0) {
+                return response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_company_id' => ['Select a company account for on-time payment.'],
+                    ],
+                ], 422);
+            }
+        }
+
         $normalizedPaidAmount = min(max($inputPaidAmount, 0), $amounts['net_amount']);
         $paymentStatus = $amounts['net_amount'] <= 0
             ? 'paid'
             : ($normalizedPaidAmount <= 0
                 ? 'unpaid'
                 : ($normalizedPaidAmount >= $amounts['net_amount'] ? 'paid' : 'partial'));
-        $paymentTiming = (string) ($validated['payment_timing'] ?? 'post_payment');
-        $paymentType = $paymentTiming === 'on_time' ? ($validated['payment_type'] ?? null) : null;
-        $paymentReference = $paymentTiming === 'on_time' ? ($validated['payment_reference'] ?? null) : null;
+        $singlePaymentType = $paymentTiming === 'on_time' ? ($validated['payment_type'] ?? null) : null;
+        $singlePaymentCompanyId = $paymentTiming === 'on_time' ? (int) ($validated['payment_company_id'] ?? 0) : null;
+        $singlePaymentReference = $paymentTiming === 'on_time' ? ($validated['payment_reference'] ?? null) : null;
+        $paymentType = null;
+        $paymentCompanyId = null;
+        $paymentReference = null;
+        if ($paymentTiming === 'on_time') {
+            if (!empty($paymentBreakdown)) {
+                if (count($paymentBreakdown) === 1) {
+                    $paymentType = $paymentBreakdown[0]['payment_type'];
+                    $paymentCompanyId = $paymentBreakdown[0]['company_id'];
+                    $paymentReference = $paymentBreakdown[0]['reference'];
+                } else {
+                    $paymentType = 'mixed';
+                    $paymentReference = 'Multiple payment methods';
+                }
+            } else {
+                $paymentType = $singlePaymentType;
+                $paymentCompanyId = $singlePaymentCompanyId > 0 ? $singlePaymentCompanyId : null;
+                $paymentReference = $singlePaymentReference;
+            }
+        }
 
-        $grn = DB::transaction(function () use ($validated, $amounts, $normalizedPaidAmount, $paymentStatus, $paymentTiming, $paymentType, $paymentReference) {
+        $grn = DB::transaction(function () use ($validated, $amounts, $normalizedPaidAmount, $paymentStatus, $paymentTiming, $paymentType, $paymentCompanyId, $paymentReference, $paymentBreakdown, $request) {
             $grn = GoodsReceivedNote::create([
                 'purchase_order_id' => $validated['purchase_order_id'],
                 'received_date' => $validated['received_date'],
@@ -99,6 +172,8 @@ class GRNController extends Controller
                 'payment_status' => $paymentStatus,
                 'payment_timing' => $paymentTiming,
                 'payment_type' => $paymentType,
+                'payment_company_id' => $paymentCompanyId,
+                'payment_breakdown' => $paymentTiming === 'on_time' ? $paymentBreakdown : null,
                 'payment_reference' => $paymentReference,
                 'paid_amount' => $normalizedPaidAmount,
                 'paid_at' => $normalizedPaidAmount > 0 ? now() : null,
@@ -141,6 +216,123 @@ class GRNController extends Controller
                 }
             }
 
+            if ($paymentTiming === 'on_time' && $normalizedPaidAmount > 0) {
+                if (!empty($paymentBreakdown)) {
+                    foreach ($paymentBreakdown as $line) {
+                        $lineType = (string) ($line['payment_type'] ?? '');
+                        $lineAmount = (float) ($line['amount'] ?? 0);
+                        $lineReference = isset($line['reference']) ? (string) $line['reference'] : '';
+                        if ($lineAmount <= 0) {
+                            continue;
+                        }
+
+                        if (in_array($lineType, ['bank_transfer', 'bank_deposit'], true)) {
+                            $bankAccountId = (int) ($line['bank_account_id'] ?? 0);
+                            $selectedBankAccount = CompanyBankAccount::query()->lockForUpdate()->find($bankAccountId);
+                            if (!$selectedBankAccount) {
+                                throw new \Illuminate\Validation\ValidationException(
+                                    validator([], []),
+                                    response()->json([
+                                        'message' => 'Validation failed',
+                                        'errors' => [
+                                            'payment_breakdown' => ['Invalid bank account in payment breakdown.'],
+                                        ],
+                                    ], 422)
+                                );
+                            }
+
+                            $available = (float) ($selectedBankAccount->current_balance ?? 0);
+                            if ($available < $lineAmount) {
+                                throw new \Illuminate\Validation\ValidationException(
+                                    validator([], []),
+                                    response()->json([
+                                        'message' => 'Validation failed',
+                                        'errors' => [
+                                            'payment_breakdown' => ['Insufficient bank account balance in payment breakdown.'],
+                                        ],
+                                    ], 422)
+                                );
+                            }
+
+                            $selectedBankAccount->current_balance = round(max($available - $lineAmount, 0), 2);
+                            $selectedBankAccount->save();
+
+                            if ($selectedBankAccount->company) {
+                                $newCompanyBankBalance = round(
+                                    (float) $selectedBankAccount->company->bankAccounts()->sum('current_balance'),
+                                    2
+                                );
+                                $selectedBankAccount->company->update([
+                                    'current_bank_balance' => $newCompanyBankBalance,
+                                ]);
+                            }
+
+                            MainCashTransaction::create([
+                                'date' => now(),
+                                'type' => 'out',
+                                'amount' => $lineAmount,
+                                'reference' => $lineReference !== '' ? $lineReference : $grn->grn_number,
+                                'note' => 'On-time GRN Payment ' . $grn->grn_number
+                                    . ' via ' . str_replace('_', ' ', $lineType)
+                                    . ' | Bank: ' . ($selectedBankAccount->bank_name ?? '-')
+                                    . ' | Account: ' . ($selectedBankAccount->account_no ?? '-'),
+                                'created_by' => $request->user()?->id,
+                            ]);
+                        } else {
+                            $lineCompanyId = (int) ($line['company_id'] ?? 0);
+                            if ($lineCompanyId <= 0) {
+                                throw new \Illuminate\Validation\ValidationException(
+                                    validator([], []),
+                                    response()->json([
+                                        'message' => 'Validation failed',
+                                        'errors' => [
+                                            'payment_breakdown' => ['Select company account for each non-bank payment line.'],
+                                        ],
+                                    ], 422)
+                                );
+                            }
+
+                            $company = $this->deductFromCompanyBalance($lineCompanyId, $lineType, $lineAmount);
+                            MainCashTransaction::create([
+                                'date' => now(),
+                                'type' => 'out',
+                                'amount' => $lineAmount,
+                                'reference' => $lineReference !== '' ? $lineReference : $grn->grn_number,
+                                'note' => 'On-time GRN Payment ' . $grn->grn_number
+                                    . ' via ' . str_replace('_', ' ', $lineType)
+                                    . ' | Company: ' . ($company->name ?? '-'),
+                                'created_by' => $request->user()?->id,
+                            ]);
+                        }
+                    }
+                } else {
+                    if ($paymentCompanyId === null || $paymentCompanyId <= 0) {
+                        throw new \Illuminate\Validation\ValidationException(
+                            validator([], []),
+                            response()->json([
+                                'message' => 'Validation failed',
+                                'errors' => [
+                                    'payment_company_id' => ['Select a company account for on-time GRN payment.'],
+                                ],
+                            ], 422)
+                        );
+                    }
+
+                    $company = $this->deductFromCompanyBalance($paymentCompanyId, (string) $paymentType, (float) $normalizedPaidAmount);
+
+                    MainCashTransaction::create([
+                        'date' => now(),
+                        'type' => 'out',
+                        'amount' => $normalizedPaidAmount,
+                        'reference' => $paymentReference ?: $grn->grn_number,
+                        'note' => 'On-time GRN Payment ' . $grn->grn_number
+                            . ' via ' . str_replace('_', ' ', (string) $paymentType)
+                            . ' | Company: ' . ($company->name ?? '-'),
+                        'created_by' => $request->user()?->id,
+                    ]);
+                }
+            }
+
             $pendingAmount = $this->calculatePendingAmount((float) $amounts['net_amount'], (float) $normalizedPaidAmount);
             $this->syncSupplierOutstandingByPurchaseOrder((int) $validated['purchase_order_id'], 0, $pendingAmount);
             $this->syncPurchaseOrderStatusAndTotals((int) $validated['purchase_order_id']);
@@ -171,8 +363,15 @@ class GRNController extends Controller
             'discount_amount' => 'nullable|numeric|min:0',
             'payment_timing' => 'sometimes|required|in:post_payment,on_time',
             'payment_type' => 'nullable|required_if:payment_timing,on_time|string|max:120',
+            'payment_company_id' => 'nullable|integer|exists:companies,id',
             'payment_reference' => 'nullable|required_if:payment_timing,on_time|string|max:255',
             'paid_amount' => 'nullable|required_if:payment_timing,on_time|numeric|min:0',
+            'payment_breakdown' => 'nullable|array',
+            'payment_breakdown.*.payment_type' => 'required_with:payment_breakdown|in:cash,bank_transfer,bank_deposit,cheque,party_cheque,card',
+            'payment_breakdown.*.amount' => 'required_with:payment_breakdown|numeric|min:0.01',
+            'payment_breakdown.*.company_id' => 'nullable|integer|exists:companies,id',
+            'payment_breakdown.*.bank_account_id' => 'nullable|integer|exists:company_bank_accounts,id',
+            'payment_breakdown.*.reference' => 'nullable|string|max:255',
             'items' => 'sometimes|array',
             'items.*.purchase_order_item_id' => 'required_with:items|exists:purchase_order_items,id',
             'items.*.received_quantity' => 'required_with:items|numeric|min:0',
@@ -262,6 +461,12 @@ class GRNController extends Controller
                 'payment_type' => $incomingPaymentTiming === 'on_time'
                     ? ($validated['payment_type'] ?? $grn->payment_type)
                     : null,
+                'payment_company_id' => $incomingPaymentTiming === 'on_time'
+                    ? ($validated['payment_company_id'] ?? $grn->payment_company_id)
+                    : null,
+                'payment_breakdown' => $incomingPaymentTiming === 'on_time'
+                    ? ($validated['payment_breakdown'] ?? $grn->payment_breakdown)
+                    : null,
                 'payment_reference' => $incomingPaymentTiming === 'on_time'
                     ? ($validated['payment_reference'] ?? $grn->payment_reference)
                     : null,
@@ -340,6 +545,7 @@ class GRNController extends Controller
         $validated = $request->validate([
             'paid_amount' => 'required|numeric|min:0.01',
             'payment_type' => 'required|in:cash,bank_transfer,bank_deposit,cheque,party_cheque,card',
+            'payment_company_id' => 'nullable|integer|exists:companies,id',
             'payment_reference' => 'nullable|string|max:255',
             'bank_account_id' => 'nullable|integer|exists:company_bank_accounts,id',
             'bank_name' => 'nullable|string|max:255',
@@ -371,6 +577,17 @@ class GRNController extends Controller
             }
         }
 
+        if (in_array(($validated['payment_type'] ?? ''), ['cash', 'cheque', 'party_cheque', 'card'], true)) {
+            if (empty($validated['payment_company_id'])) {
+                return response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_company_id' => ['Select a company account for this payment type.'],
+                    ],
+                ], 422);
+            }
+        }
+
         DB::transaction(function () use (&$grn, $validated, $request) {
             $netAmount = (float) $grn->net_amount;
             $currentPaid = (float) $grn->paid_amount;
@@ -395,6 +612,7 @@ class GRNController extends Controller
                 : ($newPaidAmount > 0 ? 'partial' : 'unpaid');
 
             $selectedBankAccount = null;
+            $paymentCompany = null;
             if (in_array(($validated['payment_type'] ?? ''), ['bank_transfer', 'bank_deposit'], true)) {
                 $selectedBankAccount = CompanyBankAccount::find((int) $validated['bank_account_id']);
                 if (!$selectedBankAccount) {
@@ -427,6 +645,7 @@ class GRNController extends Controller
                 $selectedBankAccount->refresh();
 
                 if ($selectedBankAccount->company) {
+                    $paymentCompany = $selectedBankAccount->company;
                     $newCompanyBankBalance = round(
                         (float) $selectedBankAccount->company->bankAccounts()->sum('current_balance'),
                         2
@@ -446,6 +665,22 @@ class GRNController extends Controller
                         . ' | Account: ' . ($selectedBankAccount->account_no ?? '-'),
                     'created_by' => $request->user()?->id,
                 ]);
+            } else {
+                $paymentCompany = $this->deductFromCompanyBalance(
+                    (int) $validated['payment_company_id'],
+                    (string) $validated['payment_type'],
+                    (float) $incomingPaid
+                );
+
+                MainCashTransaction::create([
+                    'date' => $validated['paid_at'] ?? now(),
+                    'type' => 'out',
+                    'amount' => $incomingPaid,
+                    'reference' => $validated['payment_reference'] ?? $grn->grn_number,
+                    'note' => 'GRN Payment ' . $grn->grn_number . ' via ' . str_replace('_', ' ', (string) $validated['payment_type'])
+                        . ' | Company: ' . ($paymentCompany->name ?? '-'),
+                    'created_by' => $request->user()?->id,
+                ]);
             }
 
             $existingNote = trim((string) ($grn->payment_note ?? ''));
@@ -462,6 +697,9 @@ class GRNController extends Controller
                 $paymentMetaParts[] = 'Account: ' . ($selectedBankAccount->account_no ?? '-');
             } elseif (!empty($validated['bank_name'])) {
                 $paymentMetaParts[] = 'Bank: ' . $validated['bank_name'];
+            }
+            if ($paymentCompany) {
+                $paymentMetaParts[] = 'Company: ' . ($paymentCompany->name ?? '-');
             }
             if (!empty($validated['cheque_number'])) {
                 $paymentMetaParts[] = 'Cheque #: ' . $validated['cheque_number'];
@@ -481,6 +719,7 @@ class GRNController extends Controller
                 'paid_amount' => $newPaidAmount,
                 'payment_status' => $paymentStatus,
                 'payment_type' => $validated['payment_type'] ?? $grn->payment_type,
+                'payment_company_id' => $paymentCompany?->id ?? $grn->payment_company_id,
                 'payment_reference' => $validated['payment_reference'] ?? $grn->payment_reference,
                 'paid_at' => $validated['paid_at'] ?? now(),
                 'payment_note' => $note !== '' ? $note : null,
@@ -591,6 +830,67 @@ class GRNController extends Controller
     private function calculatePendingAmount(float $netAmount, float $paidAmount): float
     {
         return round(max($netAmount - $paidAmount, 0), 2);
+    }
+
+    private function resolveBalanceFieldByPaymentType(string $paymentType): ?string
+    {
+        return match ($paymentType) {
+            'cash' => 'current_cash_balance',
+            'cheque', 'party_cheque' => 'current_cheque_balance',
+            'bank_transfer', 'bank_deposit',
+            'card' => 'current_bank_balance',
+            default => null,
+        };
+    }
+
+    private function deductFromCompanyBalance(int $companyId, string $paymentType, float $amount): Company
+    {
+        $balanceField = $this->resolveBalanceFieldByPaymentType($paymentType);
+        if ($balanceField === null) {
+            throw new \Illuminate\Validation\ValidationException(
+                validator([], []),
+                response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_type' => ['Unsupported payment type for company balance deduction.'],
+                    ],
+                ], 422)
+            );
+        }
+
+        /** @var Company|null $company */
+        $company = Company::query()->lockForUpdate()->find($companyId);
+        if (!$company) {
+            throw new \Illuminate\Validation\ValidationException(
+                validator([], []),
+                response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'payment_company_id' => ['Selected company account is not valid.'],
+                    ],
+                ], 422)
+            );
+        }
+
+        $available = (float) ($company->{$balanceField} ?? 0);
+        if ($available < $amount) {
+            throw new \Illuminate\Validation\ValidationException(
+                validator([], []),
+                response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => [
+                        'paid_amount' => [
+                            'Insufficient company balance for this payment type. Available: LKR ' . number_format($available, 2, '.', ''),
+                        ],
+                    ],
+                ], 422)
+            );
+        }
+
+        $company->{$balanceField} = round(max($available - $amount, 0), 2);
+        $company->save();
+
+        return $company;
     }
 
     private function syncSupplierOutstandingByPurchaseOrder(int $purchaseOrderId, float $oldPendingAmount, float $newPendingAmount): void

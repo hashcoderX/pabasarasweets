@@ -20,10 +20,35 @@ type PurchaseOrder = {
 
 type GrnItem = {
   id: number;
+  purchase_order_item_id?: number;
   received_quantity?: number;
   accepted_quantity?: number;
   rejected_quantity?: number;
+  purchase_price?: number | null;
+  sell_price?: number | null;
+  expiry_date?: string | null;
+  remarks?: string | null;
   quality_status?: 'pending' | 'accepted' | 'rejected' | 'partial';
+  purchase_order_item?: {
+    id?: number;
+    unit_price?: number;
+    inventory_item?: {
+      id?: number;
+      name?: string;
+      code?: string;
+      unit?: string;
+    };
+  };
+  purchaseOrderItem?: {
+    id?: number;
+    unit_price?: number;
+    inventory_item?: {
+      id?: number;
+      name?: string;
+      code?: string;
+      unit?: string;
+    };
+  };
 };
 
 type GrnRow = {
@@ -33,6 +58,23 @@ type GrnRow = {
   status?: 'draft' | 'received' | 'inspected' | 'approved' | 'rejected';
   notes?: string;
   purchase_order_id?: number;
+  total_amount?: number;
+  discount_amount?: number;
+  net_amount?: number;
+  paid_amount?: number;
+  payment_status?: 'unpaid' | 'partial' | 'paid';
+  payment_timing?: 'post_payment' | 'on_time';
+  payment_type?: string | null;
+  payment_reference?: string | null;
+  payment_note?: string | null;
+  paid_at?: string | null;
+  payment_breakdown?: Array<{
+    payment_type?: string;
+    amount?: number;
+    company_id?: number | null;
+    bank_account_id?: number | null;
+    reference?: string | null;
+  }>;
   purchase_order?: PurchaseOrder;
   purchaseOrder?: PurchaseOrder;
   grn_items?: GrnItem[];
@@ -49,6 +91,7 @@ export default function GrnReportPage() {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [selectedGrn, setSelectedGrn] = useState<GrnRow | null>(null);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -188,6 +231,29 @@ export default function GrnReportPage() {
     if (!value) return '-';
     const d = new Date(value);
     return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString();
+  };
+
+  const toMoney = (value?: number | null) =>
+    Number(value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+
+  const getStatusPillClass = (status?: string) => {
+    switch (status) {
+      case 'approved':
+        return 'bg-emerald-100 text-emerald-700';
+      case 'received':
+        return 'bg-sky-100 text-sky-700';
+      case 'rejected':
+        return 'bg-rose-100 text-rose-700';
+      case 'inspected':
+        return 'bg-violet-100 text-violet-700';
+      case 'draft':
+        return 'bg-amber-100 text-amber-700';
+      default:
+        return 'bg-slate-100 text-slate-700';
+    }
   };
 
   const rowToExport = (row: any) => {
@@ -358,11 +424,12 @@ export default function GrnReportPage() {
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Acc Qty</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Rej Qty</th>
                   <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Action</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {filteredRows.length === 0 ? (
-                  <tr><td colSpan={9} className="px-4 py-10 text-center text-sm text-gray-500">No GRN records found.</td></tr>
+                  <tr><td colSpan={10} className="px-4 py-10 text-center text-sm text-gray-500">No GRN records found.</td></tr>
                 ) : (
                   filteredRows.map((row, idx) => {
                     const items = Array.isArray(row.grnItems) ? row.grnItems : [];
@@ -380,7 +447,16 @@ export default function GrnReportPage() {
                         <td className="px-4 py-3 text-sm text-gray-700 text-right">{recQty}</td>
                         <td className="px-4 py-3 text-sm text-gray-700 text-right">{accQty}</td>
                         <td className="px-4 py-3 text-sm text-gray-700 text-right">{rejQty}</td>
-                        <td className="px-4 py-3 text-sm"><span className="inline-flex px-2 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">{row.status ? row.status.toUpperCase() : '-'}</span></td>
+                        <td className="px-4 py-3 text-sm"><span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${getStatusPillClass(row.status)}`}>{row.status ? row.status.toUpperCase() : '-'}</span></td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedGrn(row)}
+                            className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                          >
+                            View
+                          </button>
+                        </td>
                       </tr>
                     );
                   })
@@ -389,6 +465,154 @@ export default function GrnReportPage() {
             </table>
           </div>
         </section>
+
+        {selectedGrn && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-6xl overflow-hidden rounded-3xl border border-white/20 bg-white shadow-2xl">
+              <div className="border-b border-emerald-100 bg-gradient-to-r from-emerald-50 to-teal-50 px-6 py-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">GRN Full Details</p>
+                    <h3 className="mt-1 text-xl font-semibold text-slate-900">{selectedGrn.grn_number || '-'}</h3>
+                    <p className="mt-1 text-sm text-slate-600">Received: {toDateLabel(selectedGrn.received_date)} • PO: {selectedGrn.purchaseOrder?.order_number || '-'}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedGrn(null)}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-xl text-slate-600 transition hover:bg-slate-50"
+                  >
+                    &times;
+                  </button>
+                </div>
+              </div>
+
+              <div className="max-h-[82vh] overflow-y-auto p-6 space-y-6">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Supplier</p>
+                    <p className="mt-2 text-sm font-semibold text-slate-900">{selectedGrn.purchaseOrder?.supplier?.name || '-'}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Status</p>
+                    <p className="mt-2">
+                      <span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${getStatusPillClass(selectedGrn.status)}`}>
+                        {selectedGrn.status ? selectedGrn.status.toUpperCase() : '-'}
+                      </span>
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Payment</p>
+                    <p className="mt-2 text-sm text-slate-800">
+                      {(selectedGrn.payment_timing || 'post_payment') === 'on_time'
+                        ? `On-time (${selectedGrn.payment_type || '-'})`
+                        : 'Post payment'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-emerald-700">Total Amount</p>
+                    <p className="mt-2 text-lg font-bold text-emerald-900">LKR {toMoney(selectedGrn.total_amount)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-amber-700">Discount</p>
+                    <p className="mt-2 text-lg font-bold text-amber-900">LKR {toMoney(selectedGrn.discount_amount)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-cyan-700">Net Amount</p>
+                    <p className="mt-2 text-lg font-bold text-cyan-900">LKR {toMoney(selectedGrn.net_amount)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-violet-200 bg-violet-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.15em] text-violet-700">Paid Amount</p>
+                    <p className="mt-2 text-lg font-bold text-violet-900">LKR {toMoney(selectedGrn.paid_amount)}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Payment Reference</p>
+                  <p className="mt-1 text-sm text-slate-800">{selectedGrn.payment_reference || '-'}</p>
+                  {selectedGrn.payment_note ? (
+                    <>
+                      <p className="mt-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Payment Note</p>
+                      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{selectedGrn.payment_note}</p>
+                    </>
+                  ) : null}
+                </div>
+
+                {Array.isArray(selectedGrn.payment_breakdown) && selectedGrn.payment_breakdown.length > 0 ? (
+                  <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Payment Breakdown</p>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-slate-200">
+                        <thead className="bg-slate-50">
+                          <tr>
+                            <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Type</th>
+                            <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Amount</th>
+                            <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Reference</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {selectedGrn.payment_breakdown.map((line, index) => (
+                            <tr key={`pay-line-${index}`}>
+                              <td className="px-3 py-2 text-sm text-slate-700">{String(line.payment_type || '-').replace('_', ' ')}</td>
+                              <td className="px-3 py-2 text-sm text-right font-semibold text-slate-900">LKR {toMoney(line.amount)}</td>
+                              <td className="px-3 py-2 text-sm text-slate-700">{line.reference || '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">GRN Items</p>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-slate-200">
+                      <thead className="bg-slate-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Item</th>
+                          <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Code</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Rec Qty</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Acc Qty</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Rej Qty</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Purchase Price</th>
+                          <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Quality</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 bg-white">
+                        {(selectedGrn.grnItems || []).map((item, index) => {
+                          const poItem = item.purchaseOrderItem || item.purchase_order_item;
+                          const inv = poItem?.inventory_item;
+                          const fallbackPrice = Number(poItem?.unit_price || 0);
+                          const purchasePrice = Number(item.purchase_price ?? fallbackPrice);
+
+                          return (
+                            <tr key={item.id || index}>
+                              <td className="px-3 py-2 text-sm font-medium text-slate-900">{inv?.name || `Item #${item.purchase_order_item_id || index + 1}`}</td>
+                              <td className="px-3 py-2 text-sm text-slate-700">{inv?.code || '-'}</td>
+                              <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.received_quantity || 0)}</td>
+                              <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.accepted_quantity || 0)}</td>
+                              <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.rejected_quantity || 0)}</td>
+                              <td className="px-3 py-2 text-sm text-right text-slate-700">LKR {toMoney(purchasePrice)}</td>
+                              <td className="px-3 py-2 text-sm text-slate-700">{item.quality_status || '-'}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Notes</p>
+                  <p className="mt-1 whitespace-pre-wrap text-sm text-slate-800">{selectedGrn.notes || '-'}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

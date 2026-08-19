@@ -130,6 +130,38 @@ export default function ReportsPage() {
         ],
       },
       {
+        name: 'Production Reports',
+        icon: '🏭',
+        color: 'from-emerald-500 to-teal-500',
+        bgColor: 'from-emerald-50 to-teal-50',
+        reports: [
+          {
+            name: 'Production Planning Reports',
+            description: 'Plan vs actual, daily/weekly/monthly plans, schedule, pending, overdue, and order status.',
+            icon: '📊',
+            path: '/dashboard/reports/production/planning',
+          },
+          {
+            name: 'Production Performance Reports',
+            description: 'Daily/shift, machine, operator, line, product, shift-wise, hourly output and achievement.',
+            icon: '🏁',
+            path: '/dashboard/reports/production/performance',
+          },
+          {
+            name: 'Raw Material Consumption Reports',
+            description: 'Consumption, variance, wastage, returns, lot usage and shortage visibility for production.',
+            icon: '🧱',
+            path: '/dashboard/reports/production/raw-material-consumption',
+          },
+          {
+            name: 'Wastage & Scrap Reports',
+            description: 'Daily waste, scrap, rejection, machine/employee waste %, and waste cost tracking.',
+            icon: '♻️',
+            path: '/dashboard/reports/production/wastage-scrap',
+          },
+        ],
+      },
+      {
         name: 'Stock Reports',
         icon: '📦',
         color: 'from-orange-500 to-red-500',

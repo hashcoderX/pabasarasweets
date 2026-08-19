@@ -82,11 +82,38 @@ interface GRN {
   payment_status?: 'unpaid' | 'partial' | 'paid';
   payment_timing?: 'post_payment' | 'on_time';
   payment_type?: string | null;
+  payment_company_id?: number | null;
+  payment_breakdown?: OnTimePaymentLine[] | null;
   payment_reference?: string | null;
   paid_at?: string | null;
   payment_note?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface CompanyAccountSummary {
+  id: number;
+  name: string;
+  current_cash_balance?: number;
+  current_bank_balance?: number;
+  current_cheque_balance?: number;
+}
+
+interface CompanyBankAccountOption {
+  id: number;
+  company_id: number;
+  company_name: string;
+  bank_name: string;
+  account_no: string;
+  current_balance: number;
+}
+
+interface OnTimePaymentLine {
+  payment_type: 'cash' | 'bank_transfer' | 'cheque' | 'card';
+  amount: number;
+  company_id?: number | null;
+  bank_account_id?: number | null;
+  reference?: string | null;
 }
 
 export default function GRNPage() {
@@ -139,6 +166,13 @@ export default function GRNPage() {
   const [noticeModal, setNoticeModal] = useState<{ title: string; message: string; tone: NoticeTone } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ title: string; message: string } | null>(null);
   const [confirmAction, setConfirmAction] = useState<(() => Promise<void> | void) | null>(null);
+  const [companyAccounts, setCompanyAccounts] = useState<CompanyAccountSummary[]>([]);
+  const [companyBankAccounts, setCompanyBankAccounts] = useState<CompanyBankAccountOption[]>([]);
+  const [paymentCompanyId, setPaymentCompanyId] = useState('');
+  const [useMultiplePayments, setUseMultiplePayments] = useState(false);
+  const [paymentLines, setPaymentLines] = useState<OnTimePaymentLine[]>([
+    { payment_type: 'cash', amount: 0, company_id: null, bank_account_id: null, reference: '' }
+  ]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -153,6 +187,7 @@ export default function GRNPage() {
     if (token) {
       fetchPurchaseOrders();
       fetchGRNs();
+      fetchCompanyAccounts();
     }
   }, [token]);
 
@@ -196,6 +231,55 @@ export default function GRNPage() {
     } catch (error) {
       console.error('Error fetching GRNs:', error);
       setGrns([]);
+    }
+  };
+
+  const fetchCompanyAccounts = async () => {
+    try {
+      const response = await axios.get('/api/companies', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      const companyData = Array.isArray(response.data)
+        ? response.data
+        : (response.data?.data || []);
+
+      const normalized = (Array.isArray(companyData) ? companyData : []).map((company: any) => ({
+        id: Number(company.id),
+        name: String(company.name || 'Company'),
+        current_cash_balance: Number(company.current_cash_balance || 0),
+        current_bank_balance: Number(company.current_bank_balance || 0),
+        current_cheque_balance: Number(company.current_cheque_balance || 0),
+      }));
+
+      const normalizedBankAccounts = (Array.isArray(companyData) ? companyData : []).flatMap((company: any) => {
+        const companyId = Number(company.id || 0);
+        const companyName = String(company.name || 'Company');
+        const accounts = Array.isArray(company?.bank_accounts)
+          ? company.bank_accounts
+          : (Array.isArray(company?.bankAccounts) ? company.bankAccounts : []);
+
+        return accounts.map((account: any) => ({
+          id: Number(account?.id || 0),
+          company_id: companyId,
+          company_name: companyName,
+          bank_name: String(account?.bank_name || ''),
+          account_no: String(account?.account_no || ''),
+          current_balance: Number(account?.current_balance || 0),
+        }));
+      }).filter((account: CompanyBankAccountOption) => account.id > 0);
+
+      setCompanyAccounts(normalized);
+      setCompanyBankAccounts(normalizedBankAccounts);
+
+      setPaymentCompanyId((prev) => {
+        if (prev) return prev;
+        return normalized.length > 0 ? String(normalized[0].id) : '';
+      });
+    } catch (error) {
+      console.error('Error fetching company accounts:', error);
+      setCompanyAccounts([]);
+      setCompanyBankAccounts([]);
     }
   };
 
@@ -262,6 +346,10 @@ export default function GRNPage() {
       payment_reference: '',
       items: grnItems,
     });
+    setUseMultiplePayments(false);
+    setPaymentLines([
+      { payment_type: 'cash', amount: 0, company_id: Number(paymentCompanyId || 0) || null, bank_account_id: null, reference: '' }
+    ]);
     setShowGrnForm(true);
   };
 
@@ -358,6 +446,33 @@ export default function GRNPage() {
       payment_reference: grn.payment_reference || '',
       items: grnItems,
     });
+    setPaymentCompanyId(grn.payment_company_id ? String(grn.payment_company_id) : '');
+    if (Array.isArray(grn.payment_breakdown) && grn.payment_breakdown.length > 0) {
+      const normalizedLines: OnTimePaymentLine[] = grn.payment_breakdown.map((line: any) => ({
+        payment_type: ['cash', 'bank_transfer', 'cheque', 'card'].includes(String(line?.payment_type || ''))
+          ? line.payment_type
+          : 'cash',
+        amount: Number(line?.amount || 0),
+        company_id: line?.company_id ? Number(line.company_id) : null,
+        bank_account_id: line?.bank_account_id ? Number(line.bank_account_id) : null,
+        reference: line?.reference ? String(line.reference) : '',
+      }));
+      setUseMultiplePayments(normalizedLines.length > 1);
+      setPaymentLines(normalizedLines);
+    } else {
+      setUseMultiplePayments(false);
+      setPaymentLines([
+        {
+          payment_type: (['cash', 'bank_transfer', 'cheque', 'card'].includes(String(grn.payment_type || ''))
+            ? (grn.payment_type as 'cash' | 'bank_transfer' | 'cheque' | 'card')
+            : 'cash'),
+          amount: Number(grn.paid_amount || 0),
+          company_id: grn.payment_company_id ? Number(grn.payment_company_id) : null,
+          bank_account_id: null,
+          reference: grn.payment_reference || '',
+        }
+      ]);
+    }
     setShowGrnForm(true);
   };
 
@@ -481,44 +596,201 @@ export default function GRNPage() {
     Number(grnTotalAmount || 0)
   );
   const grnNetAmount = Math.max(Number(grnTotalAmount || 0) - grnDiscountAmount, 0);
-  const onTimePaidPreview = Math.min(Math.max(Number(grnFormData.paid_amount || 0), 0), Number(grnNetAmount || 0));
+  const totalPaymentLinesAmount = useMemo(() => {
+    return paymentLines.reduce((sum, line) => sum + Math.max(Number(line.amount || 0), 0), 0);
+  }, [paymentLines]);
+
+  const onTimePaidPreview = useMultiplePayments
+    ? Math.min(Math.max(Number(totalPaymentLinesAmount || 0), 0), Number(grnNetAmount || 0))
+    : Math.min(Math.max(Number(grnFormData.paid_amount || 0), 0), Number(grnNetAmount || 0));
   const grnPendingAmount = grnFormData.payment_timing === 'on_time'
     ? Math.max(Number(grnNetAmount || 0) - onTimePaidPreview, 0)
     : Number(grnNetAmount || 0);
   const currentSupplierOutstanding = Number(selectedOrder?.supplier?.outstanding_balance || 0);
   const projectedSupplierOutstanding = Math.max(currentSupplierOutstanding + grnPendingAmount, 0);
+  const selectedPaymentCompany = useMemo(
+    () => companyAccounts.find((company) => String(company.id) === paymentCompanyId) || null,
+    [companyAccounts, paymentCompanyId]
+  );
+
+  const onTimeAvailableBalance = useMemo(() => {
+    if (!selectedPaymentCompany) return 0;
+
+    switch (grnFormData.payment_type) {
+      case 'cash':
+        return Number(selectedPaymentCompany.current_cash_balance || 0);
+      case 'bank_transfer':
+      case 'card':
+        return Number(selectedPaymentCompany.current_bank_balance || 0);
+      case 'cheque':
+        return Number(selectedPaymentCompany.current_cheque_balance || 0);
+      default:
+        return 0;
+    }
+  }, [selectedPaymentCompany, grnFormData.payment_type]);
+
+  const addPaymentLine = () => {
+    setPaymentLines((prev) => ([
+      ...prev,
+      {
+        payment_type: 'cash',
+        amount: 0,
+        company_id: Number(paymentCompanyId || 0) || null,
+        bank_account_id: null,
+        reference: '',
+      }
+    ]));
+  };
+
+  const removePaymentLine = (index: number) => {
+    setPaymentLines((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((_, lineIndex) => lineIndex !== index);
+    });
+  };
+
+  const updatePaymentLine = (index: number, patch: Partial<OnTimePaymentLine>) => {
+    setPaymentLines((prev) => prev.map((line, lineIndex) => {
+      if (lineIndex !== index) return line;
+      return { ...line, ...patch };
+    }));
+  };
 
   const handleGrnSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedOrder) return;
 
-    const onTimePaidAmount = Math.min(Math.max(Number(grnFormData.paid_amount || 0), 0), Number(grnNetAmount || 0));
+    const singleOnTimePaidAmount = Math.min(Math.max(Number(grnFormData.paid_amount || 0), 0), Number(grnNetAmount || 0));
+    const normalizedLineTotal = Math.min(Math.max(Number(totalPaymentLinesAmount || 0), 0), Number(grnNetAmount || 0));
+    const onTimePaidAmount = useMultiplePayments ? normalizedLineTotal : singleOnTimePaidAmount;
 
     if (grnFormData.payment_timing === 'on_time') {
-      if (!grnFormData.payment_type) {
-        showNotice('Validation', 'Select a payment type for on-time payment.', 'info');
-        return;
-      }
       if (onTimePaidAmount <= 0) {
         showNotice('Validation', 'Enter paid amount for on-time payment.', 'info');
         return;
       }
-      if (!String(grnFormData.payment_reference || '').trim()) {
-        showNotice('Validation', 'Enter payment reference for on-time payment.', 'info');
+      if (useMultiplePayments) {
+        if (paymentLines.length === 0) {
+          showNotice('Validation', 'Add at least one payment method.', 'info');
+          return;
+        }
+
+        for (let i = 0; i < paymentLines.length; i += 1) {
+          const line = paymentLines[i];
+          const lineAmount = Number(line.amount || 0);
+          if (lineAmount <= 0) {
+            showNotice('Validation', `Payment row ${i + 1}: amount must be greater than zero.`, 'info');
+            return;
+          }
+
+          if (!String(line.reference || '').trim()) {
+            showNotice('Validation', `Payment row ${i + 1}: reference is required.`, 'info');
+            return;
+          }
+
+          if (line.payment_type === 'bank_transfer') {
+            const selectedBankAccount = companyBankAccounts.find((account) => account.id === Number(line.bank_account_id || 0));
+            if (!selectedBankAccount) {
+              showNotice('Validation', `Payment row ${i + 1}: select a company bank account.`, 'info');
+              return;
+            }
+            if (lineAmount > Number(selectedBankAccount.current_balance || 0)) {
+              showNotice(
+                'Insufficient Fund',
+                `Payment row ${i + 1}: selected bank account has only LKR ${Number(selectedBankAccount.current_balance || 0).toFixed(2)} available.`,
+                'error'
+              );
+              return;
+            }
+          } else {
+            const selectedCompany = companyAccounts.find((company) => company.id === Number(line.company_id || 0));
+            if (!selectedCompany) {
+              showNotice('Validation', `Payment row ${i + 1}: select a company account.`, 'info');
+              return;
+            }
+
+            const available = line.payment_type === 'cash'
+              ? Number(selectedCompany.current_cash_balance || 0)
+              : (line.payment_type === 'card'
+                ? Number(selectedCompany.current_bank_balance || 0)
+                : Number(selectedCompany.current_cheque_balance || 0));
+
+            if (lineAmount > available) {
+              showNotice(
+                'Insufficient Fund',
+                `Payment row ${i + 1}: ${selectedCompany.name} has only LKR ${available.toFixed(2)} available for ${line.payment_type.replace('_', ' ')} payments.`,
+                'error'
+              );
+              return;
+            }
+          }
+        }
+      } else {
+        if (!grnFormData.payment_type) {
+          showNotice('Validation', 'Select a payment type for on-time payment.', 'info');
+          return;
+        }
+        if (!selectedPaymentCompany) {
+          showNotice('Validation', 'Select a company account for on-time payment validation.', 'info');
+          return;
+        }
+        if (!String(grnFormData.payment_reference || '').trim()) {
+          showNotice('Validation', 'Enter payment reference for on-time payment.', 'info');
+          return;
+        }
+
+        if (onTimePaidAmount > onTimeAvailableBalance) {
+          showNotice(
+            'Insufficient Fund',
+            `${selectedPaymentCompany.name} has only LKR ${onTimeAvailableBalance.toFixed(2)} available for ${grnFormData.payment_type.replace('_', ' ')} payments.`,
+            'error'
+          );
+          return;
+        }
+      }
+
+      if (onTimePaidAmount > Number(grnNetAmount || 0)) {
+        showNotice('Validation', 'Total paid amount cannot exceed GRN net amount.', 'info');
         return;
       }
     }
 
     // Prepare data for submission, converting empty strings to null
+    const breakdownPayload = grnFormData.payment_timing === 'on_time'
+      ? (useMultiplePayments
+        ? paymentLines.map((line) => ({
+            payment_type: line.payment_type,
+            amount: Number(line.amount || 0),
+            company_id: line.payment_type === 'bank_transfer' ? null : Number(line.company_id || 0) || null,
+            bank_account_id: line.payment_type === 'bank_transfer' ? Number(line.bank_account_id || 0) || null : null,
+            reference: String(line.reference || '').trim() || null,
+          }))
+        : [{
+            payment_type: grnFormData.payment_type as 'cash' | 'bank_transfer' | 'cheque' | 'card',
+            amount: Number(onTimePaidAmount.toFixed(2)),
+            company_id: grnFormData.payment_type === 'bank_transfer' ? null : Number(paymentCompanyId || 0) || null,
+            bank_account_id: null,
+            reference: String(grnFormData.payment_reference || '').trim() || null,
+          }])
+      : [];
+
     const submitData = {
       purchase_order_id: selectedOrder.id,
       received_date: grnFormData.received_date,
       notes: grnFormData.notes,
       discount_amount: Number(grnDiscountAmount.toFixed(2)),
       payment_timing: grnFormData.payment_timing,
-      payment_type: grnFormData.payment_timing === 'on_time' ? grnFormData.payment_type : null,
+      payment_type: grnFormData.payment_timing === 'on_time'
+        ? (useMultiplePayments ? 'mixed' : grnFormData.payment_type)
+        : null,
+      payment_company_id: grnFormData.payment_timing === 'on_time' && !useMultiplePayments
+        ? Number(paymentCompanyId || 0) || null
+        : null,
       paid_amount: grnFormData.payment_timing === 'on_time' ? Number(onTimePaidAmount.toFixed(2)) : 0,
-      payment_reference: grnFormData.payment_timing === 'on_time' ? String(grnFormData.payment_reference || '').trim() : null,
+      payment_reference: grnFormData.payment_timing === 'on_time'
+        ? (useMultiplePayments ? 'Multiple payment methods' : String(grnFormData.payment_reference || '').trim())
+        : null,
+      payment_breakdown: breakdownPayload,
       items: grnFormData.items.map(item => ({
         ...item,
         expiry_date: item.expiry_date || null, // Convert empty string to null
@@ -1765,45 +2037,187 @@ export default function GRNPage() {
                   </div>
 
                   {grnFormData.payment_timing === 'on_time' && (
-                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-                      <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-700">Pay Type</label>
-                        <select
-                          value={grnFormData.payment_type}
-                          onChange={(e) => setGrnFormData({ ...grnFormData, payment_type: e.target.value })}
-                          className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
-                        >
-                          <option value="cash">Cash</option>
-                          <option value="bank_transfer">Bank Transfer</option>
-                          <option value="cheque">Cheque</option>
-                          <option value="card">Card</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-700">Pay Amount</label>
-                        <div className="flex items-center">
-                          <span className="mr-2 text-sm text-gray-500">LKR</span>
+                    <div className="mt-4 space-y-4">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                        <label className="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                           <input
-                            type="number"
-                            value={grnFormData.paid_amount}
-                            onChange={(e) => setGrnFormData({ ...grnFormData, paid_amount: parseFloat(e.target.value) || 0 })}
-                            className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
-                            min="0"
-                            max={Number(grnNetAmount || 0)}
-                            step="0.01"
+                            type="checkbox"
+                            checked={useMultiplePayments}
+                            onChange={(e) => setUseMultiplePayments(e.target.checked)}
+                            className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                           />
+                          Use multiple payment methods (cash + bank transfer + cheque)
+                        </label>
+                      </div>
+
+                      {!useMultiplePayments && (
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">Pay From Company Account</label>
+                            <select
+                              value={paymentCompanyId}
+                              onChange={(e) => setPaymentCompanyId(e.target.value)}
+                              className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                            >
+                              <option value="">Select company</option>
+                              {companyAccounts.map((company) => (
+                                <option key={company.id} value={String(company.id)}>
+                                  {company.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">Pay Type</label>
+                            <select
+                              value={grnFormData.payment_type}
+                              onChange={(e) => setGrnFormData({ ...grnFormData, payment_type: e.target.value })}
+                              className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                            >
+                              <option value="cash">Cash</option>
+                              <option value="bank_transfer">Bank Transfer</option>
+                              <option value="cheque">Cheque</option>
+                              <option value="card">Card</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">Pay Amount</label>
+                            <div className="flex items-center">
+                              <span className="mr-2 text-sm text-gray-500">LKR</span>
+                              <input
+                                type="number"
+                                value={grnFormData.paid_amount}
+                                onChange={(e) => setGrnFormData({ ...grnFormData, paid_amount: parseFloat(e.target.value) || 0 })}
+                                className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                                min="0"
+                                max={Number(grnNetAmount || 0)}
+                                step="0.01"
+                              />
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">
+                              Available: LKR {Number(onTimeAvailableBalance || 0).toFixed(2)}
+                            </p>
+                          </div>
+                          <div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">Reference</label>
+                            <input
+                              type="text"
+                              value={grnFormData.payment_reference}
+                              onChange={(e) => setGrnFormData({ ...grnFormData, payment_reference: e.target.value })}
+                              className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                              placeholder="Txn ID / Cheque # / Ref"
+                            />
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-700">Reference</label>
-                        <input
-                          type="text"
-                          value={grnFormData.payment_reference}
-                          onChange={(e) => setGrnFormData({ ...grnFormData, payment_reference: e.target.value })}
-                          className="w-full rounded-xl border border-blue-100 bg-white px-3.5 py-2.5 text-sm text-black shadow-sm transition-all duration-200 focus:border-blue-500 focus:outline-none focus:ring-4 focus:ring-blue-100"
-                          placeholder="Txn ID / Cheque # / Ref"
-                        />
-                      </div>
+                      )}
+
+                      {useMultiplePayments && (
+                        <div className="space-y-3">
+                          {paymentLines.map((line, index) => (
+                            <div key={`payment-line-${index}`} className="grid grid-cols-1 gap-3 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3 md:grid-cols-5">
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Type</label>
+                                <select
+                                  value={line.payment_type}
+                                  onChange={(e) => updatePaymentLine(index, {
+                                    payment_type: e.target.value as 'cash' | 'bank_transfer' | 'cheque' | 'card',
+                                    company_id: e.target.value === 'bank_transfer' ? null : (line.company_id || Number(paymentCompanyId || 0) || null),
+                                    bank_account_id: e.target.value === 'bank_transfer' ? line.bank_account_id : null,
+                                  })}
+                                  className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-black focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                                >
+                                  <option value="cash">Cash</option>
+                                  <option value="bank_transfer">Bank Transfer</option>
+                                  <option value="cheque">Cheque</option>
+                                  <option value="card">Card</option>
+                                </select>
+                              </div>
+
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Amount</label>
+                                <input
+                                  type="number"
+                                  value={line.amount}
+                                  onChange={(e) => updatePaymentLine(index, { amount: parseFloat(e.target.value) || 0 })}
+                                  min="0"
+                                  step="0.01"
+                                  className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-black focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                                />
+                              </div>
+
+                              {line.payment_type === 'bank_transfer' ? (
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Bank Account</label>
+                                  <select
+                                    value={String(line.bank_account_id || '')}
+                                    onChange={(e) => updatePaymentLine(index, { bank_account_id: Number(e.target.value || 0) || null })}
+                                    className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-black focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                                  >
+                                    <option value="">Select bank account</option>
+                                    {companyBankAccounts.map((account) => (
+                                      <option key={account.id} value={String(account.id)}>
+                                        {account.company_name} - {account.bank_name} ({account.account_no})
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              ) : (
+                                <div>
+                                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Company</label>
+                                  <select
+                                    value={String(line.company_id || '')}
+                                    onChange={(e) => updatePaymentLine(index, { company_id: Number(e.target.value || 0) || null })}
+                                    className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-black focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                                  >
+                                    <option value="">Select company</option>
+                                    {companyAccounts.map((company) => (
+                                      <option key={company.id} value={String(company.id)}>
+                                        {company.name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                              )}
+
+                              <div>
+                                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Reference</label>
+                                <input
+                                  type="text"
+                                  value={String(line.reference || '')}
+                                  onChange={(e) => updatePaymentLine(index, { reference: e.target.value })}
+                                  placeholder="Txn / Cheque / Ref"
+                                  className="w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-black focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-100"
+                                />
+                              </div>
+
+                              <div className="flex items-end justify-end">
+                                <button
+                                  type="button"
+                                  onClick={() => removePaymentLine(index)}
+                                  disabled={paymentLines.length <= 1}
+                                  className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+
+                          <div className="flex items-center justify-between gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">Split Payment Total</p>
+                              <p className="text-sm font-semibold text-emerald-900">LKR {Number(totalPaymentLinesAmount || 0).toFixed(2)}</p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={addPaymentLine}
+                              className="rounded-full border border-emerald-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                            >
+                              + Add Payment Type
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 

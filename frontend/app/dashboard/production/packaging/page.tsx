@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -260,6 +260,27 @@ export default function PackagingManagementPage() {
   }, [token]);
 
   const resolveRawInventory = (raw: RawMaterialOption) => raw.inventoryItem || raw.inventory_item;
+
+  const uniqueRawMaterialOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const unique: RawMaterialOption[] = [];
+
+    for (const raw of rawMaterialOptions) {
+      const inv = resolveRawInventory(raw);
+      const codeKey = String(inv?.code || '').trim().toLowerCase();
+      const nameKey = String(inv?.name || '').trim().toLowerCase();
+      const unitKey = String(inv?.unit || '').trim().toLowerCase();
+      const inventoryIdKey = Number(inv?.id || 0) > 0 ? `inv:${inv?.id}` : '';
+      // Dedupe by actual inventory identity so mirrored raw-material rows don't repeat in UI.
+      const key = inventoryIdKey || (codeKey ? `code:${codeKey}` : `name:${nameKey}|unit:${unitKey}`);
+
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      unique.push(raw);
+    }
+
+    return unique;
+  }, [rawMaterialOptions]);
 
   const normalizeMaterialLines = (lines: PackagingMaterialLine[]) => {
     return lines
@@ -704,7 +725,7 @@ export default function PackagingManagementPage() {
                           className={inputClass}
                         >
                           <option value={0}>Select raw material</option>
-                          {rawMaterialOptions.map((raw) => {
+                          {uniqueRawMaterialOptions.map((raw) => {
                             const inv = resolveRawInventory(raw);
                             return (
                               <option key={raw.id} value={raw.id}>
@@ -849,7 +870,7 @@ export default function PackagingManagementPage() {
                           className={inputClass}
                         >
                           <option value={0}>Select raw material</option>
-                          {rawMaterialOptions.map((raw) => {
+                          {uniqueRawMaterialOptions.map((raw) => {
                             const inv = resolveRawInventory(raw);
                             return (
                               <option key={raw.id} value={raw.id}>

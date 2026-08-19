@@ -106,6 +106,19 @@ type JournalUiRow = MainJournalRow & {
   displayCreditAmount: number;
 };
 
+type NoticeModalState = {
+  open: boolean;
+  title: string;
+  message: string;
+  tone: 'info' | 'success' | 'error';
+};
+
+type ConfirmModalState = {
+  open: boolean;
+  title: string;
+  message: string;
+};
+
 const money = (value: number) =>
   Number(value || 0).toLocaleString(undefined, {
     minimumFractionDigits: 2,
@@ -155,9 +168,16 @@ export default function MainAccountPage() {
   const [transferSaving, setTransferSaving] = useState(false);
   const [transferError, setTransferError] = useState('');
   const [transferSuccess, setTransferSuccess] = useState('');
+  const [addCashSaving, setAddCashSaving] = useState(false);
+  const [addCashError, setAddCashError] = useState('');
+  const [addCashSuccess, setAddCashSuccess] = useState('');
   const [withdrawSaving, setWithdrawSaving] = useState(false);
   const [withdrawError, setWithdrawError] = useState('');
   const [withdrawSuccess, setWithdrawSuccess] = useState('');
+  const [depositSaving, setDepositSaving] = useState(false);
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showBankHistoryModal, setShowBankHistoryModal] = useState(false);
+  const [selectedBankHistoryCompanyId, setSelectedBankHistoryCompanyId] = useState('');
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [pendingMainFundRequests, setPendingMainFundRequests] = useState<PendingMainFundRequest[]>([]);
   const [acceptingRequestId, setAcceptingRequestId] = useState('');
@@ -171,6 +191,18 @@ export default function MainAccountPage() {
     toDate: '',
     search: '',
   });
+  const [noticeModal, setNoticeModal] = useState<NoticeModalState>({
+    open: false,
+    title: '',
+    message: '',
+    tone: 'info',
+  });
+  const [confirmModal, setConfirmModal] = useState<ConfirmModalState>({
+    open: false,
+    title: '',
+    message: '',
+  });
+  const [confirmAction, setConfirmAction] = useState<null | (() => void)>(null);
   const [transferForm, setTransferForm] = useState({
     companyId: '',
     sourceType: 'cash' as 'cash' | 'bank',
@@ -193,9 +225,46 @@ export default function MainAccountPage() {
     note: '',
     debitAccount: 'Cash Withdrawal Expense',
   });
+  const [addCashForm, setAddCashForm] = useState({
+    companyId: '',
+    amount: '',
+    date: new Date().toISOString().split('T')[0],
+    reference: '',
+    note: '',
+    creditAccount: 'Capital Injection',
+  });
+  const [depositForm, setDepositForm] = useState({
+    companyId: '',
+    sourceType: 'cash' as 'cash' | 'cheque',
+    bankAccountId: '',
+    amount: '',
+    date: new Date().toISOString().split('T')[0],
+    reference: '',
+    note: '',
+  });
 
   const router = useRouter();
   const api = useMemo(() => createApiClient(token), [token]);
+
+  const showNoticeModal = (title: string, message: string, tone: 'info' | 'success' | 'error' = 'info') => {
+    setNoticeModal({ open: true, title, message, tone });
+  };
+
+  const openConfirmModal = (title: string, message: string, action: () => void) => {
+    setConfirmAction(() => action);
+    setConfirmModal({ open: true, title, message });
+  };
+
+  const closeConfirmModal = () => {
+    setConfirmModal({ open: false, title: '', message: '' });
+    setConfirmAction(null);
+  };
+
+  const runConfirmAction = () => {
+    const action = confirmAction;
+    closeConfirmModal();
+    if (action) action();
+  };
 
   const detectEntryType = (reference?: string | null, note?: string | null): 'transfer' | 'withdrawal' | null => {
     const ref = String(reference || '').toLowerCase();
@@ -240,9 +309,8 @@ export default function MainAccountPage() {
     };
   };
 
-  const mapTransactionToJournal = (row: MainCashTransactionRow): JournalEntry | null => {
-    const entryType = detectEntryType(row.reference, row.note);
-    if (!entryType) return null;
+  const mapTransactionToJournal = (row: MainCashTransactionRow): JournalEntry => {
+    const entryType = detectEntryType(row.reference, row.note) || (row.type === 'out' ? 'withdrawal' : 'transfer');
 
     const amount = Number(row.amount || 0);
     const { debit, credit } = extractDebitCredit(row.note, row.type);
@@ -404,8 +472,7 @@ export default function MainAccountPage() {
         : (payload?.data?.data || payload?.data || []);
 
       const mapped = (Array.isArray(rows) ? rows : [])
-        .map((row) => mapTransactionToJournal(row as MainCashTransactionRow))
-        .filter((row): row is JournalEntry => Boolean(row));
+        .map((row) => mapTransactionToJournal(row as MainCashTransactionRow));
 
       setJournalEntries(mapped);
     } catch (error) {
@@ -510,18 +577,143 @@ export default function MainAccountPage() {
         companyId: String(rows[0].id),
       };
     });
+
+    setAddCashForm((prev) => {
+      if (prev.companyId) return prev;
+      return {
+        ...prev,
+        companyId: String(rows[0].id),
+      };
+    });
   }, [rows]);
+
+  useEffect(() => {
+    if (!addCashError) return;
+    showNoticeModal('Add Cash Failed', addCashError, 'error');
+    setAddCashError('');
+  }, [addCashError]);
+
+  useEffect(() => {
+    if (!addCashSuccess) return;
+    showNoticeModal('Add Cash', addCashSuccess, 'success');
+    setAddCashSuccess('');
+  }, [addCashSuccess]);
+
+  useEffect(() => {
+    if (!transferError) return;
+    showNoticeModal('Transfer Failed', transferError, 'error');
+    setTransferError('');
+  }, [transferError]);
+
+  useEffect(() => {
+    if (!transferSuccess) return;
+    showNoticeModal('Transfer', transferSuccess, 'success');
+    setTransferSuccess('');
+  }, [transferSuccess]);
+
+  useEffect(() => {
+    if (!withdrawError) return;
+    showNoticeModal('Withdrawal Failed', withdrawError, 'error');
+    setWithdrawError('');
+  }, [withdrawError]);
+
+  useEffect(() => {
+    if (!withdrawSuccess) return;
+    showNoticeModal('Withdrawal', withdrawSuccess, 'success');
+    setWithdrawSuccess('');
+  }, [withdrawSuccess]);
+
+  const normalizeAccountNo = (value?: string) =>
+    String(value || '')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+
+  const resolveCompanyOverlapInfo = (company: CompanyProfile) => {
+    const bankByAccount = new Map<string, number>();
+    const chequeByAccount = new Map<string, number>();
+
+    (company.bank_accounts || []).forEach((account) => {
+      const key = normalizeAccountNo(account.account_no);
+      if (!key) return;
+      bankByAccount.set(key, Number(account.current_balance || 0));
+    });
+
+    (company.cheque_accounts || []).forEach((account) => {
+      const key = normalizeAccountNo(account.account_no);
+      if (!key) return;
+      chequeByAccount.set(key, Number(account.current_balance || 0));
+    });
+
+    let overlappedChequeAmount = 0;
+    let overlappedBankAmount = 0;
+    let nonOverlappedChequeAmount = 0;
+    const overlappedAccounts: string[] = [];
+
+    chequeByAccount.forEach((chequeBalance, accountNo) => {
+      if (bankByAccount.has(accountNo)) {
+        overlappedChequeAmount += Number(chequeBalance || 0);
+        overlappedBankAmount += Number(bankByAccount.get(accountNo) || 0);
+        overlappedAccounts.push(accountNo);
+      } else {
+        nonOverlappedChequeAmount += Number(chequeBalance || 0);
+      }
+    });
+
+    // For shared account numbers, mirror cheque display to linked bank balance.
+    const displayChequeBalance = nonOverlappedChequeAmount + overlappedBankAmount;
+
+    return {
+      overlappedChequeAmount,
+      overlappedBankAmount,
+      nonOverlappedChequeAmount,
+      displayChequeBalance,
+      overlappedAccounts,
+      hasOverlap: overlappedAccounts.length > 0,
+    };
+  };
+
+  const getCompanyDisplayTotal = (company: CompanyProfile) => {
+    const cash = Number(company.current_cash_balance || 0);
+    const bank = Number(company.current_bank_balance || 0);
+    const overlapInfo = resolveCompanyOverlapInfo(company);
+    // Shared cheque/bank account numbers represent the same funds; add only non-overlapped cheque.
+    return cash + bank + Number(overlapInfo.nonOverlappedChequeAmount || 0);
+  };
+
+  const getCompanyAdjustedChequeBalance = (company: CompanyProfile) => {
+    return Number(resolveCompanyOverlapInfo(company).displayChequeBalance || 0);
+  };
 
   const summary = useMemo(() => {
     const totalCash = rows.reduce((sum, company) => sum + Number(company.current_cash_balance || 0), 0);
     const totalBank = rows.reduce((sum, company) => sum + Number(company.current_bank_balance || 0), 0);
-    const totalCheque = rows.reduce((sum, company) => sum + Number(company.current_cheque_balance || 0), 0);
+    const totalChequeRaw = rows.reduce((sum, company) => sum + Number(company.current_cheque_balance || 0), 0);
+    const totalChequeDisplay = rows.reduce(
+      (sum, company) => sum + Number(resolveCompanyOverlapInfo(company).displayChequeBalance || 0),
+      0
+    );
+    const overlappedCheque = rows.reduce(
+      (sum, company) => sum + resolveCompanyOverlapInfo(company).overlappedChequeAmount,
+      0
+    );
+    const overlappedBankMirror = rows.reduce(
+      (sum, company) => sum + Number(resolveCompanyOverlapInfo(company).overlappedBankAmount || 0),
+      0
+    );
+    const totalChequeNetForGrand = rows.reduce(
+      (sum, company) => sum + Number(resolveCompanyOverlapInfo(company).nonOverlappedChequeAmount || 0),
+      0
+    );
 
     return {
       totalCash,
       totalBank,
-      totalCheque,
-      grandTotal: totalCash + totalBank + totalCheque,
+      totalCheque: totalChequeDisplay,
+      totalChequeRaw,
+      overlappedCheque,
+      overlappedBankMirror,
+      totalChequeNetForGrand,
+      grandTotal: totalCash + totalBank + totalChequeNetForGrand,
     };
   }, [rows]);
 
@@ -553,6 +745,26 @@ export default function MainAccountPage() {
   const selectedWithdrawCompany = useMemo(
     () => rows.find((company) => String(company.id) === withdrawForm.companyId) || null,
     [rows, withdrawForm.companyId]
+  );
+
+  const selectedDepositCompany = useMemo(
+    () => rows.find((company) => String(company.id) === depositForm.companyId) || null,
+    [rows, depositForm.companyId]
+  );
+
+  const availableDepositBankAccounts = useMemo(
+    () => selectedDepositCompany?.bank_accounts || [],
+    [selectedDepositCompany]
+  );
+
+  const selectedBankHistoryCompany = useMemo(
+    () => rows.find((company) => String(company.id) === selectedBankHistoryCompanyId) || null,
+    [rows, selectedBankHistoryCompanyId]
+  );
+
+  const selectedAddCashCompany = useMemo(
+    () => rows.find((company) => String(company.id) === addCashForm.companyId) || null,
+    [rows, addCashForm.companyId]
   );
 
   const availableWithdrawBankAccounts = useMemo(
@@ -632,6 +844,47 @@ export default function MainAccountPage() {
       return mapped;
     });
   }, [pendingMainFundRequests, journalEntries, summary.totalCash, currentBankBalancesByLabel]);
+
+  const bankHistoryRows = useMemo(() => {
+    if (!selectedBankHistoryCompany) return [];
+
+    const bankNameTokens = (selectedBankHistoryCompany.bank_accounts || [])
+      .map((bank) => String(bank.bank_name || '').trim().toLowerCase())
+      .filter((name) => name.length > 0);
+
+    const bankAccountTokens = (selectedBankHistoryCompany.bank_accounts || [])
+      .map((bank) => normalizeAccountNo(bank.account_no))
+      .filter((no) => no.length > 0);
+
+    const matching = journalRows.filter((entry) => {
+      const text = [
+        entry.source_account,
+        entry.target_account,
+        entry.debit_account,
+        entry.credit_account,
+        entry.balanceLabel,
+        entry.note,
+        entry.reference,
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      const isBankRelated = entry.accountMark === 'Bank' || text.includes('bank');
+      if (!isBankRelated) return false;
+
+      if (bankNameTokens.length === 0 && bankAccountTokens.length === 0) {
+        return true;
+      }
+
+      const hasNameMatch = bankNameTokens.some((token) => text.includes(token));
+      const normalizedText = text.replace(/\s+/g, '');
+      const hasAccountNoMatch = bankAccountTokens.some((token) => normalizedText.includes(token));
+
+      return hasNameMatch || hasAccountNoMatch;
+    });
+
+    return matching;
+  }, [selectedBankHistoryCompany, journalRows]);
 
   const filteredJournalRows = useMemo(() => {
     const searchText = journalFilters.search.trim().toLowerCase();
@@ -1068,6 +1321,93 @@ export default function MainAccountPage() {
     }
   };
 
+  const handleAddCash = async () => {
+    setAddCashError('');
+    setAddCashSuccess('');
+
+    if (!selectedAddCashCompany) {
+      setAddCashError('Please select a company.');
+      return;
+    }
+
+    const amount = Number(addCashForm.amount || 0);
+    if (Number.isNaN(amount) || amount <= 0) {
+      setAddCashError('Add cash amount must be greater than zero.');
+      return;
+    }
+
+    const nextCashBalance = Number(selectedAddCashCompany.current_cash_balance || 0) + amount;
+
+    const payload = {
+      name: selectedAddCashCompany.name,
+      email: selectedAddCashCompany.email || '',
+      address: selectedAddCashCompany.address || null,
+      phone: selectedAddCashCompany.phone || null,
+      website: selectedAddCashCompany.website || null,
+      country: selectedAddCashCompany.country || null,
+      currency: selectedAddCashCompany.currency || null,
+      current_cash_balance: nextCashBalance,
+      current_bank_balance: Number(selectedAddCashCompany.current_bank_balance || 0),
+      current_cheque_balance: Number(selectedAddCashCompany.current_cheque_balance || 0),
+      bank_accounts: selectedAddCashCompany.bank_accounts || [],
+      cheque_accounts: selectedAddCashCompany.cheque_accounts || [],
+    };
+
+    try {
+      setAddCashSaving(true);
+      const res = await api.put(`/companies/${selectedAddCashCompany.id}`, payload);
+      const updatedCompany = res.data;
+
+      const nextRows = rows.map((company) =>
+        company.id === selectedAddCashCompany.id ? { ...company, ...updatedCompany } : company
+      );
+      setRows(nextRows);
+
+      const reference = addCashForm.reference.trim() || `ADD-${Date.now()}`;
+      const note = addCashForm.note.trim();
+      const date = addCashForm.date;
+      const creditAccount = addCashForm.creditAccount.trim() || 'Capital Injection';
+
+      const addCashEntry: LedgerEntry = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        date,
+        type: 'in',
+        amount,
+        reference,
+        note:
+          note ||
+          `Main cash added. Dr Main Cash Account, Cr ${creditAccount}.`,
+      };
+
+      await persistLedgerEntry('accounts_cash_book_ledger', '/main-cash-transactions', addCashEntry);
+      await refreshJournalFromBackend();
+
+      setAddCashForm((prev) => ({
+        ...prev,
+        amount: '',
+        reference: '',
+        note: '',
+      }));
+      setJournalPage(1);
+      setAddCashSuccess('Cash added to main account successfully with journal entry.');
+    } catch (error) {
+      if (isAxiosError(error) && error.response?.status === 401) {
+        localStorage.removeItem('token');
+        setToken('');
+        router.push('/');
+        return;
+      }
+
+      const apiMessage =
+        (isAxiosError(error) && (error.response?.data?.message as string)) ||
+        'Failed to add cash to main account.';
+
+      setAddCashError(apiMessage);
+    } finally {
+      setAddCashSaving(false);
+    }
+  };
+
   const handleWithdraw = async () => {
     setWithdrawError('');
     setWithdrawSuccess('');
@@ -1188,24 +1528,187 @@ export default function MainAccountPage() {
     }
   };
 
-  const renderAccountBalances = (accounts: CompanyAccountEntry[] | undefined, tone: 'bank' | 'cheque') => {
+  const openDepositModal = (company: CompanyProfile) => {
+    const firstBankId = company.bank_accounts?.[0]?.id ? String(company.bank_accounts[0].id) : '';
+    setDepositForm({
+      companyId: String(company.id),
+      sourceType: 'cash',
+      bankAccountId: firstBankId,
+      amount: '',
+      date: new Date().toISOString().split('T')[0],
+      reference: '',
+      note: '',
+    });
+    setShowDepositModal(true);
+  };
+
+  const openBankHistoryModal = (company: CompanyProfile) => {
+    setSelectedBankHistoryCompanyId(String(company.id));
+    setShowBankHistoryModal(true);
+  };
+
+  const closeBankHistoryModal = () => {
+    setShowBankHistoryModal(false);
+    setSelectedBankHistoryCompanyId('');
+  };
+
+  const closeDepositModal = () => {
+    setShowDepositModal(false);
+    setDepositForm((prev) => ({
+      ...prev,
+      amount: '',
+      reference: '',
+      note: '',
+    }));
+  };
+
+  const handleDepositBank = async () => {
+    if (!selectedDepositCompany) {
+      showNoticeModal('Deposit Failed', 'Please select a company for this deposit.', 'error');
+      return;
+    }
+
+    const amount = Number(depositForm.amount || 0);
+    if (Number.isNaN(amount) || amount <= 0) {
+      showNoticeModal('Deposit Failed', 'Deposit amount must be greater than zero.', 'error');
+      return;
+    }
+
+    const bankIndex = (selectedDepositCompany.bank_accounts || []).findIndex(
+      (account) => String(account.id) === depositForm.bankAccountId
+    );
+
+    if (bankIndex < 0) {
+      showNoticeModal('Deposit Failed', 'Please select a target bank account.', 'error');
+      return;
+    }
+
+    const currentCash = Number(selectedDepositCompany.current_cash_balance || 0);
+    const currentCheque = Number(selectedDepositCompany.current_cheque_balance || 0);
+    const currentBank = Number(selectedDepositCompany.current_bank_balance || 0);
+
+    if (depositForm.sourceType === 'cash' && currentCash < amount) {
+      showNoticeModal('Deposit Failed', 'Insufficient cash balance for this deposit.', 'error');
+      return;
+    }
+
+    if (depositForm.sourceType === 'cheque' && currentCheque < amount) {
+      showNoticeModal('Deposit Failed', 'Insufficient cheque balance for this deposit.', 'error');
+      return;
+    }
+
+    const nextBankAccounts = [...(selectedDepositCompany.bank_accounts || [])];
+    const selectedBank = nextBankAccounts[bankIndex];
+    const selectedBankName = selectedBank.bank_name || 'Bank Account';
+
+    nextBankAccounts[bankIndex] = {
+      ...selectedBank,
+      current_balance: Number(selectedBank.current_balance || 0) + amount,
+    };
+
+    const payload = {
+      name: selectedDepositCompany.name,
+      email: selectedDepositCompany.email || '',
+      address: selectedDepositCompany.address || null,
+      phone: selectedDepositCompany.phone || null,
+      website: selectedDepositCompany.website || null,
+      country: selectedDepositCompany.country || null,
+      currency: selectedDepositCompany.currency || null,
+      current_cash_balance: depositForm.sourceType === 'cash' ? currentCash - amount : currentCash,
+      current_bank_balance: currentBank + amount,
+      current_cheque_balance: depositForm.sourceType === 'cheque' ? currentCheque - amount : currentCheque,
+      bank_accounts: nextBankAccounts,
+      cheque_accounts: selectedDepositCompany.cheque_accounts || [],
+    };
+
+    try {
+      setDepositSaving(true);
+      const res = await api.put(`/companies/${selectedDepositCompany.id}`, payload);
+      const updatedCompany = res.data;
+
+      setRows((prev) =>
+        prev.map((company) => (company.id === selectedDepositCompany.id ? { ...company, ...updatedCompany } : company))
+      );
+
+      const reference = depositForm.reference.trim() || `DEP-${Date.now()}`;
+      const date = depositForm.date;
+      const note = depositForm.note.trim();
+
+      if (depositForm.sourceType === 'cash') {
+        const depositEntry: LedgerEntry = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          date,
+          type: 'out',
+          amount,
+          reference,
+          note: note || `Bank deposit posted. Dr Bank - ${selectedBankName}, Cr Cash Account.`,
+        };
+
+        await persistLedgerEntry('accounts_cash_book_ledger', '/main-cash-transactions', depositEntry);
+        await refreshJournalFromBackend();
+      }
+
+      setJournalPage(1);
+      closeDepositModal();
+      showNoticeModal('Deposit Posted', 'Bank deposit posted successfully.', 'success');
+    } catch (error) {
+      if (isAxiosError(error) && error.response?.status === 401) {
+        localStorage.removeItem('token');
+        setToken('');
+        router.push('/');
+        return;
+      }
+
+      const apiMessage =
+        (isAxiosError(error) && (error.response?.data?.message as string)) ||
+        'Failed to post bank deposit.';
+
+      showNoticeModal('Deposit Failed', apiMessage, 'error');
+    } finally {
+      setDepositSaving(false);
+    }
+  };
+
+  const renderAccountBalances = (
+    accounts: CompanyAccountEntry[] | undefined,
+    tone: 'bank' | 'cheque',
+    company?: CompanyProfile
+  ) => {
     if (!accounts || accounts.length === 0) {
       return <span className="text-xs text-gray-400">No accounts</span>;
     }
 
+    const bankBalancesByAccountNo = new Map<string, number>();
+    if (tone === 'cheque' && company) {
+      (company.bank_accounts || []).forEach((bankAccount) => {
+        const key = normalizeAccountNo(bankAccount.account_no);
+        if (!key) return;
+        bankBalancesByAccountNo.set(key, Number(bankAccount.current_balance || 0));
+      });
+    }
+
     return (
       <div className="space-y-2">
-        {accounts.map((account) => (
-          <div key={account.id} className="rounded-lg border border-gray-100 bg-gray-50/70 px-2 py-1.5">
-            <p className="text-xs font-semibold text-gray-800 truncate">
-              {account.bank_name || (tone === 'bank' ? 'Bank Account' : 'Cheque Account')}
-            </p>
-            <p className="text-[11px] text-gray-500 truncate">A/C: {account.account_no || '-'}</p>
-            <p className={`text-xs font-bold ${tone === 'bank' ? 'text-sky-700' : 'text-violet-700'}`}>
-              {money(Number(account.current_balance || 0))}
-            </p>
-          </div>
-        ))}
+        {accounts.map((account) => {
+          const accountNoKey = normalizeAccountNo(account.account_no);
+          const linkedBankBalance = accountNoKey ? bankBalancesByAccountNo.get(accountNoKey) : undefined;
+          const hasLinkedBankBalance = tone === 'cheque' && typeof linkedBankBalance === 'number';
+          const displayBalance = hasLinkedBankBalance
+            ? Number(linkedBankBalance || 0)
+            : Number(account.current_balance || 0);
+
+          return (
+            <div key={account.id} className="rounded-lg border border-gray-100 bg-gray-50/70 px-2 py-1.5">
+              <p className="text-xs font-semibold text-gray-800 truncate">
+                {account.bank_name || (tone === 'bank' ? 'Bank Account' : 'Cheque Account')}
+              </p>
+              <p className="text-[11px] text-gray-500 truncate">A/C: {account.account_no || '-'}</p>
+              <p className={`text-xs font-bold ${tone === 'bank' ? 'text-sky-700' : 'text-violet-700'}`}>
+                {money(displayBalance)}
+              </p>
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -1270,10 +1773,100 @@ export default function MainAccountPage() {
                 <p className="mt-2 text-lg font-bold text-sky-800">{money(summary.totalBank)}</p>
               </div>
               <div className="rounded-3xl border border-violet-200 bg-white p-5 shadow-sm">
-                <p className="text-xs uppercase tracking-[0.2em] text-violet-700">Total Cheque</p>
+                <p className="text-xs uppercase tracking-[0.2em] text-violet-700">Total Cheque (Bank-Aligned)</p>
                 <p className="mt-2 text-lg font-bold text-violet-800">{money(summary.totalCheque)}</p>
+                {summary.overlappedCheque > 0 ? (
+                  <p className="mt-1 text-[11px] text-amber-700">
+                    Raw: {money(summary.totalChequeRaw)} | Mirrored to bank: {money(summary.overlappedBankMirror)}
+                  </p>
+                ) : null}
+                {summary.totalChequeNetForGrand !== summary.totalCheque ? (
+                  <p className="mt-1 text-[11px] text-slate-600">
+                    Grand total counts only non-overlapped cheque: {money(summary.totalChequeNetForGrand)}
+                  </p>
+                ) : null}
               </div>
             </div>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-[0_18px_65px_-35px_rgba(13,148,136,0.45)] p-5 space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Add Cash to Main Account</h2>
+            <p className="text-sm text-gray-600 mt-1">
+              Accounting entry: main cash account is <span className="font-semibold">Debit</span>, source/funding account is <span className="font-semibold">Credit</span>.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
+            <select
+              value={addCashForm.companyId}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, companyId: e.target.value }))}
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 md:col-span-2 shadow-sm"
+            >
+              <option value="">Select Company</option>
+              {rows.map((company) => (
+                <option key={company.id} value={String(company.id)}>
+                  {company.name}
+                </option>
+              ))}
+            </select>
+
+            <input
+              type="text"
+              value={addCashForm.creditAccount}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, creditAccount: e.target.value }))}
+              placeholder="Credit Account (e.g. Capital Injection)"
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 md:col-span-2 shadow-sm"
+            />
+
+            <input
+              type="date"
+              value={addCashForm.date}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, date: e.target.value }))}
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+            />
+
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={addCashForm.amount}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, amount: e.target.value }))}
+              placeholder="Amount"
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+            />
+
+            <input
+              type="text"
+              value={addCashForm.reference}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, reference: e.target.value }))}
+              placeholder="Reference"
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+            />
+
+            <input
+              type="text"
+              value={addCashForm.note}
+              onChange={(e) => setAddCashForm((prev) => ({ ...prev, note: e.target.value }))}
+              placeholder="Narration"
+              className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 md:col-span-2 shadow-sm"
+            />
+
+            <button
+              type="button"
+              onClick={() =>
+                openConfirmModal(
+                  'Post Add Cash?',
+                  'Confirm adding this cash amount to the selected main account.',
+                  handleAddCash
+                )
+              }
+              disabled={addCashSaving}
+              className="rounded-full bg-gradient-to-r from-emerald-600 to-cyan-600 text-white text-sm font-semibold px-5 py-2.5 hover:from-emerald-700 hover:to-cyan-700 disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {addCashSaving ? 'Posting...' : 'Post Add Cash'}
+            </button>
           </div>
         </section>
 
@@ -1284,13 +1877,6 @@ export default function MainAccountPage() {
               Accounting entry: target account is <span className="font-semibold">Debit</span>, source cash/bank is <span className="font-semibold">Credit</span>.
             </p>
           </div>
-
-          {transferError ? (
-            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{transferError}</div>
-          ) : null}
-          {transferSuccess ? (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{transferSuccess}</div>
-          ) : null}
 
           <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
             <select
@@ -1443,7 +2029,13 @@ export default function MainAccountPage() {
 
             <button
               type="button"
-              onClick={handleTransfer}
+              onClick={() =>
+                openConfirmModal(
+                  'Post Transfer?',
+                  'Confirm posting this transfer to the selected target ledger.',
+                  handleTransfer
+                )
+              }
               disabled={transferSaving}
               className="rounded-full bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-semibold px-5 py-2.5 hover:from-emerald-700 hover:to-teal-700 disabled:opacity-60 disabled:cursor-not-allowed"
             >
@@ -1459,13 +2051,6 @@ export default function MainAccountPage() {
               Accounting entry: withdrawal/expense account is <span className="font-semibold">Debit</span>, source cash/bank is <span className="font-semibold">Credit</span>.
             </p>
           </div>
-
-          {withdrawError ? (
-            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{withdrawError}</div>
-          ) : null}
-          {withdrawSuccess ? (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{withdrawSuccess}</div>
-          ) : null}
 
           <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
             <select
@@ -1570,7 +2155,13 @@ export default function MainAccountPage() {
 
             <button
               type="button"
-              onClick={handleWithdraw}
+              onClick={() =>
+                openConfirmModal(
+                  'Post Withdrawal?',
+                  'Confirm posting this withdrawal from the selected source account.',
+                  handleWithdraw
+                )
+              }
               disabled={withdrawSaving}
               className="rounded-full bg-gradient-to-r from-rose-600 to-orange-600 text-white text-sm font-semibold px-5 py-2.5 hover:from-rose-700 hover:to-orange-700 disabled:opacity-60 disabled:cursor-not-allowed"
             >
@@ -1594,23 +2185,51 @@ export default function MainAccountPage() {
                     <th className="px-4 py-3 text-right text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Total</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Bank Account Balances</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Cheque Account Balances</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-100">
                   {rows.map((company, idx) => {
                     const cash = Number(company.current_cash_balance || 0);
                     const bank = Number(company.current_bank_balance || 0);
-                    const cheque = Number(company.current_cheque_balance || 0);
+                    const cheque = getCompanyAdjustedChequeBalance(company);
+                    const overlapInfo = resolveCompanyOverlapInfo(company);
+                    const displayTotal = getCompanyDisplayTotal(company);
 
                     return (
-                      <tr key={company.id} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/45'} transition hover:bg-emerald-50/35`}>
-                        <td className="px-4 py-3 text-sm text-gray-900 font-semibold">{company.name}</td>
+                      <tr
+                        key={company.id}
+                        onClick={() => openBankHistoryModal(company)}
+                        className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/45'} cursor-pointer transition hover:bg-emerald-50/35`}
+                      >
+                        <td className="px-4 py-3 text-sm text-gray-900 font-semibold">
+                          <div>{company.name}</div>
+                          <div className="mt-1 text-[11px] font-medium text-sky-700">Click row to view bank transaction history</div>
+                          {overlapInfo.hasOverlap ? (
+                            <div className="mt-1 text-[11px] font-medium text-amber-700">
+                              Shared bank/cheque account detected. Cheque is mirrored to bank balance.
+                            </div>
+                          ) : null}
+                        </td>
                         <td className="px-4 py-3 text-sm text-right text-emerald-700 font-semibold">{money(cash)}</td>
                         <td className="px-4 py-3 text-sm text-right text-sky-700 font-semibold">{money(bank)}</td>
                         <td className="px-4 py-3 text-sm text-right text-violet-700 font-semibold">{money(cheque)}</td>
-                        <td className="px-4 py-3 text-sm text-right text-cyan-700 font-bold">{money(cash + bank + cheque)}</td>
-                        <td className="px-4 py-3 align-top">{renderAccountBalances(company.bank_accounts, 'bank')}</td>
-                        <td className="px-4 py-3 align-top">{renderAccountBalances(company.cheque_accounts, 'cheque')}</td>
+                        <td className="px-4 py-3 text-sm text-right text-cyan-700 font-bold">{money(displayTotal)}</td>
+                        <td className="px-4 py-3 align-top">{renderAccountBalances(company.bank_accounts, 'bank', company)}</td>
+                        <td className="px-4 py-3 align-top">{renderAccountBalances(company.cheque_accounts, 'cheque', company)}</td>
+                        <td className="px-4 py-3 align-top">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDepositModal(company);
+                            }}
+                            disabled={!company.bank_accounts || company.bank_accounts.length === 0}
+                            className="rounded-full bg-gradient-to-r from-sky-600 to-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:from-sky-700 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Deposit Bank
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -1810,7 +2429,13 @@ export default function MainAccountPage() {
                         {entry.status === 'pending' && entry.row_source === 'outlet_request' ? (
                           <button
                             type="button"
-                            onClick={() => handleAcceptMainFundRequest(entry.id)}
+                            onClick={() =>
+                              openConfirmModal(
+                                'Accept Pending Transfer?',
+                                'Confirm accepting this pending outlet transfer and posting it to main account.',
+                                () => handleAcceptMainFundRequest(entry.id)
+                              )
+                            }
                             disabled={acceptingRequestId === entry.id}
                             className="ml-2 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -1855,6 +2480,250 @@ export default function MainAccountPage() {
           </div>
         </section>
       </main>
+
+      {confirmModal.open ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-amber-200 bg-white p-6 shadow-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-amber-600">Confirmation</p>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">{confirmModal.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-slate-600">{confirmModal.message}</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeConfirmModal}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={runConfirmAction}
+                className="rounded-xl bg-gradient-to-r from-amber-600 to-orange-500 px-4 py-2 text-sm font-semibold text-white hover:from-amber-700 hover:to-orange-600"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showDepositModal ? (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-3xl border border-sky-200 bg-white p-6 shadow-2xl">
+            <div className="mb-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-sky-600">Bank Deposit</p>
+              <h3 className="mt-2 text-xl font-semibold text-slate-900">Deposit to Company Bank Account</h3>
+              <p className="mt-2 text-sm text-slate-600">Move funds from company cash/cheque balance into a selected bank account.</p>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <select
+                value={depositForm.companyId}
+                onChange={(e) => {
+                  const selected = rows.find((company) => String(company.id) === e.target.value);
+                  setDepositForm((prev) => ({
+                    ...prev,
+                    companyId: e.target.value,
+                    bankAccountId: selected?.bank_accounts?.[0]?.id ? String(selected.bank_accounts[0].id) : '',
+                  }));
+                }}
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              >
+                <option value="">Select Company</option>
+                {rows.map((company) => (
+                  <option key={company.id} value={String(company.id)}>
+                    {company.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={depositForm.sourceType}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, sourceType: e.target.value as 'cash' | 'cheque' }))}
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              >
+                <option value="cash">Source: Cash Balance</option>
+                <option value="cheque">Source: Cheque Balance</option>
+              </select>
+
+              <select
+                value={depositForm.bankAccountId}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, bankAccountId: e.target.value }))}
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm md:col-span-2"
+              >
+                <option value="">Select Target Bank Account</option>
+                {availableDepositBankAccounts.map((bank) => (
+                  <option key={bank.id} value={String(bank.id)}>
+                    {(bank.bank_name || 'Bank Account') + ` (${money(Number(bank.current_balance || 0))})`}
+                  </option>
+                ))}
+              </select>
+
+              <input
+                type="date"
+                value={depositForm.date}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, date: e.target.value }))}
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              />
+
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={depositForm.amount}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, amount: e.target.value }))}
+                placeholder="Amount"
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              />
+
+              <input
+                type="text"
+                value={depositForm.reference}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, reference: e.target.value }))}
+                placeholder="Reference"
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              />
+
+              <input
+                type="text"
+                value={depositForm.note}
+                onChange={(e) => setDepositForm((prev) => ({ ...prev, note: e.target.value }))}
+                placeholder="Narration"
+                className="rounded-xl border border-gray-300 text-sm text-black px-3 py-2.5 shadow-sm"
+              />
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDepositModal}
+                className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  openConfirmModal(
+                    'Post Bank Deposit?',
+                    'Confirm posting this deposit to selected bank account.',
+                    handleDepositBank
+                  )
+                }
+                disabled={depositSaving}
+                className="rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white hover:from-sky-700 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {depositSaving ? 'Posting...' : 'Post Deposit'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showBankHistoryModal ? (
+        <div className="fixed inset-0 z-[94] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm">
+          <div className="relative w-full max-w-[96vw] overflow-hidden rounded-[28px] border border-cyan-100 bg-white shadow-[0_35px_140px_-50px_rgba(14,116,144,0.6)]">
+            <div className="relative max-h-[92vh] overflow-y-auto">
+              <div className="bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.35),_transparent_50%),linear-gradient(130deg,_rgba(8,47,73,0.95)_0%,_rgba(14,116,144,0.9)_48%,_rgba(2,132,199,0.88)_100%)]">
+                <div className="flex items-start justify-between gap-4 px-6 pb-6 pt-7 text-white sm:px-8">
+                  <div>
+                    <div className="mb-3 inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/25 bg-white/15 text-xl">🏦</div>
+                    <h3 className="text-2xl font-semibold tracking-tight sm:text-3xl">Bank Transaction History</h3>
+                    <p className="mt-2 text-sm text-white/85 sm:text-base">
+                      {selectedBankHistoryCompany?.name || 'Company'} • All bank-related journal movements
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeBankHistoryModal}
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-white/25 bg-white/10 text-white transition hover:bg-white/20"
+                  >
+                    <span className="text-2xl">&times;</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="px-6 pb-6 sm:px-8 sm:pb-8">
+                <div className="mb-4 rounded-2xl border border-cyan-100 bg-cyan-50/70 px-4 py-3 text-sm text-cyan-800">
+                  Found {bankHistoryRows.length} bank-related transactions.
+                </div>
+
+                <div className="overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="min-w-[1100px] divide-y divide-slate-200">
+                    <thead className="bg-slate-100/90">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Date</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Type</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Debit Account</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Debit</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Credit Account</th>
+                        <th className="px-4 py-3 text-right text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Credit</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Status</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Reference</th>
+                        <th className="px-4 py-3 text-left text-xs font-semibold tracking-[0.12em] text-slate-500 uppercase">Narration</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-slate-100">
+                      {bankHistoryRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="px-4 py-10 text-center text-sm text-slate-500">
+                            No bank transaction records found for this company.
+                          </td>
+                        </tr>
+                      ) : (
+                        bankHistoryRows.map((entry, idx) => (
+                          <tr key={`${entry.id}-${idx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/45'}>
+                            <td className="px-4 py-3 text-sm text-slate-700">{formatJournalDateTime(entry.posted_at, entry.date)}</td>
+                            <td className="px-4 py-3 text-sm text-slate-700">{entry.txMark}</td>
+                            <td className="px-4 py-3 text-sm text-emerald-700">{entry.displayDebitAccount}</td>
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-emerald-700">{money(Number(entry.displayDebitAmount || 0))}</td>
+                            <td className="px-4 py-3 text-sm text-rose-700">{entry.displayCreditAccount}</td>
+                            <td className="px-4 py-3 text-right text-sm font-semibold text-rose-700">{money(Number(entry.displayCreditAmount || 0))}</td>
+                            <td className="px-4 py-3 text-sm text-slate-700">{entry.status || 'completed'}</td>
+                            <td className="px-4 py-3 text-sm text-slate-700">{entry.reference || '-'}</td>
+                            <td className="px-4 py-3 text-sm text-slate-600">{entry.note || '-'}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={closeBankHistoryModal}
+                    className="rounded-full border border-sky-200 bg-sky-50 px-5 py-2.5 text-sm font-semibold text-sky-700 transition hover:bg-sky-100"
+                  >
+                    Close History
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {noticeModal.open ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
+              {noticeModal.tone === 'success' ? 'Success' : noticeModal.tone === 'error' ? 'Error' : 'Notice'}
+            </p>
+            <h3 className="mt-2 text-xl font-semibold text-slate-900">{noticeModal.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-slate-600">{noticeModal.message}</p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setNoticeModal({ open: false, title: '', message: '', tone: 'info' })}
+                className="rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

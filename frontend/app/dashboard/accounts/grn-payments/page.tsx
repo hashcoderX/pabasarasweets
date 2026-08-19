@@ -20,10 +20,19 @@ interface PurchaseOrder {
 
 interface CompanyBankAccountOption {
   id: number;
+  company_id: number;
   company_name: string;
   bank_name: string;
   account_no: string;
   current_balance: number;
+}
+
+interface CompanyOption {
+  id: number;
+  name: string;
+  current_cash_balance: number;
+  current_bank_balance: number;
+  current_cheque_balance: number;
 }
 
 interface GrnPaymentRecord {
@@ -62,6 +71,8 @@ export default function GrnPaymentsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [bankAccounts, setBankAccounts] = useState<CompanyBankAccountOption[]>([]);
+  const [companies, setCompanies] = useState<CompanyOption[]>([]);
+  const [payCompanyId, setPayCompanyId] = useState('');
 
   const router = useRouter();
   const api = useMemo(() => createApiClient(token), [token]);
@@ -97,14 +108,27 @@ export default function GrnPaymentsPage() {
     try {
       const res = await api.get('/companies');
       const rows = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+      const normalizedCompanies = (Array.isArray(rows) ? rows : []).map((company: any) => ({
+        id: Number(company?.id || 0),
+        name: String(company?.name || 'Company'),
+        current_cash_balance: Number(company?.current_cash_balance || 0),
+        current_bank_balance: Number(company?.current_bank_balance || 0),
+        current_cheque_balance: Number(company?.current_cheque_balance || 0),
+      })).filter((company: CompanyOption) => company.id > 0);
+
+      setCompanies(normalizedCompanies);
+      setPayCompanyId((prev) => prev || (normalizedCompanies[0] ? String(normalizedCompanies[0].id) : ''));
+
       const normalized = (Array.isArray(rows) ? rows : []).flatMap((company: any) => {
         const companyName = String(company?.name || 'Company');
+        const companyId = Number(company?.id || 0);
         const accounts = Array.isArray(company?.bank_accounts)
           ? company.bank_accounts
           : (Array.isArray(company?.bankAccounts) ? company.bankAccounts : []);
 
         return accounts.map((account: any) => ({
           id: Number(account?.id || 0),
+          company_id: companyId,
           company_name: companyName,
           bank_name: String(account?.bank_name || ''),
           account_no: String(account?.account_no || ''),
@@ -116,6 +140,7 @@ export default function GrnPaymentsPage() {
     } catch (error) {
       console.error('Failed to fetch company bank accounts:', error);
       setBankAccounts([]);
+      setCompanies([]);
     }
   };
 
@@ -165,6 +190,7 @@ export default function GrnPaymentsPage() {
     setPayChequeNumber('');
     setPayChequeDate('');
     setPayNote('');
+    setPayCompanyId((prev) => prev || (companies[0] ? String(companies[0].id) : ''));
     setErrorMessage('');
   };
 
@@ -186,6 +212,7 @@ export default function GrnPaymentsPage() {
 
     const amount = Number(payAmount || 0);
     const balance = Number(selectedGrn.net_amount || 0) - Number(selectedGrn.paid_amount || 0);
+    const selectedCompany = companies.find((company) => company.id === Number(payCompanyId || 0));
 
     if (amount <= 0) {
       setErrorMessage('Enter a valid payment amount.');
@@ -216,12 +243,36 @@ export default function GrnPaymentsPage() {
       }
     }
 
+    if (payType === 'cash' || payType === 'cheque' || payType === 'party_cheque' || payType === 'card') {
+      if (!selectedCompany) {
+        setErrorMessage('Select a company account for this payment type.');
+        return;
+      }
+
+      const available = payType === 'cash'
+        ? Number(selectedCompany.current_cash_balance || 0)
+        : (payType === 'card'
+          ? Number(selectedCompany.current_bank_balance || 0)
+          : Number(selectedCompany.current_cheque_balance || 0));
+
+      if (available < amount) {
+        setErrorMessage(`Insufficient company balance. Available: LKR ${money(available)}.`);
+        return;
+      }
+    }
+
     try {
       setSubmitting(true);
       setErrorMessage('');
+      const selectedBankAccount = bankAccounts.find((account) => account.id === Number(payBankAccountId || 0));
+      const resolvedCompanyId = payType === 'bank_transfer' || payType === 'bank_deposit'
+        ? Number(selectedBankAccount?.company_id || 0) || null
+        : Number(payCompanyId || 0) || null;
+
       await api.post(`/purchasing/grn/${selectedGrn.id}/payment`, {
         paid_amount: amount,
         payment_type: payType,
+        payment_company_id: resolvedCompanyId,
         payment_reference: payReference.trim() || null,
         bank_account_id: payType === 'bank_transfer' || payType === 'bank_deposit' ? Number(payBankAccountId || 0) : null,
         bank_name: payBankName.trim() || null,
@@ -428,6 +479,30 @@ export default function GrnPaymentsPage() {
                   <option value="card">Card</option>
                 </select>
               </div>
+
+              {(payType === 'cash' || payType === 'cheque' || payType === 'party_cheque' || payType === 'card') && (
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">Pay From Company Account</label>
+                  <select
+                    value={payCompanyId}
+                    onChange={(e) => setPayCompanyId(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm text-black focus:border-cyan-500 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                  >
+                    <option value="">Select company</option>
+                    {companies.map((company) => {
+                      const available = payType === 'cash'
+                        ? company.current_cash_balance
+                        : (payType === 'card' ? company.current_bank_balance : company.current_cheque_balance);
+
+                      return (
+                        <option key={company.id} value={company.id}>
+                          {company.name} | Available: LKR {money(Number(available || 0))}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              )}
 
               {(payType === 'cheque' || payType === 'party_cheque') && (
                 <div>

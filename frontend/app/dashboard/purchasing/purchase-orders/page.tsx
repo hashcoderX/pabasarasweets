@@ -118,7 +118,8 @@ export default function PurchaseOrdersPage() {
     title: '',
     message: '',
   });
-  const [confirmAction, setConfirmAction] = useState<(() => void) | null>(null);
+  const [confirmAction, setConfirmAction] = useState<(() => Promise<void> | void) | null>(null);
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const router = useRouter();
   const [token, setToken] = useState('');
   const [formData, setFormData] = useState({
@@ -160,7 +161,7 @@ export default function PurchaseOrdersPage() {
     setAlertModal({ open: true, title, message, tone });
   };
 
-  const openConfirmModal = (title: string, message: string, action: () => void) => {
+  const openConfirmModal = (title: string, message: string, action: () => Promise<void> | void) => {
     setConfirmAction(() => action);
     setConfirmModal({ open: true, title, message });
   };
@@ -170,10 +171,10 @@ export default function PurchaseOrdersPage() {
     setConfirmAction(null);
   };
 
-  const runConfirmAction = () => {
+  const runConfirmAction = async () => {
     const action = confirmAction;
     closeConfirmModal();
-    if (action) action();
+    if (action) await action();
   };
 
   useEffect(() => {
@@ -618,6 +619,41 @@ export default function PurchaseOrdersPage() {
       () => {
         setShowRawMaterialModal(false);
         resetRawMaterialForm();
+      }
+    );
+  };
+
+  const requestRemovePurchaseOrder = (order: PurchaseOrder) => {
+    openConfirmModal(
+      'Remove Purchase Order?',
+      `This will permanently remove ${order.order_number}. Do you want to continue?`,
+      async () => {
+        setDeletingOrderId(order.id);
+        try {
+          await axios.delete(`/api/purchasing/purchase-orders/${order.id}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          setPurchaseOrders((prev) => prev.filter((po) => po.id !== order.id));
+
+          if (selectedOrder?.id === order.id) {
+            setSelectedOrder(null);
+            setShowOrderDetails(false);
+            setShowPrintModal(false);
+          }
+
+          showAlertModal('Purchase Order Removed', `${order.order_number} was removed successfully.`, 'success');
+        } catch (error: any) {
+          console.error('Error removing purchase order:', error);
+          const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+          showAlertModal(
+            'Remove Purchase Order Failed',
+            firstError?.[0] || error?.response?.data?.message || 'Failed to remove purchase order.',
+            'error'
+          );
+        } finally {
+          setDeletingOrderId(null);
+        }
       }
     );
   };
@@ -1288,9 +1324,16 @@ export default function PurchaseOrdersPage() {
                         </button>
                         <button
                           onClick={() => printOrder(order)}
-                          className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                          className="mr-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
                         >
                           Print
+                        </button>
+                        <button
+                          onClick={() => requestRemovePurchaseOrder(order)}
+                          disabled={deletingOrderId === order.id}
+                          className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {deletingOrderId === order.id ? 'Removing...' : 'Remove'}
                         </button>
                       </td>
                     </tr>
@@ -1412,6 +1455,13 @@ export default function PurchaseOrdersPage() {
 
                 <div className="sticky bottom-0 -mx-6 border-t border-blue-100 bg-white/95 px-6 py-4 text-right sm:-mx-8 sm:px-8">
                   <button
+                    onClick={() => requestRemovePurchaseOrder(selectedOrder)}
+                    disabled={deletingOrderId === selectedOrder.id}
+                    className="mr-3 rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-sm font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {deletingOrderId === selectedOrder.id ? 'Removing...' : 'Remove Order'}
+                  </button>
+                  <button
                     onClick={() => setShowOrderDetails(false)}
                     className="rounded-xl border border-blue-200 bg-blue-50 px-5 py-2.5 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
                   >
@@ -1446,17 +1496,17 @@ export default function PurchaseOrdersPage() {
               <div className="grid grid-cols-2 gap-8 mb-8">
                 <div>
                   <h3 className="font-bold text-gray-800 mb-2">Supplier Information</h3>
-                  <p className="text-gray-700 font-semibold">{selectedOrder.supplier.name}</p>
-                  <p className="text-gray-600">{selectedOrder.supplier.email}</p>
-                  <p className="text-gray-600">{selectedOrder.supplier.phone}</p>
-                  <p className="text-gray-600">{selectedOrder.supplier.address}</p>
-                  <p className="text-gray-600">Contact: {selectedOrder.supplier.contact_person}</p>
+                  <p className="text-black font-semibold">{selectedOrder.supplier.name}</p>
+                  <p className="text-black">{selectedOrder.supplier.email}</p>
+                  <p className="text-black">{selectedOrder.supplier.phone}</p>
+                  <p className="text-black">{selectedOrder.supplier.address}</p>
+                  <p className="text-black">Contact: {selectedOrder.supplier.contact_person}</p>
                 </div>
                 <div>
                   <h3 className="font-bold text-gray-800 mb-2">Order Information</h3>
-                  <p className="text-gray-600"><span className="font-semibold">Order Date:</span> {new Date(selectedOrder.order_date).toLocaleDateString()}</p>
-                  <p className="text-gray-600"><span className="font-semibold">Expected Delivery:</span> {selectedOrder.expected_delivery_date ? new Date(selectedOrder.expected_delivery_date).toLocaleDateString() : 'Not specified'}</p>
-                  <p className="text-gray-600"><span className="font-semibold">Status:</span> {selectedOrder.status}</p>
+                  <p className="text-black"><span className="font-semibold">Order Date:</span> {new Date(selectedOrder.order_date).toLocaleDateString()}</p>
+                  <p className="text-black"><span className="font-semibold">Expected Delivery:</span> {selectedOrder.expected_delivery_date ? new Date(selectedOrder.expected_delivery_date).toLocaleDateString() : 'Not specified'}</p>
+                  <p className="text-black"><span className="font-semibold">Status:</span> {selectedOrder.status}</p>
                 </div>
               </div>
 
@@ -1474,17 +1524,17 @@ export default function PurchaseOrdersPage() {
                   <tbody>
                     {selectedOrder.items.map((item, index) => (
                       <tr key={index}>
-                        <td className="border border-gray-300 px-4 py-2">{item.inventory_item.name}</td>
-                        <td className="border border-gray-300 px-4 py-2 text-center">{item.quantity}</td>
-                        <td className="border border-gray-300 px-4 py-2 text-right">LKR {parseFloat(item.unit_price.toString()).toFixed(2)}</td>
-                        <td className="border border-gray-300 px-4 py-2 text-right">LKR {parseFloat(item.total_price.toString()).toFixed(2)}</td>
+                        <td className="border border-gray-300 px-4 py-2 text-black">{item.inventory_item.name}</td>
+                        <td className="border border-gray-300 px-4 py-2 text-center text-black">{item.quantity}</td>
+                        <td className="border border-gray-300 px-4 py-2 text-right text-black">LKR {parseFloat(item.unit_price.toString()).toFixed(2)}</td>
+                        <td className="border border-gray-300 px-4 py-2 text-right text-black">LKR {parseFloat(item.total_price.toString()).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>
                   <tfoot>
                     <tr className="bg-gray-100">
-                      <td colSpan={3} className="border border-gray-300 px-4 py-2 text-right font-bold">Total Amount:</td>
-                      <td className="border border-gray-300 px-4 py-2 text-right font-bold">LKR {parseFloat(selectedOrder.total_amount.toString()).toFixed(2)}</td>
+                      <td colSpan={3} className="border border-gray-300 px-4 py-2 text-right font-bold text-black">Total Amount:</td>
+                      <td className="border border-gray-300 px-4 py-2 text-right font-bold text-black">LKR {parseFloat(selectedOrder.total_amount.toString()).toFixed(2)}</td>
                     </tr>
                   </tfoot>
                 </table>
@@ -1493,7 +1543,7 @@ export default function PurchaseOrdersPage() {
               {selectedOrder.notes && (
                 <div className="mb-8">
                   <h3 className="font-bold text-gray-800 mb-2">Notes</h3>
-                  <p className="text-gray-600 bg-gray-50 p-3 rounded">{selectedOrder.notes}</p>
+                  <p className="text-black bg-gray-50 p-3 rounded">{selectedOrder.notes}</p>
                 </div>
               )}
 
