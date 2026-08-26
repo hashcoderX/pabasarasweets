@@ -59,7 +59,9 @@ class LoadItemController extends Controller
             }
 
             // Create load item
-            $loadItem = LoadItem::create($request->all());
+            $loadItem = LoadItem::create(array_merge($request->all(), [
+                'loaded_qty' => $request->qty,
+            ]));
 
             // Deduct from inventory
             $inventoryItem->decrement('current_stock', $request->qty);
@@ -133,7 +135,9 @@ class LoadItemController extends Controller
                 }
             }
 
-            $loadItem->update($request->all());
+            $loadItem->update(array_merge($request->all(), [
+                'loaded_qty' => max(0, (float) $loadItem->loaded_qty + ((float) $newQty - (float) $oldQty)),
+            ]));
 
             DB::commit();
 
@@ -218,7 +222,8 @@ class LoadItemController extends Controller
                         'type' => $row[2] ?? '',
                         'out_price' => $row[3] ?? 0,
                         'sell_price' => $row[4] ?? 0,
-                        'qty' => $row[5] ?? 0
+                        'qty' => $row[5] ?? 0,
+                        'loaded_qty' => $row[5] ?? 0
                     ];
 
                     // Validate row data

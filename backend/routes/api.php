@@ -83,6 +83,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('security-settings', [SecuritySettingController::class, 'update']);
     Route::get('backup-settings', [BackupRestoreSettingController::class, 'show']);
     Route::put('backup-settings', [BackupRestoreSettingController::class, 'update']);
+    Route::get('database-backup/download', [\App\Http\Controllers\DatabaseBackupController::class, 'download']);
     Route::post('system/reset', [SystemResetController::class, 'reset']);
 
     // HRM Routes

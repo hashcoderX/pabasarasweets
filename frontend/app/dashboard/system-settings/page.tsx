@@ -51,6 +51,8 @@ export default function SystemSettingsPage() {
   const [companyLogoUrl, setCompanyLogoUrl] = useState('');
   const [logoLoading, setLogoLoading] = useState(false);
   const [logoLoadError, setLogoLoadError] = useState(false);
+  const [backupDownloading, setBackupDownloading] = useState(false);
+  const [lastBackupAt, setLastBackupAt] = useState('');
 
   const API_BASE = '';
 
@@ -205,6 +207,41 @@ export default function SystemSettingsPage() {
     }
   };
 
+  const downloadDatabaseBackup = async () => {
+    try {
+      setBackupDownloading(true);
+      const res = await axios.get('/api/database-backup/download', {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob',
+      });
+
+      const disposition = String(res.headers?.['content-disposition'] || '');
+      const matched = disposition.match(/filename="?([^";]+)"?/i);
+      const fileName =
+        matched?.[1] ||
+        String(res.headers?.['x-backup-filename'] || '') ||
+        `database_backup_${new Date().toISOString().slice(0, 10)}.sql`;
+
+      const blobUrl = window.URL.createObjectURL(new Blob([res.data], { type: 'application/sql' }));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+
+      setLastBackupAt(new Date().toLocaleString());
+    } catch (error: any) {
+      console.error('Error downloading database backup:', error);
+      alert(error?.response?.status === 403
+        ? 'You are not allowed to download database backups.'
+        : 'Failed to generate database backup.');
+    } finally {
+      setBackupDownloading(false);
+    }
+  };
+
   const uptimeMode = systemEnabled ? 'Live' : 'Maintenance';
   const accessHealth = systemEnabled ? 100 : 35;
   const accessHealthLabel = systemEnabled ? 'Healthy' : 'Restricted';
@@ -344,6 +381,37 @@ export default function SystemSettingsPage() {
               Employee login is currently restricted. Only admin-level users can sign in.
             </div>
           )}
+        </section>
+
+        <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-5 md:p-6">
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">Database Backup</h3>
+          <p className="text-sm text-gray-600 mb-4">
+            Generate an on-demand SQL dump of the full database and download it to this device.
+          </p>
+
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4">
+            <div>
+              <p className="text-sm font-medium text-gray-900">Full Database Export (.sql)</p>
+              <p className="text-xs text-gray-500 mt-1">
+                {lastBackupAt
+                  ? `Last downloaded at ${lastBackupAt}.`
+                  : 'Includes table structures and all records. Large databases may take a moment.'}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={downloadDatabaseBackup}
+              disabled={backupDownloading}
+              className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 shadow-lg shadow-emerald-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+            >
+              {backupDownloading ? 'Preparing backup...' : 'Download Backup'}
+            </button>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+            Store downloaded backups securely; they contain complete business and user data.
+          </div>
         </section>
       </main>
 

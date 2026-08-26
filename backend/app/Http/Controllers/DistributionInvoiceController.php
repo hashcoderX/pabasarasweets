@@ -388,6 +388,7 @@ class DistributionInvoiceController extends Controller
                             'out_price' => (float) ($inventoryForDefaults?->purchase_price ?? $inventoryForDefaults?->unit_price ?? $item->unit_price ?? 0),
                             'sell_price' => (float) ($inventoryForDefaults?->sell_price ?? $item->unit_price ?? 0),
                             'qty' => $quantity,
+                            'loaded_qty' => $quantity,
                         ]);
                     }
 

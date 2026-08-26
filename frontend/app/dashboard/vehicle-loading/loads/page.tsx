@@ -84,6 +84,7 @@ interface LoadItem {
   out_price: number;
   sell_price: number;
   qty: number;
+  loaded_qty?: number;
 }
 
 interface LoadDeliverySummary {
@@ -325,8 +326,11 @@ export default function LoadsPage() {
       .map((item) => {
         const code = String(item.product_code || '').trim();
         const sold = soldByCode.get(code);
-        const loadedQty = Number(item.qty || 0);
         const soldQty = Number(sold?.sold_qty || 0);
+        // `qty` is the remaining qty in the vehicle (reduced by invoicing), so fall back to remaining + sold.
+        const loadedQty = item.loaded_qty !== undefined && item.loaded_qty !== null
+          ? Number(item.loaded_qty)
+          : Number(item.qty || 0) + soldQty;
 
         return {
           item_code: code,
