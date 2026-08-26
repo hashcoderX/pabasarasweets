@@ -34,6 +34,7 @@ export default function DistributionCustomersPage() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [assignedRouteId, setAssignedRouteId] = useState('');
+  const [assignedRouteIds, setAssignedRouteIds] = useState<string[]>([]);
   const [selectedRouteFilter, setSelectedRouteFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -59,6 +60,25 @@ export default function DistributionCustomersPage() {
     status: 'active' as 'active' | 'inactive',
   });
   const router = useRouter();
+
+  const getRouteIdsFromLoad = (load: any): string[] => {
+    const ids: string[] = [];
+
+    if (load?.route_id) {
+      ids.push(String(load.route_id));
+    }
+
+    if (Array.isArray(load?.load_routes)) {
+      load.load_routes.forEach((entry: any) => {
+        const routeId = String(entry?.route_id || '').trim();
+        if (routeId) {
+          ids.push(routeId);
+        }
+      });
+    }
+
+    return Array.from(new Set(ids));
+  };
 
   const generateCustomerCode = () => {
     const now = new Date();
@@ -89,7 +109,7 @@ export default function DistributionCustomersPage() {
     if (token) {
       fetchCustomers();
     }
-  }, [token, assignedRouteId, selectedRouteFilter, isAdmin]);
+  }, [token, assignedRouteId, assignedRouteIds, selectedRouteFilter, isAdmin]);
 
   const filteredCustomers = useMemo(() => {
     const q = searchText.trim().toLowerCase();
@@ -153,6 +173,28 @@ export default function DistributionCustomersPage() {
   const rowStart = filteredCustomers.length === 0 ? 0 : (currentPage - 1) * pageSize + 1;
   const rowEnd = Math.min(currentPage * pageSize, filteredCustomers.length);
 
+  const routeFilterOptions = useMemo(() => {
+    if (isAdmin) {
+      return routes;
+    }
+
+    const allowedIds = new Set(
+      assignedRouteIds.length > 0
+        ? assignedRouteIds
+        : (assignedRouteId ? [assignedRouteId] : [])
+    );
+
+    return routes.filter((route) => allowedIds.has(String(route.id)));
+  }, [isAdmin, routes, assignedRouteIds, assignedRouteId]);
+
+  useEffect(() => {
+    if (isAdmin || !selectedRouteFilter) return;
+    const allowedIds = new Set(routeFilterOptions.map((route) => String(route.id)));
+    if (!allowedIds.has(selectedRouteFilter)) {
+      setSelectedRouteFilter('');
+    }
+  }, [isAdmin, selectedRouteFilter, routeFilterOptions]);
+
   const resolveAssignedRoute = async () => {
     const routeFromQuery = typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('route_id')
@@ -176,21 +218,20 @@ export default function DistributionCustomersPage() {
         const cachedAdminRoute = localStorage.getItem('distribution_admin_route_filter') || '';
         const adminRoute = routeFromQuery || cachedAdminRoute;
         setAssignedRouteId('');
+        setAssignedRouteIds([]);
         if (adminRoute) {
           setSelectedRouteFilter(adminRoute);
         }
         return;
       }
 
-      if (routeFromQuery) {
-        setAssignedRouteId(routeFromQuery);
-        localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
-        return;
-      }
+      // For sales ref users, default to all allocated routes unless they manually pick one.
+      setSelectedRouteFilter('');
 
       const cachedRouteId = localStorage.getItem('distribution_assigned_route_id');
       if (cachedRouteId) {
         setAssignedRouteId(cachedRouteId);
+        setAssignedRouteIds([cachedRouteId]);
       }
       if (!employeeId) return;
 
@@ -203,10 +244,20 @@ export default function DistributionCustomersPage() {
         .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(load.status))
         .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime())[0];
 
-      if (assignedLoad?.route_id) {
-        const routeId = String(assignedLoad.route_id);
-        setAssignedRouteId(routeId);
-        localStorage.setItem('distribution_assigned_route_id', routeId);
+      const assignedRouteIdsFromLoad = assignedLoad ? getRouteIdsFromLoad(assignedLoad) : [];
+
+      if (assignedRouteIdsFromLoad.length > 0) {
+        setAssignedRouteId(assignedRouteIdsFromLoad[0]);
+        setAssignedRouteIds(assignedRouteIdsFromLoad);
+        localStorage.setItem('distribution_assigned_route_id', assignedRouteIdsFromLoad[0]);
+      } else if (routeFromQuery) {
+        setAssignedRouteId(routeFromQuery);
+        setAssignedRouteIds([routeFromQuery]);
+        localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
+      } else {
+        setAssignedRouteId('');
+        setAssignedRouteIds([]);
+        localStorage.removeItem('distribution_assigned_route_id');
       }
     } catch (error) {
       console.error('Error resolving assigned route on customers page:', error);
@@ -222,14 +273,22 @@ export default function DistributionCustomersPage() {
       });
 
       const allCustomers: Customer[] = customersRes.data?.data?.data || [];
-      const activeRouteFilter = isAdmin ? selectedRouteFilter : assignedRouteId;
+      const routeFilterId = selectedRouteFilter.trim();
 
-      const filteredCustomers = activeRouteFilter
-        ? allCustomers.filter((customer) => String(customer.route_id || '') === activeRouteFilter)
-        : allCustomers;
+      const baseCustomers = isAdmin
+        ? allCustomers
+        : (assignedRouteIds.length > 0
+          ? allCustomers.filter((customer) => assignedRouteIds.includes(String(customer.route_id || '')))
+          : (assignedRouteId
+            ? allCustomers.filter((customer) => String(customer.route_id || '') === assignedRouteId)
+            : allCustomers));
+
+      const scopedCustomers = routeFilterId
+        ? baseCustomers.filter((customer) => String(customer.route_id || '') === routeFilterId)
+        : baseCustomers;
 
       setCustomers(
-        filteredCustomers.map((customer) => ({
+        scopedCustomers.map((customer) => ({
           ...customer,
           outstanding: Number(customer.outstanding ?? 0),
         }))
@@ -294,11 +353,20 @@ export default function DistributionCustomersPage() {
   };
 
   const routeLabel = useMemo(() => {
+    if (assignedRouteIds.length > 0) {
+      if (assignedRouteIds.length === 1) {
+        const selectedRoute = routes.find((route) => String(route.id) === assignedRouteIds[0]);
+        if (!selectedRoute) return `Route #${assignedRouteIds[0]}`;
+        return `${selectedRoute.name} (${selectedRoute.origin} G�� ${selectedRoute.destination})`;
+      }
+      return `${assignedRouteIds.length} routes allocated`;
+    }
+
     if (!assignedRouteId) return '';
     const selectedRoute = routes.find((route) => String(route.id) === assignedRouteId);
     if (!selectedRoute) return `Route #${assignedRouteId}`;
     return `${selectedRoute.name} (${selectedRoute.origin} G�� ${selectedRoute.destination})`;
-  }, [routes, assignedRouteId]);
+  }, [routes, assignedRouteId, assignedRouteIds]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -415,37 +483,12 @@ export default function DistributionCustomersPage() {
           </div>
         </div>
 
-        {isAdmin && (
-          <div className="mb-4 rounded-2xl border border-white/70 bg-white/90 p-3 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg sm:p-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 items-end">
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Filter By Route</label>
-                <select
-                  value={selectedRouteFilter}
-                  onChange={(e) => setSelectedRouteFilter(e.target.value)}
-                  className="w-full rounded-xl border border-blue-200 bg-gradient-to-b from-white to-blue-50/40 px-3 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-4 focus:ring-blue-100"
-                >
-                  <option value="">All Routes</option>
-                  {routes.map((route) => (
-                    <option key={route.id} value={String(route.id)}>
-                      {route.name} ({route.origin} G�� {route.destination})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="text-xs font-medium text-slate-500 md:text-right">
-                Showing {customers.length} customer(s)
-              </div>
-            </div>
-          </div>
-        )}
-
         <div className="mb-4 rounded-2xl border border-white/70 bg-white/90 p-3 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg sm:p-4">
           <div className="mb-3">
             <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-slate-700">Advanced Search</h2>
             <p className="text-xs text-slate-500">Search by shop/code/contact and filter by status and outstanding amount.</p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-3 sm:gap-4 items-end">
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-3 sm:gap-4 items-end">
             <div className="md:col-span-2">
               <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Search</label>
               <input
@@ -455,6 +498,21 @@ export default function DistributionCustomersPage() {
                 placeholder="Shop, code, owner, phone, address"
                 className="w-full rounded-xl border border-emerald-200 bg-gradient-to-b from-white to-emerald-50/40 px-3 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
               />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Route</label>
+              <select
+                value={selectedRouteFilter}
+                onChange={(e) => setSelectedRouteFilter(e.target.value)}
+                className="w-full rounded-xl border border-cyan-200 bg-gradient-to-b from-white to-cyan-50/40 px-3 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+              >
+                <option value="">{isAdmin ? 'All Routes' : 'All Allocated Routes'}</option>
+                {routeFilterOptions.map((route) => (
+                  <option key={route.id} value={String(route.id)}>
+                    {route.name} ({route.origin} G�� {route.destination})
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Status</label>
@@ -509,6 +567,7 @@ export default function DistributionCustomersPage() {
               type="button"
               onClick={() => {
                 setSearchText('');
+                setSelectedRouteFilter('');
                 setStatusFilter('all');
                 setOutstandingFilter('all');
                 setMinOutstanding('');
@@ -688,7 +747,7 @@ export default function DistributionCustomersPage() {
                   <select
                     value={formData.route_id}
                     onChange={(e) => setFormData({ ...formData, route_id: e.target.value })}
-                    disabled={!!assignedRouteId}
+                    disabled={assignedRouteIds.length > 0 || !!assignedRouteId}
                     className="w-full rounded-xl border border-cyan-200 bg-gradient-to-b from-white to-cyan-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-slate-100"
                   >
                     <option value="">Select Route</option>
@@ -696,8 +755,8 @@ export default function DistributionCustomersPage() {
                       <option key={route.id} value={route.id}>{route.name} ({route.origin} G�� {route.destination})</option>
                     ))}
                   </select>
-                  {assignedRouteId && (
-                    <p className="mt-1 text-xs font-medium text-emerald-700">Route is auto-locked from your allocated load.</p>
+                  {(assignedRouteIds.length > 0 || assignedRouteId) && (
+                    <p className="mt-1 text-xs font-medium text-emerald-700">Route is auto-locked from your allocated load routes.</p>
                   )}
                 </div>
                 <div>

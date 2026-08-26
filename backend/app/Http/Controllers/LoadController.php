@@ -6,6 +6,7 @@ use App\Models\DistributionInvoice;
 use App\Models\DistributionPayment;
 use App\Models\InventoryItem;
 use App\Models\Load;
+use App\Models\LoadRoute;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
@@ -22,7 +23,7 @@ class LoadController extends Controller
     {
         $user = $request->user();
 
-        $query = Load::with(['vehicle', 'driver', 'salesRef', 'route']);
+        $query = Load::with(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route']);
 
         if ($user) {
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
@@ -67,11 +68,22 @@ class LoadController extends Controller
             $payload['total_weight'] = 0;
         }
 
-        $load = Load::create($payload);
+        $load = DB::transaction(function () use ($payload) {
+            $load = Load::create($payload);
+
+            LoadRoute::create([
+                'load_id' => $load->id,
+                'route_id' => (int) $load->route_id,
+                'sequence_no' => 1,
+                'is_primary' => true,
+            ]);
+
+            return $load;
+        });
 
         return response()->json([
             'message' => 'Load created successfully',
-            'load' => $load->load(['vehicle', 'driver', 'salesRef', 'route'])
+            'load' => $load->load(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route'])
         ], 201);
     }
 
@@ -80,7 +92,7 @@ class LoadController extends Controller
      */
     public function show(Load $load): JsonResponse
     {
-        return response()->json($load->load(['vehicle', 'driver', 'salesRef', 'route']));
+        return response()->json($load->load(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route']));
     }
 
     /**
@@ -109,11 +121,118 @@ class LoadController extends Controller
         }
 
         $payload = $validator->validated();
-        $load->update($payload);
+
+        DB::transaction(function () use ($load, $payload) {
+            $load->update($payload);
+
+            $primary = LoadRoute::where('load_id', $load->id)
+                ->where('is_primary', true)
+                ->first();
+
+            if ($primary) {
+                $primary->update([
+                    'route_id' => (int) $load->route_id,
+                    'sequence_no' => 1,
+                ]);
+            } else {
+                LoadRoute::firstOrCreate(
+                    [
+                        'load_id' => $load->id,
+                        'route_id' => (int) $load->route_id,
+                    ],
+                    [
+                        'sequence_no' => 1,
+                        'is_primary' => true,
+                    ]
+                );
+            }
+        });
 
         return response()->json([
             'message' => 'Load updated successfully',
-            'load' => $load->load(['vehicle', 'driver', 'salesRef', 'route'])
+            'load' => $load->load(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route'])
+        ]);
+    }
+
+    public function addRoute(Request $request, Load $load): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'route_id' => 'required|exists:routes,id',
+            'sequence_no' => 'nullable|integer|min:2',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $routeId = (int) $request->input('route_id');
+
+        if (LoadRoute::where('load_id', $load->id)->where('route_id', $routeId)->exists()) {
+            return response()->json([
+                'message' => 'This route is already assigned to the load.',
+            ], 422);
+        }
+
+        $maxSequence = (int) LoadRoute::where('load_id', $load->id)->max('sequence_no');
+        $nextSequence = $maxSequence > 0 ? $maxSequence + 1 : 2;
+        $sequenceNo = (int) ($request->input('sequence_no') ?: $nextSequence);
+
+        $entry = LoadRoute::create([
+            'load_id' => $load->id,
+            'route_id' => $routeId,
+            'sequence_no' => $sequenceNo,
+            'is_primary' => false,
+        ]);
+
+        return response()->json([
+            'message' => 'Additional route added successfully',
+            'route' => $entry->load('route'),
+            'load' => $load->fresh()->load(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route']),
+        ], 201);
+    }
+
+    public function removeRoute(Load $load, LoadRoute $loadRoute): JsonResponse
+    {
+        if ((int) $loadRoute->load_id !== (int) $load->id) {
+            return response()->json([
+                'message' => 'Invalid route assignment for this load.',
+            ], 422);
+        }
+
+        if ((bool) $loadRoute->is_primary === true || (int) $loadRoute->sequence_no === 1) {
+            return response()->json([
+                'message' => 'Primary route cannot be removed from load.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($load, $loadRoute) {
+            $loadRoute->delete();
+
+            $entries = LoadRoute::where('load_id', $load->id)
+                ->orderBy('sequence_no')
+                ->orderBy('id')
+                ->get();
+
+            $nextSequence = 1;
+            foreach ($entries as $entry) {
+                $isPrimary = (bool) $entry->is_primary;
+                if ($isPrimary) {
+                    $entry->update(['sequence_no' => 1]);
+                    $nextSequence = 2;
+                    continue;
+                }
+
+                $entry->update(['sequence_no' => $nextSequence]);
+                $nextSequence++;
+            }
+        });
+
+        return response()->json([
+            'message' => 'Additional route removed successfully',
+            'load' => $load->fresh()->load(['vehicle', 'driver', 'salesRef', 'route', 'loadRoutes.route']),
         ]);
     }
 
@@ -134,10 +253,15 @@ class LoadController extends Controller
         $fromDate = $load->load_date;
         $toDate = $load->delivery_date ?? now();
 
+        $routeIds = $load->loadRoutes()->pluck('route_id')->values()->all();
+        if (empty($routeIds)) {
+            $routeIds = [$load->route_id];
+        }
+
         $invoices = DistributionInvoice::with(['customer:id,shop_name,customer_code,route_id', 'items'])
             ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->whereHas('customer', function ($q) use ($load) {
-                $q->where('route_id', $load->route_id);
+            ->whereHas('customer', function ($q) use ($routeIds) {
+                $q->whereIn('route_id', $routeIds);
             })
             ->get(['id', 'invoice_number', 'customer_id', 'invoice_date', 'total', 'status', 'paid_amount']);
 

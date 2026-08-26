@@ -236,6 +236,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('vehicle-loading/vehicles', \App\Http\Controllers\VehicleController::class);
     Route::apiResource('vehicle-loading/routes', \App\Http\Controllers\RouteController::class);
     Route::apiResource('vehicle-loading/loads', LoadController::class);
+    Route::post('vehicle-loading/loads/{load}/routes', [LoadController::class, 'addRoute']);
+    Route::delete('vehicle-loading/loads/{load}/routes/{loadRoute}', [LoadController::class, 'removeRoute']);
     Route::post('vehicle-loading/loads/{load}/complete', [LoadController::class, 'complete']);
     Route::get('vehicle-loading/loads/{load}/delivery-summary', [LoadController::class, 'deliverySummary']);
     Route::get('vehicle-loading/loads/{load}/expenses', [LoadExpenseController::class, 'index']);

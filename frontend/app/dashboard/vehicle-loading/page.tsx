@@ -15,6 +15,15 @@ interface LoadItem {
   sell_price: number;
 }
 
+interface DistributionInvoiceItem {
+  item_code?: string;
+  quantity?: number;
+}
+
+interface DistributionInvoiceRecord {
+  items?: DistributionInvoiceItem[];
+}
+
 export default function VehicleLoading() {
   const [token, setToken] = useState('');
   const [activeLoads, setActiveLoads] = useState(0);
@@ -31,6 +40,7 @@ export default function VehicleLoading() {
   const [modalLoading, setModalLoading] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<any | null>(null);
   const [selectedLoadItems, setSelectedLoadItems] = useState<LoadItem[]>([]);
+  const [soldQtyByCode, setSoldQtyByCode] = useState<Record<string, number>>({});
   const router = useRouter();
 
   useEffect(() => {
@@ -103,16 +113,37 @@ export default function VehicleLoading() {
       setModalLoading(true);
       setSelectedLoad(load);
       setSelectedLoadItems([]);
+      setSoldQtyByCode({});
 
-      const response = await axios.get('/api/vehicle-loading/load-items', {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { load_id: load.id }
+      const [itemsResponse, invoicesResponse] = await Promise.all([
+        axios.get('/api/vehicle-loading/load-items', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { load_id: load.id }
+        }),
+        axios.get('/api/distribution/invoices', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { load_id: load.id, per_page: 1000 }
+        }).catch(() => null),
+      ]);
+
+      const items = Array.isArray(itemsResponse.data) ? itemsResponse.data : [];
+      setSelectedLoadItems(items);
+
+      const soldByCode: Record<string, number> = {};
+      const invoiceRows: DistributionInvoiceRecord[] = invoicesResponse?.data?.data?.data || [];
+      invoiceRows.forEach((invoice) => {
+        const invoiceItems = Array.isArray(invoice?.items) ? invoice.items : [];
+        invoiceItems.forEach((line) => {
+          const code = String(line?.item_code || '').trim();
+          if (!code) return;
+          soldByCode[code] = Number(soldByCode[code] || 0) + Number(line?.quantity || 0);
+        });
       });
-
-      setSelectedLoadItems(Array.isArray(response.data) ? response.data : []);
+      setSoldQtyByCode(soldByCode);
     } catch (error) {
       console.error('Error fetching load items:', error);
       setSelectedLoadItems([]);
+      setSoldQtyByCode({});
     } finally {
       setModalLoading(false);
     }
@@ -325,6 +356,7 @@ export default function VehicleLoading() {
                   setShowLoadItemsModal(false);
                   setSelectedLoad(null);
                   setSelectedLoadItems([]);
+                  setSoldQtyByCode({});
                 }}
                 className="text-gray-500 hover:text-gray-700"
               >
@@ -369,27 +401,36 @@ export default function VehicleLoading() {
                       <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product Code</th>
                       <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item Name</th>
                       <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Loaded Qty</th>
                       <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Available Qty In Vehicle</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {modalLoading ? (
                       <tr>
-                        <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">Loading item list...</td>
+                        <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">Loading item list...</td>
                       </tr>
                     ) : selectedLoadItems.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">No items available for this vehicle load.</td>
+                        <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">No items available for this vehicle load.</td>
                       </tr>
                     ) : (
-                      selectedLoadItems.map((item) => (
-                        <tr key={item.id}>
-                          <td className="px-4 py-2 text-sm text-gray-700">{item.product_code}</td>
-                          <td className="px-4 py-2 text-sm text-gray-700">{item.name}</td>
-                          <td className="px-4 py-2 text-sm text-gray-700">{item.type.replace('_', ' ')}</td>
-                          <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{Number(item.qty).toFixed(2)}</td>
-                        </tr>
-                      ))
+                      selectedLoadItems.map((item) => {
+                        const code = String(item.product_code || '').trim();
+                        const availableQty = Number(item.qty || 0);
+                        const soldQty = Number(soldQtyByCode[code] || 0);
+                        const loadedQtyBefore = availableQty + soldQty;
+
+                        return (
+                          <tr key={item.id}>
+                            <td className="px-4 py-2 text-sm text-gray-700">{item.product_code}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700">{item.name}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700">{item.type.replace('_', ' ')}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{loadedQtyBefore.toFixed(2)}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{availableQty.toFixed(2)}</td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

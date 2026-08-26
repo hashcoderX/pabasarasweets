@@ -24,7 +24,16 @@ interface Route {
   name: string;
   origin: string;
   destination: string;
-  distance_km: number;
+  distance_km?: number;
+}
+
+interface LoadRouteEntry {
+  id: number;
+  load_id: number;
+  route_id: number;
+  sequence_no: number;
+  is_primary: boolean;
+  route?: Route;
 }
 
 interface Load {
@@ -40,6 +49,7 @@ interface Load {
   delivery_date: string | null;
   total_weight: number;
   notes: string;
+  load_routes?: LoadRouteEntry[];
   vehicle?: {
     id: number;
     registration_number: string;
@@ -242,6 +252,7 @@ export default function LoadsPage() {
   const [loads, setLoads] = useState<Load[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [showAddRouteModal, setShowAddRouteModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsMode, setDetailsMode] = useState<'view' | 'complete'>('view');
@@ -259,6 +270,11 @@ export default function LoadsPage() {
   const [confirmAction, setConfirmAction] = useState<{ type: 'delete'; load: Load } | null>(null);
   const [completeDecisionOpen, setCompleteDecisionOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [routeAssigning, setRouteAssigning] = useState(false);
+  const [routeRemovingId, setRouteRemovingId] = useState<number | null>(null);
+  const [routeAssignError, setRouteAssignError] = useState('');
+  const [routeAssignLoad, setRouteAssignLoad] = useState<Load | null>(null);
+  const [additionalRouteId, setAdditionalRouteId] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | Load['status']>('all');
   const [currentPage, setCurrentPage] = useState(1);
@@ -560,7 +576,7 @@ export default function LoadsPage() {
         sales_ref_id: formData.sales_ref_id ? parseInt(formData.sales_ref_id) : null,
         route_id: parseInt(formData.route_id),
         load_date: formData.load_date,
-        notes: formData.notes
+        notes: formData.notes ?? ''
       };
 
       if (editingLoad) {
@@ -626,7 +642,7 @@ export default function LoadsPage() {
       sales_ref_id: load.sales_ref_id ? load.sales_ref_id.toString() : '',
       route_id: load.route_id.toString(),
       load_date: load.load_date,
-      notes: load.notes
+      notes: load.notes ?? ''
     });
     setShowModal(true);
   };
@@ -1046,6 +1062,127 @@ export default function LoadsPage() {
     }
   };
 
+  const getOrderedRoutesForLoad = (load: Load): LoadRouteEntry[] => {
+    const routeRows = Array.isArray(load.load_routes) ? [...load.load_routes] : [];
+    if (routeRows.length > 0) {
+      return routeRows.sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0));
+    }
+
+    if (load.route) {
+      return [{
+        id: 0,
+        load_id: load.id,
+        route_id: load.route_id,
+        sequence_no: 1,
+        is_primary: true,
+        route: load.route,
+      }];
+    }
+
+    return [];
+  };
+
+  const getRouteDisplayLabel = (load: Load) => {
+    const ordered = getOrderedRoutesForLoad(load);
+    if (ordered.length === 0) return '-';
+    const first = ordered[0];
+    const firstName = first.route?.name || load.route?.name || '-';
+    if (ordered.length <= 1) return firstName;
+    return `${firstName} (+${ordered.length - 1} more)`;
+  };
+
+  const applyUpdatedLoadState = (updatedLoad: Load) => {
+    if (!updatedLoad?.id) return;
+
+    setLoads((prev) => prev.map((row) => (row.id === updatedLoad.id ? updatedLoad : row)));
+
+    if (editingLoad && editingLoad.id === updatedLoad.id) {
+      setEditingLoad(updatedLoad);
+    }
+
+    if (routeAssignLoad && routeAssignLoad.id === updatedLoad.id) {
+      setRouteAssignLoad(updatedLoad);
+    }
+
+    if (selectedLoadDetails && selectedLoadDetails.id === updatedLoad.id) {
+      setSelectedLoadDetails(updatedLoad);
+    }
+  };
+
+  const openAddRouteModal = (load: Load) => {
+    setRouteAssignLoad(load);
+    setAdditionalRouteId('');
+    setRouteAssignError('');
+    setShowAddRouteModal(true);
+  };
+
+  const handleAssignAdditionalRoute = async () => {
+    if (!routeAssignLoad) return;
+    if (!additionalRouteId) {
+      setRouteAssignError('Please select a route.');
+      return;
+    }
+
+    try {
+      setRouteAssigning(true);
+      setRouteAssignError('');
+
+      const response = await axios.post(`/api/vehicle-loading/loads/${routeAssignLoad.id}/routes`, {
+        route_id: Number(additionalRouteId),
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const updatedLoad = (response?.data?.load || null) as Load | null;
+      if (updatedLoad) {
+        applyUpdatedLoadState(updatedLoad);
+      } else {
+        await fetchLoads();
+      }
+
+      setShowAddRouteModal(false);
+      setRouteAssignLoad(null);
+      setAdditionalRouteId('');
+      setRouteAssignError('');
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to add additional route.';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      setRouteAssignError(firstError?.[0] || apiMessage);
+    } finally {
+      setRouteAssigning(false);
+    }
+  };
+
+  const handleRemoveAdditionalRoute = async (load: Load, routeEntry: LoadRouteEntry) => {
+    if (!routeEntry?.id || routeEntry.is_primary) return;
+
+    try {
+      setRouteRemovingId(routeEntry.id);
+      setRouteAssignError('');
+
+      const response = await axios.delete(`/api/vehicle-loading/loads/${load.id}/routes/${routeEntry.id}`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      const updatedLoad = (response?.data?.load || null) as Load | null;
+      if (updatedLoad) {
+        applyUpdatedLoadState(updatedLoad);
+      } else {
+        await fetchLoads();
+      }
+    } catch (error: any) {
+      const apiMessage = error?.response?.data?.message || 'Failed to remove route.';
+      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
+      setRouteAssignError(firstError?.[0] || apiMessage);
+    } finally {
+      setRouteRemovingId(null);
+    }
+  };
+
   const modalInputClass = 'w-full rounded-xl border border-emerald-200/80 bg-white/90 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 transition focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100';
   const modalInputReadonlyClass = 'w-full rounded-xl border border-slate-200 bg-slate-100 px-3.5 py-2.5 text-sm text-slate-600 shadow-sm cursor-not-allowed';
   const modalSectionClass = 'rounded-2xl border border-white/70 bg-gradient-to-br from-white to-emerald-50/45 p-4 shadow-sm';
@@ -1203,7 +1340,7 @@ export default function LoadsPage() {
                     {load.driver?.name || '-'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
-                    {load.route?.name || '-'}
+                    {getRouteDisplayLabel(load)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase ${getStatusColor(load)}`}>
@@ -1241,6 +1378,12 @@ export default function LoadsPage() {
                       className="text-indigo-600 hover:text-indigo-900 mr-4"
                     >
                       Edit
+                    </button>
+                    <button
+                      onClick={() => openAddRouteModal(load)}
+                      className="text-violet-600 hover:text-violet-900 mr-4"
+                    >
+                      Add Route
                     </button>
                     <button
                       onClick={() => setConfirmAction({ type: 'delete', load })}
@@ -1410,6 +1553,15 @@ export default function LoadsPage() {
                       <p className="text-sm font-semibold text-slate-900">
                         {selectedLoadDetails.route?.name || '-'} ({selectedLoadDetails.route?.origin || '-'} → {selectedLoadDetails.route?.destination || '-'})
                       </p>
+                      {getOrderedRoutesForLoad(selectedLoadDetails).length > 1 && (
+                        <div className="mt-2 space-y-1 text-xs text-slate-600">
+                          {getOrderedRoutesForLoad(selectedLoadDetails).map((entry) => (
+                            <div key={`${selectedLoadDetails.id}-route-${entry.id || entry.sequence_no}`}>
+                              Stop {entry.sequence_no}: {entry.route?.name || '-'} ({entry.route?.origin || '-'} → {entry.route?.destination || '-'})
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -2253,6 +2405,49 @@ export default function LoadsPage() {
                       </select>
                     </div>
                   </div>
+
+                  {editingLoad && (
+                    <div className="mt-5 rounded-xl border border-violet-100 bg-violet-50/60 p-4">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">Assigned Route Sequence</p>
+                          <p className="text-xs text-violet-700/90">Primary route is locked. You can remove only added routes.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => openAddRouteModal(editingLoad)}
+                          className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-700"
+                        >
+                          Add Next Route
+                        </button>
+                      </div>
+
+                      <div className="mt-3 space-y-2">
+                        {getOrderedRoutesForLoad(editingLoad).map((entry) => (
+                          <div
+                            key={`edit-load-route-${entry.id || entry.sequence_no}`}
+                            className="flex flex-col gap-2 rounded-lg border border-violet-100 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                          >
+                            <div className="text-xs text-slate-700">
+                              <span className="font-semibold text-violet-700">Stop {entry.sequence_no}:</span>{' '}
+                              {entry.route?.name || '-'} ({entry.route?.origin || '-'} to {entry.route?.destination || '-'})
+                              {entry.is_primary ? ' [Primary]' : ''}
+                            </div>
+                            {!entry.is_primary && Boolean(entry.id) && (
+                              <button
+                                type="button"
+                                disabled={routeRemovingId === entry.id}
+                                onClick={() => handleRemoveAdditionalRoute(editingLoad, entry)}
+                                className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-60"
+                              >
+                                {routeRemovingId === entry.id ? 'Removing...' : 'Remove'}
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Additional Information */}
@@ -2261,7 +2456,7 @@ export default function LoadsPage() {
                   <div>
                     <label className={modalLabelClass}>Notes</label>
                     <textarea
-                      value={formData.notes}
+                      value={formData.notes ?? ''}
                       onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                       rows={4}
                       className={modalInputClass}
@@ -2290,6 +2485,93 @@ export default function LoadsPage() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAddRouteModal && routeAssignLoad && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
+          <div className="mx-auto w-full max-w-lg">
+            <div className="overflow-hidden rounded-[28px] border border-white/70 bg-white/95 shadow-[0_30px_120px_-50px_rgba(139,92,246,0.55)] backdrop-blur-xl">
+              <div className="flex items-start justify-between border-b border-white/70 bg-gradient-to-r from-violet-600 via-purple-600 to-fuchsia-600 px-6 py-5 text-white">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-violet-100">Multi Route</p>
+                  <h3 className="mt-1 text-xl font-bold">Add Additional Route</h3>
+                  <p className="mt-1 text-sm text-violet-50/90">Load: {routeAssignLoad.load_number}</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowAddRouteModal(false);
+                    setRouteAssignLoad(null);
+                    setAdditionalRouteId('');
+                    setRouteAssignError('');
+                  }}
+                  className="rounded-full border border-white/40 bg-white/20 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-white/30"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="space-y-4 p-6">
+                <div>
+                  <label className={modalLabelClass}>Select Next Route</label>
+                  <select
+                    value={additionalRouteId}
+                    onChange={(e) => setAdditionalRouteId(e.target.value)}
+                    className={modalInputClass}
+                  >
+                    <option value="">Select Route</option>
+                    {routes
+                      .filter((route) => !getOrderedRoutesForLoad(routeAssignLoad).some((assigned) => Number(assigned.route_id) === Number(route.id)))
+                      .map((route) => (
+                        <option key={route.id} value={route.id.toString()}>
+                          {route.name} - {route.origin} to {route.destination}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <div className="rounded-xl border border-violet-100 bg-violet-50/70 p-3 text-xs text-violet-800">
+                  Existing route sequence:
+                  <div className="mt-1 space-y-1">
+                    {getOrderedRoutesForLoad(routeAssignLoad).map((entry) => (
+                      <div key={`assigned-${entry.id || entry.sequence_no}`}>
+                        Stop {entry.sequence_no}: {entry.route?.name || '-'}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {routeAssignError && (
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+                    {routeAssignError}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-3 border-t border-slate-200/80 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddRouteModal(false);
+                      setRouteAssignLoad(null);
+                      setAdditionalRouteId('');
+                      setRouteAssignError('');
+                    }}
+                    className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={routeAssigning}
+                    onClick={handleAssignAdditionalRoute}
+                    className="rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-200/70 transition hover:from-violet-700 hover:to-purple-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {routeAssigning ? 'Adding...' : 'Add Route'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

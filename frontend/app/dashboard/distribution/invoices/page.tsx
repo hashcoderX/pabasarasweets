@@ -211,6 +211,7 @@ export default function DistributionInvoicesPage() {
   const [companyProfileWebsite, setCompanyProfileWebsite] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [assignedRouteId, setAssignedRouteId] = useState('');
+  const [assignedRouteIds, setAssignedRouteIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showModal, setShowModal] = useState(false);
@@ -304,6 +305,25 @@ export default function DistributionInvoicesPage() {
 
   const router = useRouter();
   const createLineId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+  const getRouteIdsFromLoad = (load: any): string[] => {
+    const ids: string[] = [];
+
+    if (load?.route_id) {
+      ids.push(String(load.route_id));
+    }
+
+    if (Array.isArray(load?.load_routes)) {
+      load.load_routes.forEach((entry: any) => {
+        const routeId = String(entry?.route_id || '').trim();
+        if (routeId) {
+          ids.push(routeId);
+        }
+      });
+    }
+
+    return Array.from(new Set(ids));
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -476,6 +496,7 @@ export default function DistributionInvoicesPage() {
 
     if (routeFromQuery) {
       setAssignedRouteId(routeFromQuery);
+      setAssignedRouteIds([routeFromQuery]);
       localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
     }
 
@@ -488,6 +509,7 @@ export default function DistributionInvoicesPage() {
     const cachedLoadId = localStorage.getItem('distribution_active_load_id');
     if (cachedRouteId) {
       setAssignedRouteId(cachedRouteId);
+      setAssignedRouteIds([cachedRouteId]);
     }
     if (cachedLoadId) {
       setActiveLoadId(cachedLoadId);
@@ -524,6 +546,7 @@ export default function DistributionInvoicesPage() {
         const cachedAdminLoadFilter = localStorage.getItem('distribution_admin_invoice_load_filter') || '';
         const adminLoad = loadFromQuery || cachedAdminLoadFilter;
         setAssignedRouteId('');
+        setAssignedRouteIds([]);
         setActiveLoadId('');
         if (adminLoad) {
           setSelectedLoadFilter(adminLoad);
@@ -531,7 +554,33 @@ export default function DistributionInvoicesPage() {
         return;
       }
 
-      if (routeFromQuery || loadFromQuery) {
+      if (loadFromQuery) {
+        const matchedLoad = loads.find((load: any) => String(load?.id || '') === String(loadFromQuery));
+        const routeIds = matchedLoad ? getRouteIdsFromLoad(matchedLoad) : [];
+
+        setActiveLoadId(String(loadFromQuery));
+        localStorage.setItem('distribution_active_load_id', String(loadFromQuery));
+
+        if (routeIds.length > 0) {
+          setAssignedRouteId(routeIds[0]);
+          setAssignedRouteIds(routeIds);
+          localStorage.setItem('distribution_assigned_route_id', routeIds[0]);
+        } else if (routeFromQuery) {
+          setAssignedRouteId(routeFromQuery);
+          setAssignedRouteIds([routeFromQuery]);
+          localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
+        } else {
+          setAssignedRouteId('');
+          setAssignedRouteIds([]);
+          localStorage.removeItem('distribution_assigned_route_id');
+        }
+        return;
+      }
+
+      if (routeFromQuery) {
+        setAssignedRouteId(routeFromQuery);
+        setAssignedRouteIds([routeFromQuery]);
+        localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
         return;
       }
 
@@ -550,12 +599,15 @@ export default function DistributionInvoicesPage() {
         localStorage.removeItem('distribution_active_load_id');
       }
 
-      if (assignedLoad?.route_id) {
-        const routeId = String(assignedLoad.route_id);
-        setAssignedRouteId(routeId);
-        localStorage.setItem('distribution_assigned_route_id', routeId);
+      const assignedRouteIdsFromLoad = assignedLoad ? getRouteIdsFromLoad(assignedLoad) : [];
+
+      if (assignedRouteIdsFromLoad.length > 0) {
+        setAssignedRouteId(assignedRouteIdsFromLoad[0]);
+        setAssignedRouteIds(assignedRouteIdsFromLoad);
+        localStorage.setItem('distribution_assigned_route_id', assignedRouteIdsFromLoad[0]);
       } else if (!routeFromQuery) {
         setAssignedRouteId('');
+        setAssignedRouteIds([]);
         localStorage.removeItem('distribution_assigned_route_id');
       }
     } catch (error) {
@@ -1163,14 +1215,15 @@ export default function DistributionInvoicesPage() {
     );
   };
   const scopedCustomers = useMemo(() => {
-    if (!assignedRouteId) return customers;
-    const matched = customers.filter((customer) => String(customer.route_id || '') === assignedRouteId);
+    if (assignedRouteIds.length === 0) return customers;
+    const routeIdSet = new Set(assignedRouteIds);
+    const matched = customers.filter((customer) => routeIdSet.has(String(customer.route_id || '')));
     // If there is no active load and cached route is stale, avoid blocking shop selection.
     if (matched.length === 0 && !activeLoadId) {
       return customers;
     }
     return matched;
-  }, [customers, assignedRouteId, activeLoadId]);
+  }, [customers, assignedRouteIds, activeLoadId]);
 
   const selectedCustomer = useMemo(
     () => scopedCustomers.find((customer) => customer.id === Number(customerId)) || null,
@@ -1202,9 +1255,9 @@ export default function DistributionInvoicesPage() {
   }, [customers]);
 
   const scopedInvoices = useMemo(() => {
-    if (!assignedRouteId) return invoices;
+    if (assignedRouteIds.length === 0) return invoices;
     return invoices.filter((invoice) => scopedCustomerIdSet.has(invoice.customer_id));
-  }, [invoices, scopedCustomerIdSet, assignedRouteId]);
+  }, [invoices, scopedCustomerIdSet, assignedRouteIds]);
 
   const effectiveLoadFilter = useMemo(
     () => (isAdmin ? selectedLoadFilter : activeLoadId),
@@ -1687,7 +1740,7 @@ export default function DistributionInvoicesPage() {
   const openCreate = () => {
     setEditingInvoiceId(null);
     resetInvoiceForm();
-    if (assignedRouteId && scopedCustomers.length === 1) {
+    if (assignedRouteIds.length > 0 && scopedCustomers.length === 1) {
       setCustomerId(String(scopedCustomers[0].id));
       const onlyCustomer = scopedCustomers[0];
       setCustomerPickerSearch(`${onlyCustomer.shop_name} (${onlyCustomer.customer_code})`);
@@ -1787,7 +1840,7 @@ export default function DistributionInvoicesPage() {
       return;
     }
 
-    if (assignedRouteId && !scopedCustomers.some((customer) => customer.id === Number(customerId))) {
+    if (assignedRouteIds.length > 0 && !scopedCustomers.some((customer) => customer.id === Number(customerId))) {
       setQtyWarningMessage('Selected customer is not in your allocated route.');
       setQtyWarningOpen(true);
       return;
@@ -2407,7 +2460,7 @@ export default function DistributionInvoicesPage() {
             <p className="mt-2 text-sm sm:text-base md:text-lg text-gray-600">
               Create and track distribution invoices.
             </p>
-            {assignedRouteId && (
+            {assignedRouteIds.length > 0 && (
               <p className="mt-1 text-sm text-green-700 font-medium">Auto route filter enabled from allocated load.</p>
             )}
           </div>
@@ -2727,7 +2780,7 @@ export default function DistributionInvoicesPage() {
                     </div>
                     <div className="flex items-center gap-2 text-xs text-slate-600">
                       <span className="inline-flex h-2 w-2 rounded-full bg-green-500"></span>
-                      <span>{assignedRouteId ? 'Auto route filter active' : 'No route filter'}</span>
+                      <span>{assignedRouteIds.length > 0 ? `Auto route filter active (${assignedRouteIds.length} route${assignedRouteIds.length > 1 ? 's' : ''})` : 'No route filter'}</span>
                     </div>
                   </div>
 
@@ -4691,7 +4744,18 @@ export default function DistributionInvoicesPage() {
             padding: 0 !important;
             width: 80mm !important;
             height: auto !important;
+            min-height: auto !important;
             overflow: visible !important;
+            background: #fff !important;
+          }
+
+          .distribution-invoices-page {
+            min-height: auto !important;
+            height: auto !important;
+            overflow: visible !important;
+            background: #fff !important;
+            margin: 0 !important;
+            padding: 0 !important;
           }
 
           .distribution-invoices-page > * {
@@ -4710,6 +4774,8 @@ export default function DistributionInvoicesPage() {
             padding: 0 !important;
             page-break-inside: avoid !important;
             break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
           }
 
           .pos-print-area * {

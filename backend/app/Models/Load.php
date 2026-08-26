@@ -44,6 +44,11 @@ class Load extends Model
         return $this->belongsTo(Route::class);
     }
 
+    public function loadRoutes(): HasMany
+    {
+        return $this->hasMany(\App\Models\LoadRoute::class)->orderBy('sequence_no');
+    }
+
     public function salesRef(): BelongsTo
     {
         return $this->belongsTo(Employee::class, 'sales_ref_id');
