@@ -22,6 +22,8 @@ class AttendanceController extends Controller
         $branchId = $request->input('branch_id');
         $month = $request->input('month'); // YYYY-MM
         $date = $request->input('date'); // YYYY-MM-DD
+        $requestedPerPage = (int) $request->input('per_page', $date ? 1000 : 15);
+        $perPage = max(1, min($requestedPerPage, 5000));
 
         $query = Attendance::with('employee');
 
@@ -41,7 +43,7 @@ class AttendanceController extends Controller
             $query->where('date', $date);
         }
 
-        $attendance = $query->paginate(15);
+        $attendance = $query->orderBy('date', 'desc')->paginate($perPage);
 
         return response()->json($attendance);
     }

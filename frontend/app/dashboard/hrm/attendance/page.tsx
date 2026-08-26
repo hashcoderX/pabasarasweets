@@ -108,11 +108,17 @@ export default function AttendancePage() {
     if (!tokenToUse) return;
     try {
       const dateToLoad = targetDate || selectedAttendanceDate;
-      const response = await axios.get(`/api/hr/attendance?date=${dateToLoad}`, {
+      const response = await axios.get(`/api/hr/attendance?date=${dateToLoad}&per_page=1000`, {
         headers: { Authorization: `Bearer ${tokenToUse}` },
       });
       const attendanceMap: {[key: number]: AttendanceRecord} = {};
-      response.data.data.forEach((record: AttendanceRecord) => {
+      const rows: AttendanceRecord[] = Array.isArray(response.data?.data)
+        ? response.data.data
+        : Array.isArray(response.data)
+          ? response.data
+          : [];
+
+      rows.forEach((record: AttendanceRecord) => {
         attendanceMap[record.employee_id] = record;
       });
       setTodayAttendance(attendanceMap);
