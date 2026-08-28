@@ -56,6 +56,7 @@ interface InvoiceRecord {
   subtotal?: number;
   discount?: number;
   total: number;
+  paid_amount?: number;
   status: string;
   items: InvoiceItem[];
   notes?: string | null;
@@ -2620,6 +2621,7 @@ export default function DistributionInvoicesPage() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice Date</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Outstanding</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
@@ -2627,7 +2629,7 @@ export default function DistributionInvoicesPage() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredInvoices.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</td>
+                    <td colSpan={7} className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</td>
                   </tr>
                 ) : (
                   pagedInvoices.map((invoice) => (
@@ -2636,6 +2638,7 @@ export default function DistributionInvoicesPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{invoice.customer?.shop_name || '-'}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{new Date(invoice.invoice_date).toLocaleDateString()}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 text-right">{Number(invoice.total).toFixed(2)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-right text-amber-700">{getInvoiceDueBalance(invoice).toFixed(2)}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{invoice.status}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                         <div className="flex justify-end gap-2">
@@ -2684,6 +2687,7 @@ export default function DistributionInvoicesPage() {
                 <p className="text-sm text-gray-700">{invoice.customer?.shop_name || '-'}</p>
                 <p className="text-xs text-gray-500">{new Date(invoice.invoice_date).toLocaleDateString()}</p>
                 <p className="text-sm font-medium text-gray-900">Total: {Number(invoice.total).toFixed(2)}</p>
+                <p className="text-sm font-semibold text-amber-700">Outstanding: {getInvoiceDueBalance(invoice).toFixed(2)}</p>
                 <div className="pt-1 flex flex-col sm:flex-row gap-2">
                   <button
                     onClick={() => startEditInvoice(invoice)}
@@ -4644,6 +4648,14 @@ export default function DistributionInvoicesPage() {
                     <span>Total</span>
                     <span>{total.toFixed(2)}</span>
                   </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Paid</span>
+                    <span>{Number((posPrintInvoice as any).paid_amount ?? 0).toFixed(2)}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
+                    <span>Outstanding</span>
+                    <span>{getInvoiceDueBalance(posPrintInvoice).toFixed(2)}</span>
+                  </div>
                 </div>
               );
             })()}
@@ -4764,7 +4776,7 @@ export default function DistributionInvoicesPage() {
 
           .pos-print-area {
             display: block !important;
-            position: static !important;
+            position: absolute !important;
             left: 0 !important;
             top: 0 !important;
             width: 80mm !important;
@@ -4772,8 +4784,17 @@ export default function DistributionInvoicesPage() {
             max-width: 80mm !important;
             margin: 0 !important;
             padding: 0 !important;
+            height: auto !important;
+            overflow: visible !important;
             page-break-inside: avoid !important;
             break-inside: avoid !important;
+            page-break-after: avoid !important;
+            break-after: avoid !important;
+          }
+
+          .pos-print-area > div {
+            height: auto !important;
+            overflow: visible !important;
             page-break-after: avoid !important;
             break-after: avoid !important;
           }

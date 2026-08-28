@@ -221,7 +221,8 @@ export default function LoadItemsPage() {
           Authorization: `Bearer ${token}`,
         },
       });
-      setLoads(Array.isArray(response.data) ? response.data : (response.data.data || []));
+      const fetchedLoads: Load[] = Array.isArray(response.data) ? response.data : (response.data.data || []);
+      setLoads(fetchedLoads.sort((first, second) => second.id - first.id));
     } catch (error) {
       console.error('Error fetching loads:', error);
       setLoads([]);

@@ -33,7 +33,7 @@ class LoadController extends Controller
             }
         }
 
-        $loads = $query->get();
+        $loads = $query->orderByDesc('id')->get();
 
         return response()->json($loads);
     }

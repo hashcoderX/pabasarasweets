@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import axios from '@/lib/http';
+import { createApiClient } from '@/lib/apiClient';
 
 type ReportItem = {
   name: string;
@@ -27,7 +27,10 @@ export default function ReportsPage() {
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [reportPermission, setReportPermission] = useState(false);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
   const router = useRouter();
+  const apiClient = createApiClient();
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -44,7 +47,7 @@ export default function ReportsPage() {
 
     const fetchAccessProfile = async () => {
       try {
-        const userRes = await axios.get('/api/user', {
+        const userRes = await apiClient.get('/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -87,6 +90,16 @@ export default function ReportsPage() {
         setIsAdminUser(adminUser);
         setReportPermission(hasReportPermission);
         setIsSalesRefUser(isSalesRef);
+
+        try {
+          const widgetRes = await apiClient.get('/dashboard/widgets/me', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          setWidgetVisibility(widgetRes.data?.data?.widgets || {});
+        } catch (widgetError) {
+          console.error('Error fetching report widget visibility:', widgetError);
+          setWidgetVisibility({});
+        }
 
         if (!adminUser && !hasReportPermission && !isSalesRef) {
           router.push('/dashboard');
@@ -193,6 +206,7 @@ export default function ReportsPage() {
           { name: 'Outstanding Report', description: 'Outstanding balances and aging', icon: '⏳', path: '/dashboard/reports/distribution/outstanding' },
           { name: 'Invoice Report', description: 'Invoice summary and trend analysis', icon: '🧾', path: '/dashboard/reports/distribution/invoice' },
           { name: 'Sales Report', description: 'Sales value by invoice with collection tracking', icon: '📈', path: '/dashboard/reports/distribution/sales' },
+          { name: 'Sales Summary Report', description: 'Load-wise sales summary with collections and outstanding.', icon: '📊', path: '/dashboard/reports/distribution/sales-summary' },
           { name: 'Delivery Balance Sheet', description: 'Delivery-wise net sales, returns and outstanding', icon: '📚', path: '/dashboard/reports/distribution/delivery-balance' },
           { name: 'Collection Report', description: 'Collections by customer and date', icon: '💵', path: '/dashboard/reports/distribution/collection' },
           { name: 'Returns Report', description: 'Product returns and settlement summary', icon: '↩️', path: '/dashboard/reports/distribution/returns' },
@@ -200,16 +214,84 @@ export default function ReportsPage() {
           { name: 'Payment History Report', description: 'Payment timeline and mode analytics', icon: '📚', path: '/dashboard/reports/distribution/payment-history' },
         ],
       },
+      {
+        name: 'Accounting Reports',
+        icon: '💼',
+        color: 'from-sky-500 to-blue-500',
+        bgColor: 'from-sky-50 to-blue-50',
+        reports: [
+          { name: 'Profit & Loss Report', description: 'Sales vs petty cash, delivery cash, and other expense transactions.', icon: '📈', path: '/dashboard/reports/accounting/profit-loss' },
+          { name: 'Balance Sheet Report', description: 'Assets, liabilities, and owner equity as of a selected date.', icon: '📘', path: '/dashboard/reports/accounting/balance-sheet' },
+          { name: 'Income Report', description: 'Income overview from collections and all cash-in ledgers.', icon: '💹', path: '/dashboard/reports/accounting/income' },
+          { name: 'Petty Cash Account Report', description: 'Petty cash inflow and outflow report with filters and exports.', icon: '🧾', path: '/dashboard/reports/accounting/petty-cash-account' },
+          { name: 'Delivery Cash Account Report', description: 'Delivery cash inflow and outflow report with filters and exports.', icon: '🚚', path: '/dashboard/reports/accounting/delivery-cash-account' },
+        ],
+      },
     ],
     []
   );
 
   const visibleCategories = useMemo(
-    () => (isSalesRefUser ? categories.filter((category) => category.name === 'Distribution Reports') : categories),
-    [categories, isSalesRefUser]
+    () => (isSalesRefUser ? categories.filter((category) => category.name === 'Distribution Reports') : categories)
+      .map((category) => ({
+        ...category,
+        reports: category.reports.filter(
+          (report) => widgetVisibility[`reports-card-${category.name}-${report.name}`] !== false
+        ),
+      }))
+      .filter((category) =>
+        widgetVisibility[`reports-category-${category.name}`] !== false && category.reports.length > 0
+      ),
+    [categories, isSalesRefUser, widgetVisibility]
   );
 
   const totalReports = visibleCategories.reduce((sum, category) => sum + category.reports.length, 0);
+
+  const setReportWidgetVisibility = async (widgetKey: string, isVisible: boolean) => {
+    try {
+      setWidgetToggleLoadingKey(widgetKey);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        { widget_key: widgetKey, is_visible: isVisible },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setWidgetVisibility((previous) => ({ ...previous, [widgetKey]: isVisible }));
+    } catch (error) {
+      console.error('Error updating report widget visibility:', error);
+      alert('Failed to update report widget visibility.');
+    } finally {
+      setWidgetToggleLoadingKey('');
+    }
+  };
+
+  const allReportWidgetKeys = categories.flatMap((category) => [
+    `reports-category-${category.name}`,
+    ...category.reports.map((report) => `reports-card-${category.name}-${report.name}`),
+  ]);
+  const hiddenWidgetCount = allReportWidgetKeys.filter((key) => widgetVisibility[key] === false).length;
+
+  const restoreAllHiddenWidgets = async () => {
+    const hiddenKeys = allReportWidgetKeys.filter((key) => widgetVisibility[key] === false);
+    if (hiddenKeys.length === 0) return;
+
+    try {
+      for (const key of hiddenKeys) {
+        await apiClient.put(
+          '/dashboard/widgets/me',
+          { widget_key: key, is_visible: true },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+      }
+      setWidgetVisibility((previous) => {
+        const next = { ...previous };
+        hiddenKeys.forEach((key) => { next[key] = true; });
+        return next;
+      });
+    } catch (error) {
+      console.error('Error restoring report widgets:', error);
+      alert('Failed to restore report widgets.');
+    }
+  };
 
   const handleReportOpen = (report: ReportItem) => {
     if (report.path) {
@@ -289,28 +371,58 @@ export default function ReportsPage() {
             <span className="font-semibold">{totalReports}</span>
             <span>report options configured</span>
           </div>
+          {hiddenWidgetCount > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={restoreAllHiddenWidgets}
+                className="mt-4 rounded-full border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-100"
+              >
+                Restore Hidden Report Widgets ({hiddenWidgetCount})
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="space-y-8">
           {visibleCategories.map((category) => (
             <section key={category.name} className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
               <div className={`bg-gradient-to-r ${category.color} p-5`}>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-xl">{category.icon}</div>
                   <div>
                     <h2 className="text-xl font-bold text-white">{category.name}</h2>
                     <p className="text-white/85 text-sm">{category.reports.length} reports available in this category</p>
                   </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setReportWidgetVisibility(`reports-category-${category.name}`, false)}
+                    disabled={widgetToggleLoadingKey === `reports-category-${category.name}`}
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/50 bg-white/20 text-lg font-bold text-white transition hover:bg-white/30 disabled:opacity-60"
+                    title="Hide this report widget"
+                    aria-label={`Hide ${category.name}`}
+                  >
+                    {widgetToggleLoadingKey === `reports-category-${category.name}` ? '...' : '×'}
+                  </button>
                 </div>
               </div>
 
               <div className="p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {category.reports.map((report) => (
-                  <button
+                  <div
                     key={report.name}
-                    type="button"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => handleReportOpen(report)}
-                    className={`text-left group relative rounded-xl border border-white/40 bg-gradient-to-br ${category.bgColor} p-4 hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1`}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        handleReportOpen(report);
+                      }
+                    }}
+                    className={`text-left group relative cursor-pointer rounded-xl border border-white/40 bg-gradient-to-br ${category.bgColor} p-4 hover:shadow-lg transition-all duration-300 transform hover:-translate-y-1`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -318,11 +430,26 @@ export default function ReportsPage() {
                         <h3 className="font-semibold text-gray-900 group-hover:text-gray-800 transition-colors duration-300">{report.name}</h3>
                         <p className="mt-1 text-sm text-gray-600 group-hover:text-gray-700 transition-colors duration-300">{report.description}</p>
                       </div>
-                      <span className="shrink-0 inline-flex items-center rounded-full bg-white/80 border border-white text-[10px] font-semibold px-2 py-1 text-gray-700">
-                        {report.comingSoon ? 'Planned' : 'Live'}
-                      </span>
+                      <div className="flex shrink-0 items-start gap-2">
+                        <span className="inline-flex items-center rounded-full bg-white/80 border border-white text-[10px] font-semibold px-2 py-1 text-gray-700">
+                          {report.comingSoon ? 'Planned' : 'Live'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setReportWidgetVisibility(`reports-card-${category.name}-${report.name}`, false);
+                          }}
+                          disabled={widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}`}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white bg-white/80 text-xs font-bold text-gray-600 hover:bg-white disabled:opacity-60"
+                          title="Hide this report card"
+                          aria-label={`Hide ${report.name}`}
+                        >
+                          {widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}` ? '...' : '×'}
+                        </button>
+                      </div>
                     </div>
-                  </button>
+                  </div>
                 ))}
               </div>
             </section>
