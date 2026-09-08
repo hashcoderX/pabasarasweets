@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { isAxiosError } from '@/lib/http';
 import { createApiClient } from '../../../lib/apiClient';
+import { DISTRIBUTION_OFFLINE_KEYS, readOfflineQueue } from '@/lib/distributionOffline';
 
 interface RouteCustomer {
   id: number;
@@ -26,6 +27,12 @@ export default function DistributionPage() {
   const [paymentCount, setPaymentCount] = useState(0);
   const [routeCustomers, setRouteCustomers] = useState<RouteCustomer[]>([]);
   const [routeCustomersLoading, setRouteCustomersLoading] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [pendingOfflineCounts, setPendingOfflineCounts] = useState({
+    invoices: 0,
+    payments: 0,
+    returns: 0,
+  });
   const router = useRouter();
 
   const api = useMemo(() => createApiClient(token), [token]);
@@ -53,6 +60,31 @@ export default function DistributionPage() {
       setRouteCustomers([]);
     }
   }, [token, assignedRouteId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const refreshOfflineSnapshot = () => {
+      setIsOnline(window.navigator.onLine);
+      setPendingOfflineCounts({
+        invoices: readOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.invoices).length,
+        payments: readOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.payments).length,
+        returns: readOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.returns).length,
+      });
+    };
+
+    refreshOfflineSnapshot();
+
+    window.addEventListener('online', refreshOfflineSnapshot);
+    window.addEventListener('offline', refreshOfflineSnapshot);
+    window.addEventListener('focus', refreshOfflineSnapshot);
+
+    return () => {
+      window.removeEventListener('online', refreshOfflineSnapshot);
+      window.removeEventListener('offline', refreshOfflineSnapshot);
+      window.removeEventListener('focus', refreshOfflineSnapshot);
+    };
+  }, []);
 
   const handleUnauthorized = (error: unknown) => {
     if (isAxiosError(error) && error.response?.status === 401) {
@@ -202,6 +234,17 @@ export default function DistributionPage() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-8">
+        <section className={`rounded-2xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50/90' : 'border-amber-200 bg-amber-50/90'}`}>
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <p className={`text-sm font-medium ${isOnline ? 'text-emerald-800' : 'text-amber-800'}`}>
+              {isOnline ? 'Online mode: distribution entries sync to the server.' : 'Offline mode: distribution entries are saved locally and synced when internet returns.'}
+            </p>
+            <p className="text-xs font-semibold text-slate-700">
+              Pending Sync: Invoices {pendingOfflineCounts.invoices} | Payments {pendingOfflineCounts.payments} | Returns {pendingOfflineCounts.returns}
+            </p>
+          </div>
+        </section>
+
         <div className="text-center">
           <div className="inline-block p-1 bg-gradient-to-r from-green-500 to-teal-500 rounded-full mb-4">
             <div className="bg-white rounded-full p-4 text-4xl">🚚</div>

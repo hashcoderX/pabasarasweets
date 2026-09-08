@@ -1,9 +1,30 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
+import {
+  DISTRIBUTION_OFFLINE_KEYS,
+  isLikelyNetworkError,
+  makeOfflineEntryId,
+  readOfflineQueue,
+  writeOfflineQueue,
+  type OfflineQueueEntry,
+} from '@/lib/distributionOffline';
+
+type PendingOfflineReturnPayload = {
+  return_number: string;
+  customer_id: number;
+  distribution_invoice_id: number | null;
+  return_date: string;
+  total_quantity: number;
+  total_amount: number;
+  reason: string;
+  status: string;
+  notes: string;
+  inventory_item_id: number | null;
+};
 
 export default function DistributionReturnsPage() {
   const [token, setToken] = useState('');
@@ -15,6 +36,9 @@ export default function DistributionReturnsPage() {
   const [inventory, setInventory] = useState<any[]>([]);
   const [viewReturn, setViewReturn] = useState<any | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
+  const [pendingOfflineReturns, setPendingOfflineReturns] = useState<OfflineQueueEntry<PendingOfflineReturnPayload>[]>([]);
+  const [syncingOfflineReturns, setSyncingOfflineReturns] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
 
   const [form, setForm] = useState({
     return_number: '',
@@ -39,7 +63,30 @@ export default function DistributionReturnsPage() {
 
   useEffect(() => { if (token) fetchData(); }, [token]);
 
-  const fetchData = async () => {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setIsOnline(window.navigator.onLine);
+    setPendingOfflineReturns(readOfflineQueue<PendingOfflineReturnPayload>(DISTRIBUTION_OFFLINE_KEYS.returns));
+
+    const onNetworkChange = () => {
+      setIsOnline(window.navigator.onLine);
+      setPendingOfflineReturns(readOfflineQueue<PendingOfflineReturnPayload>(DISTRIBUTION_OFFLINE_KEYS.returns));
+    };
+
+    window.addEventListener('online', onNetworkChange);
+    window.addEventListener('offline', onNetworkChange);
+
+    return () => {
+      window.removeEventListener('online', onNetworkChange);
+      window.removeEventListener('offline', onNetworkChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    writeOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.returns, pendingOfflineReturns);
+  }, [pendingOfflineReturns]);
+
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       const [returnsRes, customersRes, invoicesRes, inventoryRes] = await Promise.all([
@@ -60,20 +107,105 @@ export default function DistributionReturnsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
+
+  const syncOfflineReturns = useCallback(async () => {
+    if (!token || syncingOfflineReturns || pendingOfflineReturns.length === 0) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    setSyncingOfflineReturns(true);
+    try {
+      const stillPending: OfflineQueueEntry<PendingOfflineReturnPayload>[] = [];
+      let syncedAny = false;
+
+      for (const entry of pendingOfflineReturns) {
+        try {
+          await axios.post('/api/distribution/returns', entry.payload, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          syncedAny = true;
+        } catch (error) {
+          if (isLikelyNetworkError(error)) {
+            stillPending.push(entry);
+            continue;
+          }
+
+          console.error('Failed to sync offline return entry, keeping in queue:', error);
+          stillPending.push(entry);
+        }
+      }
+
+      if (syncedAny) {
+        setPendingOfflineReturns(stillPending);
+        await fetchData();
+      }
+    } finally {
+      setSyncingOfflineReturns(false);
+    }
+  }, [token, syncingOfflineReturns, pendingOfflineReturns, fetchData]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const handleOnline = () => {
+      syncOfflineReturns();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+    }
+
+    syncOfflineReturns();
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+      }
+    };
+  }, [token, pendingOfflineReturns.length, syncOfflineReturns]);
 
   const createReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+    const payload: PendingOfflineReturnPayload = {
+      ...form,
+      customer_id: Number(form.customer_id),
+      distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
+      inventory_item_id: form.inventory_item_id ? Number(form.inventory_item_id) : null,
+      total_quantity: Number(form.total_quantity || 0),
+      total_amount: Number(form.total_amount || 0),
+    };
+
+    const queueReturnOffline = () => {
+      const entry: OfflineQueueEntry<PendingOfflineReturnPayload> = {
+        id: makeOfflineEntryId('dist-return'),
+        createdAt: new Date().toISOString(),
+        payload,
+      };
+
+      setPendingOfflineReturns((previous) => [...previous, entry]);
+      setForm({
+        return_number: `RET-${Date.now()}`,
+        customer_id: '',
+        distribution_invoice_id: '',
+        return_date: new Date().toISOString().split('T')[0],
+        total_quantity: '',
+        total_amount: '',
+        reason: '',
+        status: 'pending',
+        notes: '',
+        inventory_item_id: '',
+      });
+      alert('No internet connection. Return saved offline and will sync automatically when connection is restored.');
+    };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      queueReturnOffline();
+      return;
+    }
+
     try {
       setSaving(true);
-      await axios.post('/api/distribution/returns', {
-        ...form,
-        customer_id: Number(form.customer_id),
-        distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
-        inventory_item_id: form.inventory_item_id ? Number(form.inventory_item_id) : null,
-        total_quantity: Number(form.total_quantity || 0),
-        total_amount: Number(form.total_amount || 0),
-      }, { headers: { Authorization: `Bearer ${token}` } });
+      await axios.post('/api/distribution/returns', payload, { headers: { Authorization: `Bearer ${token}` } });
 
       setForm({
         return_number: `RET-${Date.now()}`,
@@ -89,6 +221,10 @@ export default function DistributionReturnsPage() {
       });
       fetchData();
     } catch (error: any) {
+      if (isLikelyNetworkError(error)) {
+        queueReturnOffline();
+        return;
+      }
       alert(error?.response?.data?.message || 'Failed to record return');
     } finally {
       setSaving(false);
@@ -124,6 +260,18 @@ export default function DistributionReturnsPage() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+        <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
+            <p className={isOnline ? 'text-emerald-800' : 'text-amber-800'}>
+              {isOnline ? 'Online mode: returns sync directly to server.' : 'Offline mode: new returns are saved locally.'}
+            </p>
+            <p className="text-xs font-semibold text-gray-700">
+              Pending offline returns: {pendingOfflineReturns.length}
+              {syncingOfflineReturns ? ' (syncing...)' : ''}
+            </p>
+          </div>
+        </section>
+
         <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>

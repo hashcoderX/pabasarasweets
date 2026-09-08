@@ -1,9 +1,30 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
+import {
+  DISTRIBUTION_OFFLINE_KEYS,
+  isLikelyNetworkError,
+  makeOfflineEntryId,
+  readOfflineQueue,
+  writeOfflineQueue,
+  type OfflineQueueEntry,
+} from '@/lib/distributionOffline';
+
+type PendingOfflinePaymentPayload = {
+  payment_number: string;
+  distribution_invoice_id: number | null;
+  customer_id: number;
+  payment_date: string;
+  amount: number;
+  payment_method: string;
+  reference_no: string;
+  bank_name: string;
+  status: string;
+  notes: string;
+};
 
 export default function DistributionPaymentsPage() {
   const [token, setToken] = useState('');
@@ -20,6 +41,9 @@ export default function DistributionPaymentsPage() {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [historyCustomerId, setHistoryCustomerId] = useState<number | null>(null);
   const [historyCustomerSelect, setHistoryCustomerSelect] = useState('');
+  const [pendingOfflinePayments, setPendingOfflinePayments] = useState<OfflineQueueEntry<PendingOfflinePaymentPayload>[]>([]);
+  const [syncingOfflinePayments, setSyncingOfflinePayments] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const pageSize = 10;
 
   const [form, setForm] = useState({
@@ -49,6 +73,29 @@ export default function DistributionPaymentsPage() {
       fetchData();
     }
   }, [token]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setIsOnline(window.navigator.onLine);
+    setPendingOfflinePayments(readOfflineQueue<PendingOfflinePaymentPayload>(DISTRIBUTION_OFFLINE_KEYS.payments));
+
+    const onNetworkChange = () => {
+      setIsOnline(window.navigator.onLine);
+      setPendingOfflinePayments(readOfflineQueue<PendingOfflinePaymentPayload>(DISTRIBUTION_OFFLINE_KEYS.payments));
+    };
+
+    window.addEventListener('online', onNetworkChange);
+    window.addEventListener('offline', onNetworkChange);
+
+    return () => {
+      window.removeEventListener('online', onNetworkChange);
+      window.removeEventListener('offline', onNetworkChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    writeOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.payments, pendingOfflinePayments);
+  }, [pendingOfflinePayments]);
 
   const resolveAssignedRoute = async () => {
     const searchParams = typeof window !== 'undefined'
@@ -369,7 +416,7 @@ export default function DistributionPaymentsPage() {
     }
   }, [scopedCustomers, form.customer_id, historyCustomerSelect, historyCustomerId]);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       const [paymentsRes, customersRes, invoicesRes] = await Promise.all([
@@ -388,7 +435,62 @@ export default function DistributionPaymentsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
+
+  const syncOfflinePayments = useCallback(async () => {
+    if (!token || syncingOfflinePayments || pendingOfflinePayments.length === 0) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+    setSyncingOfflinePayments(true);
+    try {
+      const stillPending: OfflineQueueEntry<PendingOfflinePaymentPayload>[] = [];
+      let syncedAny = false;
+
+      for (const entry of pendingOfflinePayments) {
+        try {
+          await axios.post('/api/distribution/payments', entry.payload, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          syncedAny = true;
+        } catch (error) {
+          if (isLikelyNetworkError(error)) {
+            stillPending.push(entry);
+            continue;
+          }
+
+          console.error('Failed to sync offline payment entry, keeping in queue:', error);
+          stillPending.push(entry);
+        }
+      }
+
+      if (syncedAny) {
+        setPendingOfflinePayments(stillPending);
+        await fetchData();
+      }
+    } finally {
+      setSyncingOfflinePayments(false);
+    }
+  }, [token, syncingOfflinePayments, pendingOfflinePayments, fetchData]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const handleOnline = () => {
+      syncOfflinePayments();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+    }
+
+    syncOfflinePayments();
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+      }
+    };
+  }, [token, pendingOfflinePayments.length, syncOfflinePayments]);
 
   const createPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -405,14 +507,45 @@ export default function DistributionPaymentsPage() {
       }
     }
 
+    const payload: PendingOfflinePaymentPayload = {
+      ...form,
+      distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
+      customer_id: Number(form.customer_id),
+      amount: Number(form.amount || 0),
+    };
+
+    const queuePaymentOffline = () => {
+      const entry: OfflineQueueEntry<PendingOfflinePaymentPayload> = {
+        id: makeOfflineEntryId('dist-payment'),
+        createdAt: new Date().toISOString(),
+        payload,
+      };
+
+      setPendingOfflinePayments((previous) => [...previous, entry]);
+      setForm({
+        payment_number: `PAY-${Date.now()}`,
+        distribution_invoice_id: '',
+        customer_id: '',
+        payment_date: new Date().toISOString().split('T')[0],
+        amount: '',
+        payment_method: 'cash',
+        reference_no: '',
+        bank_name: '',
+        status: 'received',
+        notes: '',
+      });
+      setShowPaymentModal(false);
+      alert('No internet connection. Payment saved offline and will sync automatically when connection is restored.');
+    };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      queuePaymentOffline();
+      return;
+    }
+
     try {
       setSaving(true);
-      await axios.post('/api/distribution/payments', {
-        ...form,
-        distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
-        customer_id: Number(form.customer_id),
-        amount: Number(form.amount || 0),
-      }, { headers: { Authorization: `Bearer ${token}` } });
+      await axios.post('/api/distribution/payments', payload, { headers: { Authorization: `Bearer ${token}` } });
 
       setForm({
         payment_number: `PAY-${Date.now()}`,
@@ -429,6 +562,10 @@ export default function DistributionPaymentsPage() {
       setShowPaymentModal(false);
       fetchData();
     } catch (error: any) {
+      if (isLikelyNetworkError(error)) {
+        queuePaymentOffline();
+        return;
+      }
       alert(error?.response?.data?.message || 'Failed to record payment');
     } finally {
       setSaving(false);
@@ -471,6 +608,18 @@ export default function DistributionPaymentsPage() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+        <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
+            <p className={isOnline ? 'text-emerald-800' : 'text-amber-800'}>
+              {isOnline ? 'Online mode: payments sync directly to server.' : 'Offline mode: new payments are saved locally.'}
+            </p>
+            <p className="text-xs font-semibold text-gray-700">
+              Pending offline payments: {pendingOfflinePayments.length}
+              {syncingOfflinePayments ? ' (syncing...)' : ''}
+            </p>
+          </div>
+        </section>
+
         <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-gray-900">Route Filter</h2>

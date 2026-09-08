@@ -30,6 +30,19 @@ interface RouteOption {
   destination: string;
 }
 
+interface LoadRouteEntry {
+  route_id?: number | string | null;
+}
+
+interface LoadRoutingInfo {
+  route_id?: number | string | null;
+  load_routes?: LoadRouteEntry[];
+  sales_ref_id?: number | string | null;
+  status?: string;
+  load_date?: string;
+  created_at?: string;
+}
+
 export default function DistributionCustomersPage() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -61,7 +74,7 @@ export default function DistributionCustomersPage() {
   });
   const router = useRouter();
 
-  const getRouteIdsFromLoad = (load: any): string[] => {
+  const getRouteIdsFromLoad = (load: LoadRoutingInfo): string[] => {
     const ids: string[] = [];
 
     if (load?.route_id) {
@@ -69,7 +82,7 @@ export default function DistributionCustomersPage() {
     }
 
     if (Array.isArray(load?.load_routes)) {
-      load.load_routes.forEach((entry: any) => {
+      load.load_routes.forEach((entry: LoadRouteEntry) => {
         const routeId = String(entry?.route_id || '').trim();
         if (routeId) {
           ids.push(routeId);
@@ -209,7 +222,15 @@ export default function DistributionCustomersPage() {
       const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
       const roleNames = [
         String(userData?.role || ''),
-        ...(Array.isArray(userData?.roles) ? userData.roles.map((r: any) => String(r?.name || r || '')) : []),
+        ...(Array.isArray(userData?.roles)
+          ? userData.roles.map((role: unknown) => {
+              if (typeof role === 'string') return role;
+              if (role && typeof role === 'object' && 'name' in role) {
+                return String((role as { name?: string }).name || '');
+              }
+              return '';
+            })
+          : []),
       ].join(' ').toLowerCase();
       const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
       setIsAdmin(adminUser);
@@ -239,17 +260,25 @@ export default function DistributionCustomersPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
 
-      const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
-      const assignedLoad = loads
-        .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(load.status))
-        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime())[0];
+      const loads: LoadRoutingInfo[] = Array.isArray(loadsRes.data)
+        ? loadsRes.data
+        : (loadsRes.data?.data || []);
+      const activeAssignedLoads = loads
+        .filter((load) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(String(load.status || '')))
+        .sort((a, b) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
 
-      const assignedRouteIdsFromLoad = assignedLoad ? getRouteIdsFromLoad(assignedLoad) : [];
+      const assignedRouteIdsFromLoad = Array.from(
+        new Set(
+          activeAssignedLoads.flatMap((load) => getRouteIdsFromLoad(load))
+        )
+      );
 
-      if (assignedRouteIdsFromLoad.length > 0) {
-        setAssignedRouteId(assignedRouteIdsFromLoad[0]);
+      const firstAssignedRouteId = assignedRouteIdsFromLoad[0];
+
+      if (firstAssignedRouteId) {
+        setAssignedRouteId(firstAssignedRouteId);
         setAssignedRouteIds(assignedRouteIdsFromLoad);
-        localStorage.setItem('distribution_assigned_route_id', assignedRouteIdsFromLoad[0]);
+        localStorage.setItem('distribution_assigned_route_id', firstAssignedRouteId);
       } else if (routeFromQuery) {
         setAssignedRouteId(routeFromQuery);
         setAssignedRouteIds([routeFromQuery]);
@@ -392,8 +421,15 @@ export default function DistributionCustomersPage() {
       setShowModal(false);
       resetForm();
       fetchCustomers();
-    } catch (error: any) {
-      alert(error?.response?.data?.message || 'Failed to save customer');
+    } catch (error: unknown) {
+      const message =
+        typeof error === 'object' &&
+        error !== null &&
+        'response' in error &&
+        (error as { response?: { data?: { message?: string } } }).response?.data?.message
+          ? String((error as { response?: { data?: { message?: string } } }).response?.data?.message)
+          : 'Failed to save customer';
+      alert(message);
     } finally {
       setSaving(false);
     }

@@ -323,6 +323,15 @@ export default function DistributionInvoicesPage() {
       });
     }
 
+    if (Array.isArray(load?.loadRoutes)) {
+      load.loadRoutes.forEach((entry: any) => {
+        const routeId = String(entry?.route_id || '').trim();
+        if (routeId) {
+          ids.push(routeId);
+        }
+      });
+    }
+
     return Array.from(new Set(ids));
   };
 
@@ -497,7 +506,6 @@ export default function DistributionInvoicesPage() {
 
     if (routeFromQuery) {
       setAssignedRouteId(routeFromQuery);
-      setAssignedRouteIds([routeFromQuery]);
       localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
     }
 
@@ -507,10 +515,23 @@ export default function DistributionInvoicesPage() {
     }
 
     const cachedRouteId = localStorage.getItem('distribution_assigned_route_id');
+    const cachedRouteIdsRaw = localStorage.getItem('distribution_assigned_route_ids');
     const cachedLoadId = localStorage.getItem('distribution_active_load_id');
+    if (cachedRouteIdsRaw) {
+      try {
+        const parsed = JSON.parse(cachedRouteIdsRaw) as string[];
+        if (Array.isArray(parsed)) {
+          const normalized = parsed.map((value) => String(value || '').trim()).filter(Boolean);
+          if (normalized.length > 0) {
+            setAssignedRouteIds(Array.from(new Set(normalized)));
+          }
+        }
+      } catch {
+        // Ignore malformed cached route list.
+      }
+    }
     if (cachedRouteId) {
       setAssignedRouteId(cachedRouteId);
-      setAssignedRouteIds([cachedRouteId]);
     }
     if (cachedLoadId) {
       setActiveLoadId(cachedLoadId);
@@ -578,18 +599,13 @@ export default function DistributionInvoicesPage() {
         return;
       }
 
-      if (routeFromQuery) {
-        setAssignedRouteId(routeFromQuery);
-        setAssignedRouteIds([routeFromQuery]);
-        localStorage.setItem('distribution_assigned_route_id', routeFromQuery);
-        return;
-      }
-
       if (!employeeId) return;
 
-      const assignedLoad = loads
-        .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(load.status))
-        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime())[0];
+      const activeAssignedLoads = loads
+        .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit', 'delivered'].includes(String(load.status || '')))
+        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
+
+      const assignedLoad = activeAssignedLoads[0];
 
       if (assignedLoad?.id) {
         const loadId = String(assignedLoad.id);
@@ -600,16 +616,26 @@ export default function DistributionInvoicesPage() {
         localStorage.removeItem('distribution_active_load_id');
       }
 
-      const assignedRouteIdsFromLoad = assignedLoad ? getRouteIdsFromLoad(assignedLoad) : [];
+      const assignedRouteIdsFromLoad: string[] = Array.from(
+        new Set<string>(
+          activeAssignedLoads.flatMap((load: any) => getRouteIdsFromLoad(load))
+        )
+      );
 
-      if (assignedRouteIdsFromLoad.length > 0) {
-        setAssignedRouteId(assignedRouteIdsFromLoad[0]);
+      const firstAssignedRouteId = assignedRouteIdsFromLoad[0];
+      if (firstAssignedRouteId) {
+        setAssignedRouteId(firstAssignedRouteId);
         setAssignedRouteIds(assignedRouteIdsFromLoad);
-        localStorage.setItem('distribution_assigned_route_id', assignedRouteIdsFromLoad[0]);
+        localStorage.setItem('distribution_assigned_route_id', firstAssignedRouteId);
+        localStorage.setItem('distribution_assigned_route_ids', JSON.stringify(assignedRouteIdsFromLoad));
       } else if (!routeFromQuery) {
         setAssignedRouteId('');
         setAssignedRouteIds([]);
         localStorage.removeItem('distribution_assigned_route_id');
+        localStorage.removeItem('distribution_assigned_route_ids');
+      } else {
+        setAssignedRouteIds([routeFromQuery]);
+        localStorage.setItem('distribution_assigned_route_ids', JSON.stringify([routeFromQuery]));
       }
     } catch (error) {
       console.error('Error resolving assigned route on invoices page:', error);
@@ -836,13 +862,48 @@ export default function DistributionInvoicesPage() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [customersRes, inventoryRes, invoicesRes] = await Promise.all([
-        axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+      const fetchAllCustomers = async (): Promise<Customer[]> => {
+        type CustomerPagePayload = {
+          data?: Customer[];
+          next_page_url?: string | null;
+        };
+
+        const rows: Customer[] = [];
+        let nextUrl: string | null = '/api/distribution/customers?per_page=1000';
+        let pages = 0;
+
+        while (nextUrl && pages < 100) {
+          const response: { data: unknown } = await axios.get(nextUrl, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          const root = response.data;
+          const payload: CustomerPagePayload | Customer[] =
+            typeof root === 'object' && root !== null && 'data' in root
+              ? ((root as { data?: CustomerPagePayload | Customer[] }).data || [])
+              : [];
+
+          if (Array.isArray(payload)) {
+            rows.push(...payload);
+            break;
+          }
+
+          const pageRows = Array.isArray(payload?.data) ? payload.data : [];
+          rows.push(...pageRows);
+          nextUrl = payload?.next_page_url || null;
+          pages += 1;
+        }
+
+        return rows;
+      };
+
+      const [allCustomers, inventoryRes, invoicesRes] = await Promise.all([
+        fetchAllCustomers(),
         axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
         axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 50 } }),
       ]);
 
-      setCustomers(customersRes.data?.data?.data || []);
+      setCustomers(allCustomers);
       const inventory = inventoryRes.data?.data?.data || inventoryRes.data?.data || [];
       setItems(inventory.filter((item: any) => item.status === 'active').map((item: any) => ({
         id: item.id,

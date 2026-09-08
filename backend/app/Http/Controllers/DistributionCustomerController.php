@@ -20,9 +20,18 @@ class DistributionCustomerController extends Controller
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
 
             if (!$isAdmin && $user->employee_id) {
-                $routeIds = Load::where('sales_ref_id', $user->employee_id)
+                $loads = Load::with('loadRoutes:load_id,route_id')
+                    ->select(['id', 'route_id'])
+                    ->where('sales_ref_id', $user->employee_id)
                     ->whereIn('status', ['pending', 'in_transit', 'delivered'])
-                    ->pluck('route_id')
+                    ->get();
+
+                $routeIds = $loads
+                    ->flatMap(function ($load) {
+                        $baseRouteId = $load->route_id ? [$load->route_id] : [];
+                        $extraRouteIds = $load->loadRoutes->pluck('route_id')->all();
+                        return array_merge($baseRouteId, $extraRouteIds);
+                    })
                     ->filter()
                     ->unique()
                     ->toArray();
