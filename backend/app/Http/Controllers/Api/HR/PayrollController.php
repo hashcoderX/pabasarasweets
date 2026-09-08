@@ -10,6 +10,7 @@ use App\Models\Company;
 use App\Models\EmployeeAllowanceDeduction;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Schema;
 use Carbon\Carbon;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Symfony\Component\HttpFoundation\Response;
@@ -17,6 +18,7 @@ use Symfony\Component\HttpFoundation\Response;
 class PayrollController extends Controller
 {
     private const STANDARD_DAILY_WORK_HOURS = 8;
+    private ?array $payrollColumns = null;
 
     /**
      * Display a listing of the resource.
@@ -103,7 +105,7 @@ class PayrollController extends Controller
 
             $calculation = $this->calculatePayrollForEmployee($employee, $monthYear);
 
-            $payroll = Payroll::create([
+            $payroll = Payroll::create($this->filterPayrollPayload([
                 'tenant_id' => $tenantId,
                 'branch_id' => $branchId,
                 'employee_id' => $employee->id,
@@ -129,7 +131,7 @@ class PayrollController extends Controller
                 'overtime_hours' => $calculation['overtime_hours'],
                 'overtime_amount' => $calculation['overtime_amount'],
                 'status' => 'pending',
-            ]);
+            ]));
 
             $generatedPayrolls[] = $this->appendBreakdown($payroll->load(['employee.department', 'employee.designation']));
         }
@@ -189,7 +191,7 @@ class PayrollController extends Controller
         foreach ($employees as $employee) {
             $calculation = $this->calculatePayrollForEmployee($employee, $monthYear);
 
-            $payload = [
+            $payload = $this->filterPayrollPayload([
                 'tenant_id' => $tenantId,
                 'branch_id' => $branchId,
                 'employee_id' => $employee->id,
@@ -214,14 +216,14 @@ class PayrollController extends Controller
                 'absent_days' => $calculation['absent_days'],
                 'overtime_hours' => $calculation['overtime_hours'],
                 'overtime_amount' => $calculation['overtime_amount'],
-            ];
+            ]);
 
             $existing = Payroll::where('employee_id', $employee->id)
                 ->where('month_year', $monthYear)
                 ->first();
 
             if (!$existing) {
-                Payroll::create(array_merge($payload, ['status' => 'pending']));
+                Payroll::create(array_merge($payload, $this->filterPayrollPayload(['status' => 'pending'])));
                 $created++;
                 continue;
             }
@@ -301,7 +303,7 @@ class PayrollController extends Controller
             ], 422);
         }
 
-        $payroll = Payroll::create($validated);
+        $payroll = Payroll::create($this->filterPayrollPayload($validated));
 
         return response()->json($this->appendBreakdown($payroll->load(['employee.department', 'employee.designation'])), 201);
     }
@@ -327,7 +329,7 @@ class PayrollController extends Controller
             'processed_at' => 'nullable|date',
         ]);
 
-        $payroll->update($validated);
+        $payroll->update($this->filterPayrollPayload($validated));
 
         return response()->json($this->appendBreakdown($payroll->load(['employee.department', 'employee.designation'])));
     }
@@ -623,5 +625,30 @@ class PayrollController extends Controller
         }
 
         return null;
+    }
+
+    private function filterPayrollPayload(array $payload): array
+    {
+        $columns = $this->getPayrollColumns();
+        if (empty($columns)) {
+            return $payload;
+        }
+
+        return array_intersect_key($payload, array_flip($columns));
+    }
+
+    private function getPayrollColumns(): array
+    {
+        if ($this->payrollColumns !== null) {
+            return $this->payrollColumns;
+        }
+
+        if (!Schema::hasTable('payrolls')) {
+            $this->payrollColumns = [];
+            return $this->payrollColumns;
+        }
+
+        $this->payrollColumns = Schema::getColumnListing('payrolls');
+        return $this->payrollColumns;
     }
 }

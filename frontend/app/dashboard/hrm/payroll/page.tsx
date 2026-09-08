@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
 
@@ -110,6 +110,7 @@ export default function Payroll() {
   const [selectedMonth, setSelectedMonth] = useState('');
   const [generateLoading, setGenerateLoading] = useState(false);
   const [recalculateLoading, setRecalculateLoading] = useState(false);
+  const [bulkProcessLoading, setBulkProcessLoading] = useState(false);
 
   // Filter states
   const [filterMonth, setFilterMonth] = useState('');
@@ -143,7 +144,7 @@ export default function Payroll() {
   const fetchPayrolls = async (authToken: string) => {
     try {
       setLoading(true);
-      const params: any = {};
+      const params: { month_year?: string; branch_id?: string } = {};
       if (filterMonth) params.month_year = filterMonth;
       if (filterBranch) params.branch_id = filterBranch;
 
@@ -258,6 +259,77 @@ export default function Payroll() {
       `Are you sure you want to set this payroll status to "${newStatus}"?`,
       async () => {
         await executeStatusUpdate(payrollId, newStatus);
+      }
+    );
+  };
+
+  const executeProcessAllSalaries = async () => {
+    if (!token) return;
+
+    const pendingRows = filteredPayrolls.filter((payroll) => payroll.status === 'pending');
+    if (pendingRows.length === 0) {
+      showNotice('Info', 'No pending salaries found for current filters.', 'info');
+      return;
+    }
+
+    try {
+      setBulkProcessLoading(true);
+
+      const today = new Date().toISOString().split('T')[0];
+      const chunkSize = 25;
+      let successCount = 0;
+      let failedCount = 0;
+
+      for (let i = 0; i < pendingRows.length; i += chunkSize) {
+        const chunk = pendingRows.slice(i, i + chunkSize);
+        const results = await Promise.allSettled(
+          chunk.map((payroll) =>
+            axios.put(
+              `/api/hr/payrolls/${payroll.id}`,
+              { status: 'processed', processed_at: today },
+              { headers: { Authorization: `Bearer ${token}` } }
+            )
+          )
+        );
+
+        results.forEach((result) => {
+          if (result.status === 'fulfilled') {
+            successCount += 1;
+          } else {
+            failedCount += 1;
+          }
+        });
+      }
+
+      await fetchPayrolls(token);
+
+      if (failedCount === 0) {
+        showNotice('Success', `Processed ${successCount} salaries successfully.`, 'success');
+      } else {
+        showNotice('Warning', `Processed ${successCount} salaries. Failed: ${failedCount}.`, 'warning');
+      }
+    } catch (error) {
+      console.error('Error processing all salaries:', error);
+      showNotice('Error', 'Failed to process salaries in bulk.', 'error');
+    } finally {
+      setBulkProcessLoading(false);
+    }
+  };
+
+  const handleProcessAllSalaries = () => {
+    if (!token) return;
+
+    const pendingRows = filteredPayrolls.filter((payroll) => payroll.status === 'pending');
+    if (pendingRows.length === 0) {
+      showNotice('Info', 'No pending salaries found for current filters.', 'info');
+      return;
+    }
+
+    openConfirm(
+      'Process All Salaries',
+      `Process ${pendingRows.length} pending salaries from current filtered list? This will set status to "processed" for all of them.`,
+      async () => {
+        await executeProcessAllSalaries();
       }
     );
   };
@@ -409,7 +481,31 @@ export default function Payroll() {
       return payroll.salary_breakdown[key] as number;
     }
 
-    const topLevel = (payroll as any)[key];
+    const topLevelValues: Partial<Record<keyof NonNullable<Payroll['salary_breakdown']>, number | undefined>> = {
+      basic_salary: payroll.basic_salary,
+      earned_basic_salary: payroll.earned_basic_salary,
+      commission_amount: payroll.commission_amount,
+      overtime_hours: payroll.overtime_hours,
+      overtime_amount: payroll.overtime_amount,
+      attendance_deduction_amount: payroll.attendance_deduction_amount,
+      late_hours: payroll.late_hours,
+      late_deduction_amount: payroll.late_deduction_amount,
+      epf_employee_amount: payroll.epf_employee_amount,
+      epf_employer_amount: payroll.epf_employer_amount,
+      etf_employee_amount: payroll.etf_employee_amount,
+      etf_employer_amount: payroll.etf_employer_amount,
+      apit_tax_amount: payroll.apit_tax_amount,
+      allowances: payroll.allowances,
+      deductions: payroll.deductions,
+      gross_salary: payroll.gross_salary,
+      net_salary: payroll.net_salary,
+      custom_allowances_total: undefined,
+      custom_deductions_total: undefined,
+      custom_allowance_items: undefined,
+      custom_deduction_items: undefined,
+    };
+
+    const topLevel = topLevelValues[key];
     return typeof topLevel === 'number' ? topLevel : fallback;
   };
 
@@ -535,6 +631,13 @@ export default function Payroll() {
                 className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 disabled:opacity-50 text-white px-6 py-2 rounded-lg font-medium transition-all duration-300 shadow"
               >
                 {recalculateLoading ? 'Recalculating...' : 'Recalculate Month'}
+              </button>
+              <button
+                onClick={handleProcessAllSalaries}
+                disabled={bulkProcessLoading}
+                className="bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:from-violet-700 hover:to-fuchsia-700 disabled:opacity-50 text-white px-6 py-2 rounded-lg font-medium transition-all duration-300 shadow"
+              >
+                {bulkProcessLoading ? 'Processing All...' : 'Process All Salaries'}
               </button>
               <button
                 onClick={resetFilters}

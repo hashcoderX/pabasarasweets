@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
@@ -13,6 +13,7 @@ type CustomerInfo = {
   id: number;
   shop_name?: string;
   customer_code?: string;
+  route_id?: number | null;
 };
 
 type InvoiceRow = {
@@ -46,6 +47,59 @@ type LoadRow = {
     origin?: string;
     destination?: string;
   } | null;
+  loadRoutes?: Array<{
+    route_id?: number;
+    route?: {
+      id?: number;
+      name?: string;
+      origin?: string;
+      destination?: string;
+    } | null;
+  }>;
+  load_routes?: Array<{
+    route_id?: number;
+    route?: {
+      id?: number;
+      name?: string;
+      origin?: string;
+      destination?: string;
+    } | null;
+  }>;
+};
+
+type RolePermission = { name?: string };
+type UserRole = string | { name?: string; permissions?: RolePermission[] };
+type RouteShape = { name?: string; origin?: string; destination?: string };
+
+const getRouteLabel = (route?: RouteShape | null) => {
+  if (!route) return '-';
+  return route.name || [route.origin, route.destination].filter(Boolean).join(' -> ') || '-';
+};
+
+const getLoadRouteEntries = (load?: LoadRow | null) => {
+  if (!load) return [] as Array<{ routeId: number; label: string }>;
+
+  const primaryRouteId = Number(load.route?.id || 0);
+  const primaryEntry = primaryRouteId > 0
+    ? [{ routeId: primaryRouteId, label: getRouteLabel(load.route) }]
+    : [];
+
+  const extraEntries = (Array.isArray(load.loadRoutes) ? load.loadRoutes : Array.isArray(load.load_routes) ? load.load_routes : [])
+    .map((entry) => {
+      const routeId = Number(entry?.route_id || entry?.route?.id || 0);
+      if (!routeId) return null;
+      const label = getRouteLabel(entry?.route || null);
+      return { routeId, label };
+    })
+    .filter((entry): entry is { routeId: number; label: string } => entry !== null);
+
+  const all = [...primaryEntry, ...extraEntries];
+  const map = new Map<number, { routeId: number; label: string }>();
+  all.forEach((entry) => {
+    if (!map.has(entry.routeId)) map.set(entry.routeId, entry);
+  });
+
+  return Array.from(map.values());
 };
 
 type PaginatedResponse<T> = {
@@ -59,7 +113,10 @@ type SalesViewRow = {
   invoiceDate: string;
   customerCode: string;
   customerName: string;
+  loadId: number;
   loadNumber: string;
+  routeId: number | null;
+  routeKey: string;
   routeName: string;
   status: InvoiceStatus;
   salesAmount: number;
@@ -78,6 +135,7 @@ export default function DistributionSalesReportPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | InvoiceStatus>('all');
   const [customerFilter, setCustomerFilter] = useState('all');
   const [loadFilter, setLoadFilter] = useState('all');
+  const [routeFilter, setRouteFilter] = useState('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -95,6 +153,57 @@ export default function DistributionSalesReportPage() {
     setToken(storedToken);
   }, [router]);
 
+  const fetchPaginated = useCallback(async <T,>(endpoint: string, authToken: string) => {
+    const rows: T[] = [];
+    let nextUrl: string | null = `${API_URL}/api/${endpoint}?per_page=200`;
+    let pageCount = 0;
+
+    while (nextUrl && pageCount < 50) {
+      const response: { data: { data?: PaginatedResponse<T> } } = await axios.get(nextUrl, {
+        headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
+      });
+
+      const payload = response.data?.data;
+      rows.push(...(Array.isArray(payload?.data) ? payload.data : []));
+      nextUrl = payload?.next_page_url || null;
+      pageCount += 1;
+    }
+
+    return rows;
+  }, [API_URL]);
+
+  const fetchRows = useCallback(async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    try {
+      setLoading(true);
+      setErrorMessage('');
+
+      const [invoiceRows, paymentRows, loadRows] = await Promise.all([
+        fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse),
+        fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
+        axios
+          .get(`${API_URL}/api/vehicle-loading/loads`, {
+            headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+          })
+          .then((res) => (Array.isArray(res.data) ? (res.data as LoadRow[]) : [])),
+      ]);
+
+      setInvoices(invoiceRows);
+      setPayments(paymentRows);
+      setLoads(loadRows);
+    } catch (error) {
+      console.error('Error fetching sales report rows:', error);
+      setInvoices([]);
+      setPayments([]);
+      setLoads([]);
+      setErrorMessage('Failed to load sales report data.');
+    } finally {
+      setLoading(false);
+    }
+  }, [API_URL, fetchPaginated, token]);
+
   useEffect(() => {
     if (!token) return;
 
@@ -107,22 +216,21 @@ export default function DistributionSalesReportPage() {
         const userData = userRes.data || {};
         const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
 
+        const roles: UserRole[] = Array.isArray(userData?.roles) ? (userData.roles as UserRole[]) : [];
+
         const roleNames = [
           String(userData?.role || ''),
-          ...(Array.isArray(userData?.roles)
-            ? userData.roles.map((role: any) => String(role?.name || role || ''))
-            : []),
+          ...roles.map((role) => (typeof role === 'string' ? role : String(role?.name || ''))),
         ]
           .map((role) => role.trim().toLowerCase())
           .filter(Boolean);
 
-        const permissionNames = Array.isArray(userData?.roles)
-          ? userData.roles.flatMap((role: any) =>
-              Array.isArray(role?.permissions)
-                ? role.permissions.map((permission: any) => String(permission?.name || '').trim().toLowerCase())
-                : []
-            )
-          : [];
+        const permissionNames = roles.flatMap((role) => {
+          if (typeof role === 'string') return [];
+          return Array.isArray(role?.permissions)
+            ? role.permissions.map((permission) => String(permission?.name || '').trim().toLowerCase())
+            : [];
+        });
 
         const roleBlob = roleNames.join(' ');
         const isAdminUser =
@@ -153,58 +261,7 @@ export default function DistributionSalesReportPage() {
     };
 
     verifyAccess();
-  }, [token, router]);
-
-  const fetchPaginated = async <T,>(endpoint: string, authToken: string) => {
-    const rows: T[] = [];
-    let nextUrl: string | null = `${API_URL}/api/${endpoint}?per_page=200`;
-    let pageCount = 0;
-
-    while (nextUrl && pageCount < 50) {
-      const response: { data: { data?: PaginatedResponse<T> } } = await axios.get(nextUrl, {
-        headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
-      });
-
-      const payload = response.data?.data;
-      rows.push(...(Array.isArray(payload?.data) ? payload.data : []));
-      nextUrl = payload?.next_page_url || null;
-      pageCount += 1;
-    }
-
-    return rows;
-  };
-
-  const fetchRows = async (authToken?: string) => {
-    const tokenToUse = authToken || token;
-    if (!tokenToUse) return;
-
-    try {
-      setLoading(true);
-      setErrorMessage('');
-
-      const [invoiceRows, paymentRows, loadRows] = await Promise.all([
-        fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse),
-        fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
-        axios
-          .get(`${API_URL}/api/vehicle-loading/loads`, {
-            headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
-          })
-          .then((res) => (Array.isArray(res.data) ? (res.data as LoadRow[]) : [])),
-      ]);
-
-      setInvoices(invoiceRows);
-      setPayments(paymentRows);
-      setLoads(loadRows);
-    } catch (error) {
-      console.error('Error fetching sales report rows:', error);
-      setInvoices([]);
-      setPayments([]);
-      setLoads([]);
-      setErrorMessage('Failed to load sales report data.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [token, router, fetchRows]);
 
   const loadById = useMemo(() => {
     const map = new Map<number, LoadRow>();
@@ -254,13 +311,30 @@ export default function DistributionSalesReportPage() {
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [invoices, loadById]);
 
+  useEffect(() => {
+    setRouteFilter('all');
+  }, [loadFilter]);
+
   const salesRows = useMemo(() => {
     return invoices
       .filter((invoice) => String(invoice.status || '').toLowerCase() !== 'cancelled')
       .map<SalesViewRow>((invoice) => {
         const loadId = Number(invoice.load_id || 0);
         const load = loadId ? loadById.get(loadId) : null;
-        const routeName = load?.route?.name || [load?.route?.origin, load?.route?.destination].filter(Boolean).join(' -> ');
+        const loadRoutes = getLoadRouteEntries(load);
+        const customerRouteId = Number(invoice.customer?.route_id || 0);
+        const matchedRoute = customerRouteId > 0
+          ? loadRoutes.find((entry) => entry.routeId === customerRouteId)
+          : null;
+
+        const routeName = matchedRoute
+          ? matchedRoute.label
+          : (loadRoutes.length === 1
+            ? loadRoutes[0].label
+            : (loadRoutes.length > 1 ? 'Unmapped in Delivery Routes' : getRouteLabel(load?.route || null)));
+
+        const routeId = matchedRoute?.routeId || (loadRoutes.length === 1 ? loadRoutes[0].routeId : null);
+        const routeKey = routeId ? `${loadId}-${routeId}` : `${loadId}-unmapped`;
 
         const salesAmount = Number(invoice.total || 0);
         const collectedAmount = paymentsByInvoice.get(Number(invoice.id)) ?? Number(invoice.paid_amount || 0);
@@ -272,7 +346,10 @@ export default function DistributionSalesReportPage() {
           invoiceDate: String(invoice.invoice_date || ''),
           customerCode: String(invoice.customer?.customer_code || '-'),
           customerName: String(invoice.customer?.shop_name || '-'),
+          loadId,
           loadNumber: String(load?.load_number || (loadId ? `Load #${loadId}` : '-')),
+          routeId,
+          routeKey,
           routeName: String(routeName || '-'),
           status: (invoice.status || 'pending') as InvoiceStatus,
           salesAmount,
@@ -281,6 +358,25 @@ export default function DistributionSalesReportPage() {
         };
       });
   }, [invoices, loadById, paymentsByInvoice]);
+
+  const routeOptions = useMemo(() => {
+    const routeMap = new Map<string, { key: string; label: string }>();
+
+    const targetLoadId = loadFilter !== 'all' ? Number(loadFilter) : 0;
+    salesRows.forEach((row) => {
+      if (targetLoadId > 0 && row.loadId !== targetLoadId) return;
+      routeMap.set(row.routeKey, { key: row.routeKey, label: row.routeName });
+    });
+
+    return Array.from(routeMap.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [salesRows, loadFilter]);
+
+  useEffect(() => {
+    if (routeFilter === 'all') return;
+    if (!routeOptions.some((option) => option.key === routeFilter)) {
+      setRouteFilter('all');
+    }
+  }, [routeFilter, routeOptions]);
 
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -294,6 +390,8 @@ export default function DistributionSalesReportPage() {
         const expectedLabel = selected?.load_number || `Load #${loadFilter}`;
         if (row.loadNumber !== expectedLabel) return false;
       }
+
+      if (routeFilter !== 'all' && row.routeKey !== routeFilter) return false;
 
       if (fromDate) {
         const d = row.invoiceDate ? new Date(row.invoiceDate) : null;
@@ -320,7 +418,7 @@ export default function DistributionSalesReportPage() {
 
       return text.includes(term);
     });
-  }, [salesRows, search, statusFilter, customerFilter, loadFilter, fromDate, toDate, loadById]);
+  }, [salesRows, search, statusFilter, customerFilter, loadFilter, routeFilter, fromDate, toDate, loadById]);
 
   const summary = useMemo(() => {
     const totalInvoices = filteredRows.length;
@@ -412,9 +510,11 @@ export default function DistributionSalesReportPage() {
     doc.text(`Generated: ${new Date().toLocaleString()}`, 40, 58);
     doc.text(`Status Filter: ${statusFilter === 'all' ? 'ALL' : statusFilter.toUpperCase()}`, 40, 72);
     doc.text(`Customer Filter: ${customerFilter === 'all' ? 'ALL' : customerFilter}`, 40, 86);
+    doc.text(`Delivery Filter: ${loadFilter === 'all' ? 'ALL' : (loadById.get(Number(loadFilter))?.load_number || `Load #${loadFilter}`)}`, 40, 100);
+    doc.text(`Route Filter: ${routeFilter === 'all' ? 'ALL' : (routeOptions.find((option) => option.key === routeFilter)?.label || routeFilter)}`, 40, 114);
 
     autoTable(doc, {
-      startY: 100,
+      startY: 128,
       head: [[
         'Invoice #',
         'Date',
@@ -518,7 +618,7 @@ export default function DistributionSalesReportPage() {
         )}
 
         <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
               <input
@@ -569,6 +669,19 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Route (Delivery No)</label>
+              <select
+                value={routeFilter}
+                onChange={(e) => setRouteFilter(e.target.value)}
+                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                <option value="all">All</option>
+                {routeOptions.map((routeOption) => (
+                  <option key={routeOption.key} value={routeOption.key}>{routeOption.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">From Date</label>
               <input
                 type="date"
@@ -586,7 +699,7 @@ export default function DistributionSalesReportPage() {
                 className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
               />
             </div>
-            <div className="md:col-span-7 flex justify-end">
+            <div className="md:col-span-8 flex justify-end">
               <button
                 type="button"
                 onClick={() => fetchRows()}
