@@ -13,6 +13,7 @@ class DistributionCustomerController extends Controller
     public function index(Request $request): JsonResponse
     {
         $query = DistributionCustomer::with('route:id,name,origin,destination');
+        $allocatedRouteIds = null;
 
         $user = $request->user();
 
@@ -20,13 +21,17 @@ class DistributionCustomerController extends Controller
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
 
             if (!$isAdmin && $user->employee_id) {
+                $requestedLoadId = $request->integer('load_id');
                 $loads = Load::with('loadRoutes:load_id,route_id')
                     ->select(['id', 'route_id'])
                     ->where('sales_ref_id', $user->employee_id)
                     ->whereIn('status', ['pending', 'in_transit', 'delivered'])
+                    ->when($requestedLoadId > 0, function ($query) use ($requestedLoadId) {
+                        $query->whereKey($requestedLoadId);
+                    })
                     ->get();
 
-                $routeIds = $loads
+                $allocatedRouteIds = $loads
                     ->flatMap(function ($load) {
                         $baseRouteId = $load->route_id ? [$load->route_id] : [];
                         $extraRouteIds = $load->loadRoutes->pluck('route_id')->all();
@@ -34,10 +39,11 @@ class DistributionCustomerController extends Controller
                     })
                     ->filter()
                     ->unique()
+                    ->map(fn ($routeId) => (int) $routeId)
                     ->toArray();
 
-                if (!empty($routeIds)) {
-                    $query->whereIn('route_id', $routeIds);
+                if (!empty($allocatedRouteIds)) {
+                    $query->whereIn('route_id', $allocatedRouteIds);
                 } else {
                     // No allocated routes for this sales ref - hide customers
                     $query->whereRaw('1 = 0');
@@ -65,6 +71,7 @@ class DistributionCustomerController extends Controller
         return response()->json([
             'success' => true,
             'data' => $customers,
+            'allocated_route_ids' => $allocatedRouteIds,
             'message' => 'Distribution customers retrieved successfully',
         ]);
     }

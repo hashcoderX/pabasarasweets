@@ -168,6 +168,45 @@ class DistributionPaymentController extends Controller
         ], 201);
     }
 
+    public function bulkStore(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'payments' => 'required|array|min:1',
+            'payments.*.payment_number' => 'required|string|max:60|distinct|unique:distribution_payments,payment_number',
+            'payments.*.distribution_invoice_id' => 'nullable|exists:distribution_invoices,id',
+            'payments.*.load_id' => 'nullable|exists:loads,id',
+            'payments.*.customer_id' => 'required|exists:distribution_customers,id',
+            'payments.*.payment_date' => 'required|date',
+            'payments.*.cheque_date' => 'nullable|date|required_if:payments.*.payment_method,check',
+            'payments.*.amount' => 'required|numeric|gt:0',
+            'payments.*.payment_method' => 'required|in:check,cash,bank_transfer',
+            'payments.*.reference_no' => 'nullable|string|max:100',
+            'payments.*.bank_name' => 'nullable|string|max:255',
+            'payments.*.status' => 'nullable|in:received,cleared,bounced,pending',
+            'payments.*.notes' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $payments = DB::transaction(function () use ($validator, $request) {
+            return collect($validator->validated()['payments'])
+                ->map(fn (array $payload) => $this->createPayment($payload, $request))
+                ->values();
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => $payments,
+            'message' => 'Distribution payments recorded successfully',
+        ], 201);
+    }
+
     public function show(string $id): JsonResponse
     {
         $payment = DistributionPayment::with([
@@ -187,6 +226,56 @@ class DistributionPaymentController extends Controller
             'data' => $payment,
             'message' => 'Distribution payment retrieved successfully',
         ]);
+    }
+
+    private function createPayment(array $payload, Request $request): DistributionPayment
+    {
+        $paymentsHasLoadId = Schema::hasColumn('distribution_payments', 'load_id');
+        $loadId = null;
+
+        if (!empty($payload['distribution_invoice_id'])) {
+            $invoice = DistributionInvoice::find($payload['distribution_invoice_id']);
+            $loadId = $invoice?->load_id;
+        }
+
+        $loadId ??= $payload['load_id'] ?? null;
+
+        $paymentData = [
+            'payment_number' => $payload['payment_number'],
+            'distribution_invoice_id' => $payload['distribution_invoice_id'] ?? null,
+            'customer_id' => $payload['customer_id'],
+            'payment_date' => $payload['payment_date'],
+            'cheque_date' => ($payload['payment_method'] ?? '') === 'check' ? ($payload['cheque_date'] ?? null) : null,
+            'amount' => $payload['amount'],
+            'payment_method' => $payload['payment_method'],
+            'reference_no' => $payload['reference_no'] ?? null,
+            'bank_name' => $payload['bank_name'] ?? null,
+            'status' => $payload['status'] ?? 'received',
+            'notes' => $payload['notes'] ?? null,
+            'received_by' => $request->user()?->id,
+        ];
+
+        if ($paymentsHasLoadId) $paymentData['load_id'] = $loadId;
+        $payment = DistributionPayment::create($paymentData);
+
+        if (!empty($payload['distribution_invoice_id'])) {
+            $invoice = DistributionInvoice::find($payload['distribution_invoice_id']);
+            if ($invoice) {
+                $invoice->paid_amount = (float) $invoice->paid_amount + (float) $payload['amount'];
+                $invoice->status = (float) $invoice->paid_amount >= (float) $invoice->total
+                    ? 'paid'
+                    : ((float) $invoice->paid_amount > 0 ? 'partial' : 'pending');
+                $invoice->save();
+            }
+        }
+
+        $customer = DistributionCustomer::find($payload['customer_id']);
+        if ($customer) {
+            $customer->outstanding = max(0, (float) ($customer->outstanding ?? 0) - (float) $payload['amount']);
+            $customer->save();
+        }
+
+        return $payment;
     }
 
     public function update(Request $request, string $id): JsonResponse

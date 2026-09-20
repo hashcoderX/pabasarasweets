@@ -1095,6 +1095,20 @@ export default function LoadsPage() {
     return `${firstName} (+${ordered.length - 1} more)`;
   };
 
+  const getRouteTooltip = (load: Load) => {
+    const ordered = getOrderedRoutesForLoad(load);
+    if (ordered.length === 0) return 'No allocated routes';
+
+    return ordered
+      .map((entry, index) => {
+        const route = entry.route;
+        const routeName = route?.name || `Route ${index + 1}`;
+        const path = [route?.origin, route?.destination].filter(Boolean).join(' to ');
+        return `${index + 1}. ${routeName}${path ? ` (${path})` : ''}`;
+      })
+      .join('\n');
+  };
+
   const applyUpdatedLoadState = (updatedLoad: Load) => {
     if (!updatedLoad?.id) return;
 
@@ -1344,7 +1358,13 @@ export default function LoadsPage() {
                     {load.driver?.name || '-'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
-                    {getRouteDisplayLabel(load)}
+                    <span
+                      title={getRouteTooltip(load)}
+                      aria-label={`Allocated routes: ${getRouteTooltip(load).replace(/\n/g, ', ')}`}
+                      className="inline-block max-w-xs cursor-help truncate border-b border-dashed border-slate-300"
+                    >
+                      {getRouteDisplayLabel(load)}
+                    </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold uppercase ${getStatusColor(load)}`}>

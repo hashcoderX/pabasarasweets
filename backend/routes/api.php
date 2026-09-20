@@ -248,9 +248,11 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Distribution Routes
     Route::apiResource('distribution/customers', \App\Http\Controllers\DistributionCustomerController::class);
+    Route::get('distribution/invoices/{invoice}/receipt', [\App\Http\Controllers\DistributionInvoiceController::class, 'receipt']);
     Route::apiResource('distribution/invoices', \App\Http\Controllers\DistributionInvoiceController::class);
     Route::apiResource('distribution/returns', \App\Http\Controllers\DistributionReturnController::class);
     Route::apiResource('distribution/payments', \App\Http\Controllers\DistributionPaymentController::class);
+    Route::post('distribution/payments/bulk', [\App\Http\Controllers\DistributionPaymentController::class, 'bulkStore']);
     Route::get('distribution/live-locations', [\App\Http\Controllers\DistributionLiveLocationController::class, 'index']);
     Route::post('distribution/live-locations/ping', [\App\Http\Controllers\DistributionLiveLocationController::class, 'ping']);
 

@@ -1,11 +1,19 @@
 'use client';
 
-import { useEffect, useMemo, useState, useRef } from 'react';
+import { useEffect, useMemo, useState, useRef, type CSSProperties } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
 
 interface Customer { id: number; shop_name: string; customer_code: string; route_id?: number | null; }
 interface Item { id: number; name: string; code: string; unit: string; sell_price: number; current_stock: number; }
+
+interface CompanyProfile {
+  name?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  logo_url?: string;
+}
 
 interface LoadItemInfo {
   id: number;
@@ -50,7 +58,7 @@ interface InvoiceRecord {
   invoice_number: string;
   customer_id: number;
   load_id?: number | null;
-  customer?: { shop_name: string; customer_code?: string };
+  customer?: { shop_name: string; customer_code?: string; route_id?: number | null };
   invoice_date: string;
   due_date?: string | null;
   subtotal?: number;
@@ -59,6 +67,16 @@ interface InvoiceRecord {
   paid_amount?: number;
   status: string;
   items: InvoiceItem[];
+  payments?: Array<{
+    id: number;
+    payment_date?: string;
+    cheque_date?: string | null;
+    amount?: number;
+    payment_method?: string;
+    reference_no?: string | null;
+    bank_name?: string | null;
+    status?: string;
+  }>;
   notes?: string | null;
   ref_latitude?: number | null;
   ref_longitude?: number | null;
@@ -68,6 +86,16 @@ interface InvoiceRecord {
   billing_longitude?: number | null;
   billing_gps_accuracy?: number | null;
   billing_gps_captured_at?: string | null;
+}
+
+interface PaymentEntry {
+  amount: number;
+  method: 'cash' | 'check' | 'bank_transfer' | 'bill_to_bill';
+  date: string;
+  cheque_date?: string | null;
+  reference?: string | null;
+  bank_name?: string | null;
+  target_invoice_id?: number | null;
 }
 
 interface DeliveryOrderRecord {
@@ -139,15 +167,8 @@ interface PendingOfflineInvoice {
       unit_price: number;
       discount?: number;
     }[];
-    payment?: {
-      amount: number;
-      method: 'cash' | 'check' | 'bank_transfer' | 'bill_to_bill';
-      date: string;
-      cheque_date?: string | null;
-      reference?: string | null;
-      bank_name?: string | null;
-      target_invoice_id?: number | null;
-    } | null;
+    payment?: PaymentEntry | null;
+    payments?: PaymentEntry[];
     returnPayload?: {
       return_number: string;
       customer_id: number;
@@ -173,43 +194,8 @@ interface LoadOption {
 }
 
 const OFFLINE_INVOICE_STORAGE_KEY = 'distribution_offline_invoices';
-const COMPANY_PROFILE_ID_KEY = 'company_profile_id';
-
-const normalizeCompanyLogoUrl = (rawUrl?: string, rawPath?: string): string => {
-  const logoPath = String(rawPath || '').trim();
-  if (logoPath) {
-    return `/storage/${logoPath.replace(/^\/+/, '')}`;
-  }
-
-  const url = String(rawUrl || '').trim();
-  if (!url) return '';
-
-  if (url.startsWith('/storage/')) {
-    return url;
-  }
-
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    try {
-      const parsed = new URL(url);
-      if (parsed.pathname.startsWith('/storage/')) {
-        return `${parsed.pathname}${parsed.search || ''}`;
-      }
-    } catch {
-      return url;
-    }
-  }
-
-  return url;
-};
-
 export default function DistributionInvoicesPage() {
   const [token, setToken] = useState('');
-  const [companyProfileName, setCompanyProfileName] = useState('Company');
-  const [companyProfileLogoUrl, setCompanyProfileLogoUrl] = useState('');
-  const [companyProfileAddress, setCompanyProfileAddress] = useState('');
-  const [companyProfilePhone, setCompanyProfilePhone] = useState('');
-  const [companyProfileEmail, setCompanyProfileEmail] = useState('');
-  const [companyProfileWebsite, setCompanyProfileWebsite] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [assignedRouteId, setAssignedRouteId] = useState('');
   const [assignedRouteIds, setAssignedRouteIds] = useState<string[]>([]);
@@ -217,6 +203,7 @@ export default function DistributionInvoicesPage() {
   const [saving, setSaving] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [serverAllocatedRouteIds, setServerAllocatedRouteIds] = useState<string[] | null>(null);
   const [items, setItems] = useState<Item[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
   const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRecord[]>([]);
@@ -255,6 +242,8 @@ export default function DistributionInvoicesPage() {
   const [returnAmountInput, setReturnAmountInput] = useState('');
   const [returnDamageInput, setReturnDamageInput] = useState(false);
   const [returnLines, setReturnLines] = useState<ReturnLine[]>([]);
+  const customerLookupRequestRef = useRef(0);
+  const deliveryOrderRequestRef = useRef(0);
 
   const [lineFreeQty, setLineFreeQty] = useState('');
   const [lineItemDiscountType, setLineItemDiscountType] = useState<'percentage' | 'amount'>('percentage');
@@ -268,6 +257,7 @@ export default function DistributionInvoicesPage() {
   const [paymentChequeDate, setPaymentChequeDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentBankName, setPaymentBankName] = useState('');
+  const [paymentCheques, setPaymentCheques] = useState<Array<{ amount: string; chequeDate: string; reference: string; bankName: string }>>([]);
   const [refGpsSnapshot, setRefGpsSnapshot] = useState<GpsSnapshot | null>(null);
   const [billingGpsSnapshot, setBillingGpsSnapshot] = useState<GpsSnapshot | null>(null);
   const [capturingGpsTarget, setCapturingGpsTarget] = useState<'ref' | 'billing' | null>(null);
@@ -291,14 +281,15 @@ export default function DistributionInvoicesPage() {
   const [editingLineId, setEditingLineId] = useState<string | null>(null);
   const [editingReturnId, setEditingReturnId] = useState<number | null>(null);
 
-  const [posPrintInvoice, setPosPrintInvoice] = useState<InvoiceRecord | null>(null);
-  const posPrintRef = useRef<HTMLDivElement | null>(null);
   const customerPickerRef = useRef<HTMLDivElement | null>(null);
 
   const [pendingOfflineInvoices, setPendingOfflineInvoices] = useState<PendingOfflineInvoice[]>([]);
   const [syncingOfflineInvoices, setSyncingOfflineInvoices] = useState(false);
 
   const [viewInvoice, setViewInvoice] = useState<InvoiceRecord | null>(null);
+  const [receiptPreviewInvoice, setReceiptPreviewInvoice] = useState<InvoiceRecord | null>(null);
+  const [receiptPaperWidth, setReceiptPaperWidth] = useState<'54mm' | '80mm'>('80mm');
+  const [receiptCompany, setReceiptCompany] = useState<CompanyProfile>({});
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 10;
 
@@ -346,127 +337,6 @@ export default function DistributionInvoicesPage() {
       resolveAssignedRoute();
       fetchData();
     }
-  }, [token]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const raw = window.localStorage.getItem('company_profile_data');
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as {
-        name?: string;
-        logo_url?: string;
-        logo_path?: string;
-        address?: string;
-        phone?: string;
-        email?: string;
-        website?: string;
-      };
-      const name = String(parsed?.name || '').trim();
-      if (name) {
-        setCompanyProfileName(name);
-      }
-
-      setCompanyProfileAddress(String(parsed?.address || '').trim());
-      setCompanyProfilePhone(String(parsed?.phone || '').trim());
-      setCompanyProfileEmail(String(parsed?.email || '').trim());
-      setCompanyProfileWebsite(String(parsed?.website || '').trim());
-
-      const normalizedLogoUrl = normalizeCompanyLogoUrl(parsed?.logo_url, parsed?.logo_path);
-      if (normalizedLogoUrl) {
-        setCompanyProfileLogoUrl(normalizedLogoUrl);
-      }
-    } catch (error) {
-      console.error('Failed to load company profile for print header:', error);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!token || typeof window === 'undefined') return;
-
-    const hydrateCompanyHeader = async () => {
-      try {
-        const applyCompanyHeader = (company: {
-          name?: string;
-          logo_url?: string;
-          logo_path?: string;
-          address?: string;
-          phone?: string;
-          email?: string;
-          website?: string;
-        }) => {
-          const latestName = String(company?.name || '').trim();
-          if (latestName) {
-            setCompanyProfileName(latestName);
-          }
-
-          const latestLogoUrl = normalizeCompanyLogoUrl(company?.logo_url, company?.logo_path);
-          setCompanyProfileLogoUrl(latestLogoUrl);
-          setCompanyProfileAddress(String(company?.address || '').trim());
-          setCompanyProfilePhone(String(company?.phone || '').trim());
-          setCompanyProfileEmail(String(company?.email || '').trim());
-          setCompanyProfileWebsite(String(company?.website || '').trim());
-
-          const currentRaw = window.localStorage.getItem('company_profile_data');
-          const current = currentRaw ? JSON.parse(currentRaw) : {};
-          const merged = {
-            ...current,
-            ...company,
-            logo_url: latestLogoUrl,
-          };
-          window.localStorage.setItem('company_profile_data', JSON.stringify(merged));
-        };
-
-        const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
-        if (profileId > 0) {
-          const byIdRes = await axios.get(`/api/companies/${profileId}`, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-
-          const companyById = (byIdRes?.data || {}) as {
-            name?: string;
-            logo_url?: string;
-            logo_path?: string;
-            address?: string;
-            phone?: string;
-            email?: string;
-            website?: string;
-          };
-
-          applyCompanyHeader(companyById);
-          return;
-        }
-
-        // Fallback to first company from companies table when no local profile id exists.
-        const listRes = await axios.get('/api/companies', {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 1 },
-        });
-
-        const rows = Array.isArray(listRes?.data)
-          ? listRes.data
-          : (listRes?.data?.data || []);
-        const firstCompany = (Array.isArray(rows) ? rows[0] : null) as
-          | {
-              name?: string;
-              logo_url?: string;
-              logo_path?: string;
-              address?: string;
-              phone?: string;
-              email?: string;
-              website?: string;
-            }
-          | null;
-
-        if (firstCompany) {
-          applyCompanyHeader(firstCompany);
-        }
-      } catch (error) {
-        console.error('Failed to refresh company profile for print header:', error);
-      }
-    };
-
-    hydrateCompanyHeader();
   }, [token]);
 
   useEffect(() => {
@@ -616,11 +486,9 @@ export default function DistributionInvoicesPage() {
         localStorage.removeItem('distribution_active_load_id');
       }
 
-      const assignedRouteIdsFromLoad: string[] = Array.from(
-        new Set<string>(
-          activeAssignedLoads.flatMap((load: any) => getRouteIdsFromLoad(load))
-        )
-      );
+      const assignedRouteIdsFromLoad: string[] = assignedLoad
+        ? getRouteIdsFromLoad(assignedLoad)
+        : [];
 
       const firstAssignedRouteId = assignedRouteIdsFromLoad[0];
       if (firstAssignedRouteId) {
@@ -765,32 +633,27 @@ export default function DistributionInvoicesPage() {
 
           const createdInvoice: any = invoiceRes.data?.data;
 
-          if (inv.payment && createdInvoice?.id) {
+          const offlinePayments = inv.payments || (inv.payment ? [inv.payment] : []);
+          if (offlinePayments.length > 0 && createdInvoice?.id) {
             try {
-              const targetInvoiceId = inv.payment.method === 'bill_to_bill'
-                ? Number(inv.payment.target_invoice_id || 0)
-                : Number(createdInvoice.id);
-
-              if (inv.payment.method === 'bill_to_bill' && !targetInvoiceId) {
-                throw new Error('Missing target invoice for bill-to-bill sync.');
-              }
-
-              await axios.post('/api/distribution/payments', {
+              const paymentRows = offlinePayments.map((payment) => ({
                 payment_number: generatePaymentNumber(),
-                distribution_invoice_id: targetInvoiceId,
+                distribution_invoice_id: payment.method === 'bill_to_bill'
+                  ? Number(payment.target_invoice_id || 0)
+                  : Number(createdInvoice.id),
                 load_id: createdInvoice.load_id ?? inv.load_id ?? (activeLoadId ? Number(activeLoadId) : (isAdmin && selectedLoadFilter ? Number(selectedLoadFilter) : null)),
                 customer_id: createdInvoice.customer_id ?? inv.customer_id,
-                payment_date: inv.payment.date,
-                cheque_date: inv.payment.method === 'check' ? (inv.payment.cheque_date || null) : null,
-                amount: inv.payment.amount,
-                payment_method: inv.payment.method === 'bill_to_bill' ? 'cash' : inv.payment.method,
-                reference_no: inv.payment.reference || null,
-                bank_name: inv.payment.bank_name || null,
+                payment_date: payment.date,
+                cheque_date: payment.method === 'check' ? (payment.cheque_date || null) : null,
+                amount: payment.amount,
+                payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
+                reference_no: payment.reference || null,
+                bank_name: payment.bank_name || null,
                 status: 'received',
-                notes: inv.payment.method === 'bill_to_bill'
-                  ? `Bill to bill settlement from invoice ${createdInvoice.invoice_number} (offline sync)`
-                  : `Auto payment from invoice ${createdInvoice.invoice_number} (offline sync)`,
-              }, { headers: { Authorization: `Bearer ${token}` } });
+                notes: `Auto payment from invoice ${createdInvoice.invoice_number} (offline sync)`,
+              }));
+              if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for offline payment sync.');
+              await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
             } catch (paymentError) {
               console.error('Failed to sync offline payment for invoice:', paymentError);
             }
@@ -859,51 +722,69 @@ export default function DistributionInvoicesPage() {
     }
   };
 
+  const fetchCustomerSuggestions = async (searchTerm: string) => {
+    const term = searchTerm.trim();
+    const requestId = customerLookupRequestRef.current + 1;
+    customerLookupRequestRef.current = requestId;
+
+    if (!term) {
+      setCustomers([]);
+      return;
+    }
+
+    if (!isAdmin && !activeLoadId) {
+      setCustomers([]);
+      setServerAllocatedRouteIds([]);
+      return;
+    }
+
+    try {
+      const response = await axios.get('/api/distribution/customers', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: {
+          search: term,
+          per_page: 50,
+          ...(activeLoadId ? { load_id: Number(activeLoadId) } : {}),
+        },
+      });
+
+      if (requestId !== customerLookupRequestRef.current) return;
+
+      const root = response.data;
+      const payload = root?.data;
+      const rows = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload)
+          ? payload
+          : [];
+
+      const allocatedRouteIds = Array.isArray(root?.allocated_route_ids)
+        ? root.allocated_route_ids.map((routeId: unknown) => String(routeId)).filter(Boolean)
+        : null;
+
+      setServerAllocatedRouteIds(allocatedRouteIds);
+      setCustomers(rows as Customer[]);
+    } catch (error) {
+      if (requestId !== customerLookupRequestRef.current) return;
+      console.error('Error searching distribution customers:', error);
+      setCustomers([]);
+      setServerAllocatedRouteIds(null);
+      setServerAllocatedRouteIds(null);
+    }
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
-      const fetchAllCustomers = async (): Promise<Customer[]> => {
-        type CustomerPagePayload = {
-          data?: Customer[];
-          next_page_url?: string | null;
-        };
-
-        const rows: Customer[] = [];
-        let nextUrl: string | null = '/api/distribution/customers?per_page=1000';
-        let pages = 0;
-
-        while (nextUrl && pages < 100) {
-          const response: { data: unknown } = await axios.get(nextUrl, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-
-          const root = response.data;
-          const payload: CustomerPagePayload | Customer[] =
-            typeof root === 'object' && root !== null && 'data' in root
-              ? ((root as { data?: CustomerPagePayload | Customer[] }).data || [])
-              : [];
-
-          if (Array.isArray(payload)) {
-            rows.push(...payload);
-            break;
-          }
-
-          const pageRows = Array.isArray(payload?.data) ? payload.data : [];
-          rows.push(...pageRows);
-          nextUrl = payload?.next_page_url || null;
-          pages += 1;
-        }
-
-        return rows;
-      };
-
-      const [allCustomers, inventoryRes, invoicesRes] = await Promise.all([
-        fetchAllCustomers(),
+      const [inventoryRes, invoicesRes] = await Promise.all([
         axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
-        axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 50 } }),
+        axios.get('/api/distribution/invoices', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 1000, ...(activeLoadId ? { load_id: Number(activeLoadId) } : {}) },
+        }),
       ]);
 
-      setCustomers(allCustomers);
+      setCustomers([]);
       const inventory = inventoryRes.data?.data?.data || inventoryRes.data?.data || [];
       setItems(inventory.filter((item: any) => item.status === 'active').map((item: any) => ({
         id: item.id,
@@ -913,35 +794,13 @@ export default function DistributionInvoicesPage() {
         sell_price: Number(item.sell_price) || 0,
         current_stock: Number(item.current_stock) || 0,
       })));
-      setInvoices(invoicesRes.data?.data?.data || []);
-
-      try {
-        const doRes = await axios.get('/api/outlet-pos/sales', {
-          headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 200, do_only: 1 },
-        });
-
-        const rows = doRes.data?.data?.data || [];
-        const mapped: DeliveryOrderRecord[] = rows.map((row: any) => ({
-          id: Number(row.id),
-          sale_number: String(row.sale_number || ''),
-          do_number: row.do_number || null,
-          load_id: row.load_id ? Number(row.load_id) : null,
-          sale_date: String(row.sale_date || ''),
-          customer_name: row.customer_name || null,
-          total_amount: Number(row.total_amount || 0),
-          status: row.status || null,
-          outlet: row.outlet || null,
-        }));
-
-        setDeliveryOrders(mapped.filter((row) => !!row.do_number));
-      } catch (error: any) {
-        const status = error?.response?.status;
-        if (status !== 401 && status !== 403) {
-          console.error('Error loading delivery orders for invoices page:', error);
-        }
-        setDeliveryOrders([]);
-      }
+      const invoicePayload = invoicesRes.data?.data;
+      const invoiceRows = Array.isArray(invoicePayload?.data)
+        ? invoicePayload.data
+        : Array.isArray(invoicePayload)
+          ? invoicePayload
+          : [];
+      setInvoices(invoiceRows as InvoiceRecord[]);
 
       setInvoiceNumber(generateInvoiceNumber());
     } catch (error) {
@@ -952,6 +811,56 @@ export default function DistributionInvoicesPage() {
       setDeliveryOrders([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchDeliveryOrders = async (loadId?: string) => {
+    if (!token) return;
+
+    const requestId = deliveryOrderRequestRef.current + 1;
+    deliveryOrderRequestRef.current = requestId;
+
+    try {
+      const doRes = await axios.get('/api/outlet-pos/sales', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: {
+          per_page: 200,
+          do_only: 1,
+          ...(loadId ? { load_id: Number(loadId) } : {}),
+        },
+      });
+
+      const payload = doRes.data?.data;
+      const rows = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload)
+          ? payload
+          : [];
+
+          if (requestId !== deliveryOrderRequestRef.current) return;
+
+      const mapped: DeliveryOrderRecord[] = rows.map((row: any) => ({
+        id: Number(row.id),
+        sale_number: String(row.sale_number || ''),
+        do_number: row.do_number || null,
+        load_id: row.load_id
+          ? Number(row.load_id)
+          : Number(row.assigned_load?.id || row.assignedLoad?.id || 0) || null,
+        sale_date: String(row.sale_date || ''),
+        customer_name: row.customer_name || null,
+        total_amount: Number(row.total_amount || 0),
+        status: row.status || null,
+        outlet: row.outlet || null,
+      }));
+
+      setDeliveryOrders(mapped.filter((row) => !!row.do_number));
+    } catch (error: any) {
+      if (requestId !== deliveryOrderRequestRef.current) return;
+      const status = error?.response?.status;
+      if (status !== 401 && status !== 403) {
+        console.error('Error loading delivery orders for invoices page:', error);
+      }
+      setDeliveryOrders([]);
     }
   };
 
@@ -1277,15 +1186,13 @@ export default function DistributionInvoicesPage() {
     );
   };
   const scopedCustomers = useMemo(() => {
-    if (assignedRouteIds.length === 0) return customers;
-    const routeIdSet = new Set(assignedRouteIds);
-    const matched = customers.filter((customer) => routeIdSet.has(String(customer.route_id || '')));
-    // If there is no active load and cached route is stale, avoid blocking shop selection.
-    if (matched.length === 0 && !activeLoadId) {
-      return customers;
-    }
-    return matched;
-  }, [customers, assignedRouteIds, activeLoadId]);
+    if (isAdmin) return customers;
+    const routeIds = serverAllocatedRouteIds ?? assignedRouteIds;
+    if (routeIds.length === 0) return [];
+
+    const routeIdSet = new Set(routeIds);
+    return customers.filter((customer) => routeIdSet.has(String(customer.route_id || '')));
+  }, [customers, assignedRouteIds, isAdmin, serverAllocatedRouteIds]);
 
   const selectedCustomer = useMemo(
     () => scopedCustomers.find((customer) => customer.id === Number(customerId)) || null,
@@ -1317,14 +1224,32 @@ export default function DistributionInvoicesPage() {
   }, [customers]);
 
   const scopedInvoices = useMemo(() => {
-    if (assignedRouteIds.length === 0) return invoices;
-    return invoices.filter((invoice) => scopedCustomerIdSet.has(invoice.customer_id));
-  }, [invoices, scopedCustomerIdSet, assignedRouteIds]);
+    if (isAdmin) return invoices;
+    if (assignedRouteIds.length === 0) return [];
+
+    const routeIdSet = new Set(assignedRouteIds);
+    return invoices.filter((invoice) => {
+      const belongsToActiveLoad = activeLoadId && String(invoice.load_id || '') === String(activeLoadId);
+      const belongsToAllocatedRoute = routeIdSet.has(String(invoice.customer?.route_id || ''));
+      return Boolean(belongsToActiveLoad || belongsToAllocatedRoute);
+    });
+  }, [invoices, assignedRouteIds, isAdmin, activeLoadId]);
 
   const effectiveLoadFilter = useMemo(
     () => (isAdmin ? selectedLoadFilter : activeLoadId),
     [isAdmin, selectedLoadFilter, activeLoadId]
   );
+
+  useEffect(() => {
+    if (!token) return;
+    void fetchDeliveryOrders(effectiveLoadFilter || undefined);
+  }, [token, effectiveLoadFilter]);
+
+  useEffect(() => {
+    if (token && activeLoadId) {
+      void fetchData();
+    }
+  }, [token, activeLoadId]);
 
   const filteredInvoices = useMemo(() => {
     const searchTerm = invoiceSearch.trim().toLowerCase();
@@ -1539,136 +1464,55 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+    setPaymentCheques([]);
     setRefGpsSnapshot(null);
     setBillingGpsSnapshot(null);
     setCapturingGpsTarget(null);
   };
 
-  const refreshCompanyHeaderForPrint = async () => {
-    if (!token || typeof window === 'undefined') return;
-
-    try {
-      const applyCompanyHeader = (company: {
-        name?: string;
-        logo_url?: string;
-        logo_path?: string;
-        address?: string;
-        phone?: string;
-        email?: string;
-        website?: string;
-      }) => {
-        const latestName = String(company?.name || '').trim();
-        if (latestName) {
-          setCompanyProfileName(latestName);
-        }
-
-        const latestLogoUrl = normalizeCompanyLogoUrl(company?.logo_url, company?.logo_path);
-        setCompanyProfileLogoUrl(latestLogoUrl);
-        setCompanyProfileAddress(String(company?.address || '').trim());
-        setCompanyProfilePhone(String(company?.phone || '').trim());
-        setCompanyProfileEmail(String(company?.email || '').trim());
-        setCompanyProfileWebsite(String(company?.website || '').trim());
-
-        const currentRaw = window.localStorage.getItem('company_profile_data');
-        const current = currentRaw ? JSON.parse(currentRaw) : {};
-        const merged = {
-          ...current,
-          ...company,
-          logo_url: latestLogoUrl,
-        };
-        window.localStorage.setItem('company_profile_data', JSON.stringify(merged));
-      };
-
-      const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
-      if (profileId > 0) {
-        const byIdRes = await axios.get(`/api/companies/${profileId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-
-        const companyById = (byIdRes?.data || {}) as {
-          name?: string;
-          logo_url?: string;
-          logo_path?: string;
-          address?: string;
-          phone?: string;
-          email?: string;
-          website?: string;
-        };
-
-        applyCompanyHeader(companyById);
-        return;
-      }
-
-      const listRes = await axios.get('/api/companies', {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { per_page: 50 },
-      });
-
-      const rows = Array.isArray(listRes?.data)
-        ? listRes.data
-        : (listRes?.data?.data || []);
-
-      const companies = Array.isArray(rows) ? rows : [];
-      const companyWithLogo = companies.find((company: any) => {
-        const logoPath = String(company?.logo_path || '').trim();
-        const logoUrl = String(company?.logo_url || '').trim();
-        return Boolean(logoPath || logoUrl);
-      });
-
-      const firstCompany = (companyWithLogo || companies[0] || null) as
-        | {
-            name?: string;
-            logo_url?: string;
-            logo_path?: string;
-            address?: string;
-            phone?: string;
-            email?: string;
-            website?: string;
-          }
-        | null;
-
-      if (firstCompany) {
-        applyCompanyHeader(firstCompany);
-      }
-    } catch (error) {
-      console.error('Failed to refresh company profile for print header:', error);
-    }
-  };
-
-  const handlePosPrint = async (invoice: InvoiceRecord) => {
-    await refreshCompanyHeaderForPrint();
-    setPosPrintInvoice(invoice);
-
-    // Allow React to render the print area before triggering print
-    setTimeout(() => {
-      if (typeof window !== 'undefined') {
-        const logoImage = posPrintRef.current?.querySelector<HTMLImageElement>('img[alt="Company logo"]') || null;
-        if (!logoImage || !companyProfileLogoUrl) {
-          window.print();
-          return;
-        }
-
-        if (logoImage.complete && logoImage.naturalWidth > 0) {
-          window.print();
-          return;
-        }
-
-        let printed = false;
-        const printNow = () => {
-          if (printed) return;
-          printed = true;
-          window.print();
-        };
-
-        logoImage.addEventListener('load', printNow, { once: true });
-        logoImage.addEventListener('error', printNow, { once: true });
-        setTimeout(printNow, 1500);
-      }
-    }, 220);
-  };
-
   const openViewInvoice = (invoice: InvoiceRecord) => {
     setViewInvoice(invoice);
+  };
+
+  const openReceiptPreview = (invoice: InvoiceRecord) => {
+    setReceiptPreviewInvoice(invoice);
+    if (!token) return;
+    void axios.get('/api/companies', {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { per_page: 1 },
+    }).then((response) => {
+      const rows = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+      if (Array.isArray(rows) && rows[0]) setReceiptCompany(rows[0] as CompanyProfile);
+    }).catch((error) => console.error('Error loading company details for POS receipt:', error));
+  };
+
+  const printReceiptPreview = () => {
+    if (!receiptPreviewInvoice) return;
+    document.documentElement.style.setProperty('--receipt-width', receiptPaperWidth);
+    window.print();
+  };
+
+  const downloadInvoiceReceipt = async (invoice: InvoiceRecord) => {
+    if (!token) return;
+
+    try {
+      const response = await axios.get(`/api/distribution/invoices/${invoice.id}/receipt`, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob',
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `invoice-receipt-${invoice.invoice_number}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error generating invoice receipt:', error);
+      setQtyWarningMessage('Failed to generate invoice receipt. Please try again.');
+      setQtyWarningOpen(true);
+    }
   };
 
   const startEditInvoice = (invoice: InvoiceRecord) => {
@@ -1716,6 +1560,7 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+    setPaymentCheques([]);
 
     const refLat = Number((invoice as any).ref_latitude);
     const refLng = Number((invoice as any).ref_longitude);
@@ -1896,6 +1741,9 @@ export default function DistributionInvoicesPage() {
     const effectiveLoadId = selectedLoadId ? Number(selectedLoadId) : null;
     const billToBillAmount = Number(lastBillAmount || 0);
     const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillAmount > 0;
+    const chequeEntries = paymentCheques.length > 0
+      ? paymentCheques
+      : [{ amount: paymentAmount, chequeDate: paymentChequeDate, reference: paymentReference, bankName: paymentBankName }];
     if (!customerId || lines.length === 0) {
       setQtyWarningMessage('Select customer and add at least one item line.');
       setQtyWarningOpen(true);
@@ -1909,14 +1757,16 @@ export default function DistributionInvoicesPage() {
     }
 
     if (addPayment && paymentMethod !== 'bill_to_bill') {
-      const amt = Number(paymentAmount);
-      if (!amt || amt <= 0) {
+      const amounts = paymentMethod === 'check'
+        ? chequeEntries.map((entry) => Number(entry.amount))
+        : [Number(paymentAmount)];
+      if (amounts.some((amount) => !amount || amount <= 0)) {
         setQtyWarningMessage('Enter a valid payment amount.');
         setQtyWarningOpen(true);
         return;
       }
 
-      if (paymentMethod === 'check' && !paymentChequeDate) {
+      if (paymentMethod === 'check' && chequeEntries.some((entry) => !entry.chequeDate)) {
         setQtyWarningMessage('Select cheque date for cheque payments.');
         setQtyWarningOpen(true);
         return;
@@ -2017,13 +1867,18 @@ export default function DistributionInvoicesPage() {
               parts.push('No settlement amount entered. This invoice remains credit.');
             }
           } else {
-            const normalAmount = Number(paymentAmount || 0);
+            const normalAmount = paymentMethod === 'check'
+              ? chequeEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0)
+              : Number(paymentAmount || 0);
             if (normalAmount > 0) {
               parts.push(`Payment mode: ${String(paymentMethod || '').toUpperCase()}`);
               parts.push(`Amount paid: ${normalAmount.toFixed(2)}`);
               parts.push(`Payment date: ${paymentDate || invoiceDate}`);
               if (paymentMethod === 'check' && paymentChequeDate) {
-                parts.push(`Cheque date: ${paymentChequeDate}`);
+                parts.push(`Cheques: ${chequeEntries.length}`);
+                chequeEntries.forEach((entry, index) => {
+                  parts.push(`Cheque ${index + 1}: ${Number(entry.amount).toFixed(2)} on ${entry.chequeDate}${entry.reference ? ` (${entry.reference})` : ''}`);
+                });
               }
               if (paymentBankName.trim()) {
                 parts.push(`Bank: ${paymentBankName.trim()}`);
@@ -2097,7 +1952,7 @@ export default function DistributionInvoicesPage() {
       ? getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId)
       : null;
 
-    const paymentPayload = (() => {
+    const paymentPayload: PaymentEntry | null = (() => {
       if (!addPayment) return null;
 
       if (paymentMethod === 'bill_to_bill') {
@@ -2123,6 +1978,19 @@ export default function DistributionInvoicesPage() {
         target_invoice_id: null,
       };
     })();
+    const paymentPayloads: PaymentEntry[] = addPayment && paymentMethod === 'check'
+      ? chequeEntries.map((entry) => ({
+          amount: Number(entry.amount),
+          method: 'check' as const,
+          date: paymentDate || invoiceDate,
+          cheque_date: entry.chequeDate || null,
+          reference: entry.reference || null,
+          bank_name: entry.bankName || null,
+          target_invoice_id: null,
+        }))
+      : paymentPayload
+        ? [paymentPayload]
+        : [];
 
     const queueOfflineAndFinish = () => {
       const hasReturns = returnLines.length > 0;
@@ -2154,6 +2022,7 @@ export default function DistributionInvoicesPage() {
         payload: {
           ...baseInvoicePayload,
           payment: paymentPayload,
+          payments: paymentPayloads,
           returnPayload,
         },
       } as PendingOfflineInvoice;
@@ -2192,8 +2061,6 @@ export default function DistributionInvoicesPage() {
 
       setShowModal(false);
       resetInvoiceForm();
-
-      handlePosPrint(pseudoInvoice);
 
       setQtyWarningMessage('No internet connection. Invoice saved locally and will sync automatically when connection is available.');
       setQtyWarningOpen(true);
@@ -2239,32 +2106,26 @@ export default function DistributionInvoicesPage() {
         savedInvoice = invoiceRes.data?.data;
       }
 
-      if (paymentPayload && savedInvoice?.id) {
+      if (paymentPayloads.length > 0 && savedInvoice?.id) {
         try {
-          const targetInvoiceId = paymentPayload.method === 'bill_to_bill'
-            ? Number(paymentPayload.target_invoice_id || 0)
-            : Number(savedInvoice.id);
-
-          if (paymentPayload.method === 'bill_to_bill' && !targetInvoiceId) {
-            throw new Error('Missing previous invoice for bill to bill settlement.');
-          }
-
-          await axios.post('/api/distribution/payments', {
+          const paymentRows = paymentPayloads.map((payment) => ({
             payment_number: generatePaymentNumber(),
-            distribution_invoice_id: targetInvoiceId,
+            distribution_invoice_id: payment.method === 'bill_to_bill'
+              ? Number(payment.target_invoice_id || 0)
+              : Number(savedInvoice.id),
             load_id: savedInvoice.load_id ?? effectiveLoadId,
             customer_id: savedInvoice.customer_id ?? Number(customerId),
-            payment_date: paymentPayload.date,
-            cheque_date: paymentPayload.method === 'check' ? (paymentPayload.cheque_date || null) : null,
-            amount: paymentPayload.amount,
-            payment_method: paymentPayload.method === 'bill_to_bill' ? 'cash' : paymentPayload.method,
-            reference_no: paymentPayload.reference || null,
-            bank_name: paymentPayload.bank_name || null,
+            payment_date: payment.date,
+            cheque_date: payment.method === 'check' ? (payment.cheque_date || null) : null,
+            amount: payment.amount,
+            payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
+            reference_no: payment.reference || null,
+            bank_name: payment.bank_name || null,
             status: 'received',
-            notes: paymentPayload.method === 'bill_to_bill'
-              ? `Bill to bill settlement from invoice ${savedInvoice.invoice_number}`
-              : `Auto payment from invoice ${savedInvoice.invoice_number}`,
-          }, { headers: { Authorization: `Bearer ${token}` } });
+            notes: `Auto payment from invoice ${savedInvoice.invoice_number}`,
+          }));
+          if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for payment.');
+          await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
         } catch (paymentError: any) {
           console.error('Failed to record payment for invoice:', paymentError);
           setQtyWarningMessage(paymentError?.response?.data?.message || 'Invoice saved, but payment could not be recorded.');
@@ -2304,7 +2165,6 @@ export default function DistributionInvoicesPage() {
       await fetchData();
 
       if (!isEditing && savedInvoice) {
-        handlePosPrint(savedInvoice as InvoiceRecord);
       }
     } catch (error: any) {
       if (!isEditing && !error?.response) {
@@ -2716,10 +2576,10 @@ export default function DistributionInvoicesPage() {
                             View
                           </button>
                           <button
-                            onClick={() => handlePosPrint(invoice)}
-                            className="text-blue-600 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded-md text-sm font-medium"
+                            onClick={() => openReceiptPreview(invoice)}
+                            className="text-blue-700 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded-md text-sm font-medium border border-blue-200"
                           >
-                            POS Print
+                            POS Preview
                           </button>
                           <button
                             onClick={() => handleDeleteInvoice(invoice)}
@@ -2763,10 +2623,10 @@ export default function DistributionInvoicesPage() {
                     View
                   </button>
                   <button
-                    onClick={() => handlePosPrint(invoice)}
-                    className="flex-1 text-blue-600 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-2 rounded-md text-sm font-medium"
+                    onClick={() => openReceiptPreview(invoice)}
+                    className="flex-1 text-blue-700 hover:text-blue-900 bg-blue-50 hover:bg-blue-100 px-3 py-2 rounded-md text-sm font-medium border border-blue-200"
                   >
-                    POS Print
+                    POS Preview
                   </button>
                   <button
                     onClick={() => handleDeleteInvoice(invoice)}
@@ -2866,10 +2726,13 @@ export default function DistributionInvoicesPage() {
                           type="text"
                           value={customerPickerSearch}
                           onChange={(e) => {
-                            setCustomerPickerSearch(e.target.value);
+                            const value = e.target.value;
+                            setCustomerPickerSearch(value);
                             setCustomerId('');
+                            setCustomers([]);
                             setShowCustomerPicker(true);
                             setHighlightedCustomerIndex(-1);
+                            void fetchCustomerSuggestions(value);
                           }}
                           onFocus={() => {
                             setShowCustomerPicker(true);
@@ -4119,6 +3982,64 @@ export default function DistributionInvoicesPage() {
                           placeholder="Bank / Branch"
                         />
                       </div>
+
+                      {paymentMethod === 'check' && (
+                        <div className="rounded-lg border border-cyan-100 bg-cyan-50/40 p-3 space-y-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-xs font-semibold text-cyan-800">
+                              Cheque 1{paymentCheques.length > 0 ? ` + ${paymentCheques.length} additional` : ''}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => setPaymentCheques((prev) => [
+                                ...prev,
+                                {
+                                  amount: '',
+                                  chequeDate: paymentChequeDate || paymentDate || invoiceDate,
+                                  reference: '',
+                                  bankName: '',
+                                },
+                              ])}
+                              className="rounded-md border border-cyan-300 bg-white px-2.5 py-1 text-xs font-semibold text-cyan-700 hover:bg-cyan-50"
+                            >
+                              + Add another cheque
+                            </button>
+                          </div>
+                          {paymentCheques.map((cheque, index) => (
+                            <div key={`cheque-${index}`} className="grid grid-cols-1 gap-2 sm:grid-cols-4">
+                              <input
+                                type="number"
+                                min="0.01"
+                                step="0.01"
+                                value={cheque.amount}
+                                onChange={(e) => setPaymentCheques((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, amount: e.target.value } : row))}
+                                placeholder={`Cheque ${index + 2} amount`}
+                                className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900"
+                              />
+                              <input
+                                type="date"
+                                value={cheque.chequeDate}
+                                onChange={(e) => setPaymentCheques((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, chequeDate: e.target.value } : row))}
+                                className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900"
+                              />
+                              <input
+                                type="text"
+                                value={cheque.reference}
+                                onChange={(e) => setPaymentCheques((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, reference: e.target.value } : row))}
+                                placeholder="Cheque number"
+                                className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setPaymentCheques((prev) => prev.filter((_, rowIndex) => rowIndex !== index))}
+                                className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -4543,12 +4464,12 @@ export default function DistributionInvoicesPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    handlePosPrint(viewInvoice);
                     setViewInvoice(null);
+                    openReceiptPreview(viewInvoice);
                   }}
                   className="px-3 py-1.5 text-xs rounded-md bg-blue-600 text-white hover:bg-blue-700"
                 >
-                  POS Print
+                  POS Preview
                 </button>
               </div>
             </div>
@@ -4556,315 +4477,135 @@ export default function DistributionInvoicesPage() {
         </div>
       )}
 
-      {/* POS 80mm thermal receipt print area */}
-      {posPrintInvoice && (
-        <div
-          ref={posPrintRef}
-          className="pos-print-area"
-          style={{ position: 'absolute', left: '-9999px', top: 0 }}
-        >
-          <div
-            style={{
-              width: '80mm',
-              minWidth: '80mm',
-              maxWidth: '80mm',
-              padding: '4px 6px',
-              boxSizing: 'border-box',
-              fontFamily: `system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`,
-              fontSize: '14px',
-            }}
-          >
-            <div style={{ textAlign: 'center', marginBottom: '6px' }}>
-              {companyProfileLogoUrl && (
-                <div style={{ marginBottom: '5px' }}>
-                  <img
-                    src={companyProfileLogoUrl}
-                    alt="Company logo"
-                    style={{
-                      width: '42mm',
-                      maxWidth: '100%',
-                      maxHeight: '28mm',
-                      height: 'auto',
-                      objectFit: 'contain',
-                      objectPosition: 'center',
-                      margin: '0 auto',
-                      display: 'block',
-                    }}
-                  />
-                </div>
-              )}
-              <div style={{ fontSize: '14px', fontWeight: 800, lineHeight: 1.25 }}>{companyProfileName}</div>
-              {companyProfileAddress && (
-                <div style={{ fontSize: '14px', lineHeight: 1.35, marginTop: '2px' }}>{companyProfileAddress}</div>
-              )}
-              {companyProfilePhone && (
-                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>Tel: {companyProfilePhone}</div>
-              )}
-              {companyProfileEmail && (
-                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>{companyProfileEmail}</div>
-              )}
-              {companyProfileWebsite && (
-                <div style={{ fontSize: '14px', lineHeight: 1.35 }}>{companyProfileWebsite}</div>
-              )}
-            </div>
+      {receiptPreviewInvoice && (() => {
+        const invoice = receiptPreviewInvoice;
+        const notes = String(invoice.notes || '');
+        const returnLines = notes.split('\n').filter((line) => line.trim().startsWith('- '));
+        const returnTotalLine = notes.split('\n').find((line) => line.trim().startsWith('Total return value:'));
+        const returnModeLine = notes.split('\n').find((line) => line.trim().startsWith('Return mode:'));
+        const subtotal = Number(invoice.subtotal ?? invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0));
+        const paid = Number(invoice.paid_amount || 0);
+        const total = Number(invoice.total || 0);
+        const outstanding = Math.max(0, total - paid);
 
-            <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-
-            <div style={{ fontSize: '14px', lineHeight: 1.35 }}>
-              <div>Invoice: {posPrintInvoice.invoice_number}</div>
-              <div>
-                Date:{' '}
-                {new Date(posPrintInvoice.invoice_date).toLocaleDateString()}{' '}
-                {new Date(posPrintInvoice.invoice_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-              </div>
-              {posPrintInvoice.customer && (
+        return (
+          <div className="receipt-preview-modal fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-3 sm:p-6">
+            <div className="receipt-preview-shell flex max-h-[96vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-slate-100 shadow-2xl">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
                 <div>
-                  Customer: {posPrintInvoice.customer.shop_name}
-                  {posPrintInvoice.customer.customer_code
-                    ? ` (${posPrintInvoice.customer.customer_code})`
-                    : ''}
+                  <h3 className="text-base font-bold text-slate-900">POS Receipt Preview</h3>
+                  <p className="text-xs text-slate-500">Choose the paper roll width before sending to the paired POS printer.</p>
                 </div>
-              )}
-            </div>
-
-            <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-
-            <div style={{ fontSize: '14px' }}>
-              {posPrintInvoice.items.map((item) => {
-                const qty = Number(item.quantity) || 0;
-                const price = Number(item.unit_price) || 0;
-                const lineTotal = qty * price;
-                return (
-                  <div key={item.id} style={{ marginBottom: '2px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>{item.item_name}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>
-                        {qty.toFixed(2)} x {price.toFixed(2)}
-                      </span>
-                      <span>{lineTotal.toFixed(2)}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-
-            {(() => {
-              const subtotal = Number(
-                (posPrintInvoice as any).subtotal ??
-                  posPrintInvoice.items.reduce(
-                    (sum, it) => sum + Number(it.unit_price) * Number(it.quantity),
-                    0
-                  )
-              );
-
-              const notesText = String((posPrintInvoice as any).notes || '');
-              let rawReturnAmount = 0;
-              let deductsFromInvoice = false;
-              if (notesText.includes('[ITEM RETURNS]')) {
-                const rawLines = notesText.split('\n');
-                for (const raw of rawLines) {
-                  const t = raw.trim();
-                  if (t.startsWith('Total return value:')) {
-                    const numStr = t.split('Total return value:')[1]?.trim() || '';
-                    const parsed = parseFloat(numStr.replace(/[^0-9.\-]/g, ''));
-                    if (!Number.isNaN(parsed)) rawReturnAmount = parsed;
-                  }
-                  if (t.includes('Return mode: DEDUCT FROM INVOICE')) {
-                    deductsFromInvoice = true;
-                  }
-                  if (t.includes('Return mode: EXCHANGE ONLY')) {
-                    deductsFromInvoice = false;
-                  }
-                }
-              }
-
-              const effectiveReturnAmount = deductsFromInvoice ? Math.max(0, rawReturnAmount) : 0;
-              const rawDiscount = Number((posPrintInvoice as any).discount ?? 0);
-              const discount = Math.max(0, rawDiscount - effectiveReturnAmount);
-              const total = Number(posPrintInvoice.total ?? Math.max(0, subtotal - rawDiscount));
-
-              return (
-                <div style={{ fontSize: '14px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>Subtotal</span>
-                    <span>{subtotal.toFixed(2)}</span>
-                  </div>
-                  {discount > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Discount</span>
-                      <span>-{discount.toFixed(2)}</span>
-                    </div>
-                  )}
-                  {effectiveReturnAmount > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Returns</span>
-                      <span>-{effectiveReturnAmount.toFixed(2)}</span>
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '2px', fontWeight: 700 }}>
-                    <span>Total</span>
-                    <span>{total.toFixed(2)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span>Paid</span>
-                    <span>{Number((posPrintInvoice as any).paid_amount ?? 0).toFixed(2)}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
-                    <span>Outstanding</span>
-                    <span>{getInvoiceDueBalance(posPrintInvoice).toFixed(2)}</span>
-                  </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={receiptPaperWidth}
+                    onChange={(event) => setReceiptPaperWidth(event.target.value as '54mm' | '80mm')}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                  >
+                    <option value="54mm">54mm roll</option>
+                    <option value="80mm">80mm roll</option>
+                  </select>
+                  <button type="button" onClick={() => setReceiptPreviewInvoice(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700">Close</button>
+                  <button type="button" onClick={printReceiptPreview} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">Print</button>
                 </div>
-              );
-            })()}
+              </div>
 
-            {(() => {
-              const notes = (posPrintInvoice as any).notes as string | undefined;
-              if (!notes || !notes.includes('[ITEM RETURNS]')) return null;
+              <div className="receipt-preview-stage flex-1 overflow-auto p-5">
+                <article
+                  className="pos-receipt mx-auto bg-white text-slate-900 shadow-lg"
+                  style={{ '--receipt-width': receiptPaperWidth } as CSSProperties}
+                >
+                  <header className="receipt-header text-center">
+                    {receiptCompany.logo_url && <img src={receiptCompany.logo_url} alt="Company logo" className="mx-auto mb-2 max-h-16 max-w-[80%] object-contain" />}
+                    <h1 className="text-base font-extrabold">{receiptCompany.name || 'Company'}</h1>
+                    {receiptCompany.address && <p>{receiptCompany.address}</p>}
+                    {receiptCompany.phone && <p>Tel: {receiptCompany.phone}</p>}
+                    {receiptCompany.email && <p>{receiptCompany.email}</p>}
+                  </header>
 
-              const rawLines = notes.split('\n');
-              const returnedItemsIndex = rawLines.findIndex((l) => l.includes('Returned items:'));
-              const summaryLines: string[] = [];
-              let totalLine: string | null = null;
-              let modeLine: string | null = null;
+                  <div className="receipt-divider" />
+                  <section className="receipt-meta">
+                    <p><strong>Invoice:</strong> {invoice.invoice_number}</p>
+                    <p><strong>Date:</strong> {new Date(invoice.invoice_date).toLocaleString()}</p>
+                    <p><strong>Customer:</strong> {invoice.customer?.shop_name || '-'}</p>
+                    {invoice.customer?.customer_code && <p><strong>Code:</strong> {invoice.customer.customer_code}</p>}
+                  </section>
 
-              if (returnedItemsIndex >= 0) {
-                for (let i = returnedItemsIndex + 1; i < rawLines.length; i++) {
-                  const t = rawLines[i].trim();
-                  if (!t) continue;
-                  if (t.startsWith('Total return value:')) {
-                    totalLine = t;
-                    continue;
-                  }
-                  if (t.startsWith('Return mode:')) {
-                    modeLine = t;
-                    continue;
-                  }
-                  if (!t.startsWith('- ')) break;
-                  summaryLines.push(t.replace(/^-\s*/, ''));
-                }
-              }
-
-              if (summaryLines.length === 0 && !totalLine && !modeLine) return null;
-
-              return (
-                <>
-                  <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-                  <div style={{ fontSize: '14px' }}>
-                    <div style={{ fontWeight: 600, marginBottom: '1px' }}>Returns in this bill</div>
-                    {summaryLines.slice(0, 3).map((l, idx) => (
-                      <div key={idx}>{l}</div>
+                  <div className="receipt-divider" />
+                  <section>
+                    <h2>Billing Item Details</h2>
+                    {invoice.items.map((item) => (
+                      <div key={item.id} className="receipt-item">
+                        <div className="flex justify-between gap-2"><span>{item.item_name}</span><strong>{(Number(item.quantity) * Number(item.unit_price)).toFixed(2)}</strong></div>
+                        <div>{Number(item.quantity).toFixed(2)} x {Number(item.unit_price).toFixed(2)} {item.unit ? ` / ${item.unit}` : ''}</div>
+                      </div>
                     ))}
-                    {totalLine && <div>{totalLine}</div>}
-                    {modeLine && <div>{modeLine}</div>}
-                  </div>
-                </>
-              );
-            })()}
+                  </section>
 
-            {(() => {
-              const notes = (posPrintInvoice as any).notes as string | undefined;
-              if (!notes || !notes.includes('[PAYMENT EVIDENCE]')) return null;
+                  {(returnLines.length > 0 || returnTotalLine || returnModeLine) && (
+                    <section>
+                      <h2>Returns / Exchange</h2>
+                      {returnLines.map((line, index) => <p key={`return-${index}`}>{line.replace(/^-\s*/, '')}</p>)}
+                      {returnTotalLine && <p>{returnTotalLine}</p>}
+                      {returnModeLine && <p>{returnModeLine}</p>}
+                    </section>
+                  )}
 
-              const rawLines = notes.split('\n');
-              const evidenceStart = rawLines.findIndex((l) => l.includes('[PAYMENT EVIDENCE]'));
-              if (evidenceStart < 0) return null;
-
-              const evidenceLines: string[] = [];
-              for (let i = evidenceStart + 1; i < rawLines.length; i++) {
-                const t = rawLines[i].trim();
-                if (!t) continue;
-                if (t.startsWith('[') && t.endsWith(']')) break;
-                evidenceLines.push(t);
-              }
-
-              if (evidenceLines.length === 0) return null;
-
-              return (
-                <>
-                  <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-                  <div style={{ fontSize: '14px' }}>
-                    <div style={{ fontWeight: 600, marginBottom: '1px' }}>Payment Evidence</div>
-                    {evidenceLines.map((line, idx) => (
-                      <div key={idx}>{line}</div>
+                  <section>
+                    <h2>Payment Details</h2>
+                    {(invoice.payments || []).length === 0 ? <p>No payments recorded.</p> : invoice.payments?.map((payment) => (
+                      <div key={payment.id} className="receipt-item">
+                        <div className="flex justify-between gap-2"><span>{String(payment.payment_method || '').toUpperCase()} {payment.reference_no ? `(${payment.reference_no})` : ''}</span><strong>{Number(payment.amount || 0).toFixed(2)}</strong></div>
+                        <div>Date: {payment.payment_date || '-'}{payment.cheque_date ? ` | Cheque date: ${payment.cheque_date}` : ''}</div>
+                        {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
+                      </div>
                     ))}
-                  </div>
-                </>
-              );
-            })()}
+                  </section>
 
-            <div style={{ borderTop: '1px dashed #000', margin: '4px 0' }}></div>
-            <div style={{ textAlign: 'center', fontSize: '14px', marginTop: '2px' }}>
-              Thank you! Come again.
+                  <div className="receipt-divider" />
+                  <section className="receipt-summary">
+                    <p><span>Subtotal</span><strong>{subtotal.toFixed(2)}</strong></p>
+                    <p><span>Discount</span><strong>-{Number(invoice.discount || 0).toFixed(2)}</strong></p>
+                    <p className="receipt-total"><span>Total</span><strong>{total.toFixed(2)}</strong></p>
+                    <p><span>Paid</span><strong>{paid.toFixed(2)}</strong></p>
+                    <p><span>Outstanding</span><strong>{outstanding.toFixed(2)}</strong></p>
+                  </section>
+                  <footer className="receipt-footer">Thank you</footer>
+                </article>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       <style jsx global>{`
-        @page {
-          size: 80mm auto;
-          margin: 0;
+        .pos-receipt {
+          width: var(--receipt-width);
+          min-height: 140mm;
+          padding: 5mm 4mm;
+          font-family: Arial, sans-serif;
+          font-size: 11px;
+          line-height: 1.35;
         }
-
+        .receipt-header p, .receipt-meta p, .pos-receipt section p { margin: 1px 0; }
+        .receipt-divider { border-top: 1px dashed #475569; margin: 8px 0; }
+        .pos-receipt h2 { margin: 6px 0 4px; border-left: 3px solid #059669; padding-left: 5px; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+        .receipt-item { border-bottom: 1px dotted #cbd5e1; padding: 3px 0; }
+        .receipt-item > div:last-child { color: #64748b; font-size: 10px; }
+        .receipt-summary p { display: flex; justify-content: space-between; margin: 3px 0; }
+        .receipt-summary .receipt-total { border-top: 1px solid #0f766e; padding-top: 5px; font-size: 14px; }
+        .receipt-footer { border-top: 1px dashed #475569; margin-top: 9px; padding-top: 7px; text-align: center; font-weight: 700; }
         @media print {
-          html,
-          body {
-            margin: 0 !important;
-            padding: 0 !important;
-            width: 80mm !important;
-            height: auto !important;
-            min-height: auto !important;
-            overflow: visible !important;
-            background: #fff !important;
-          }
-
-          .distribution-invoices-page {
-            min-height: auto !important;
-            height: auto !important;
-            overflow: visible !important;
-            background: #fff !important;
-            margin: 0 !important;
-            padding: 0 !important;
-          }
-
-          .distribution-invoices-page > * {
-            display: none !important;
-          }
-
-          .pos-print-area {
-            display: block !important;
-            position: absolute !important;
-            left: 0 !important;
-            top: 0 !important;
-            width: 80mm !important;
-            min-width: 80mm !important;
-            max-width: 80mm !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            height: auto !important;
-            overflow: visible !important;
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-            page-break-after: avoid !important;
-            break-after: avoid !important;
-          }
-
-          .pos-print-area > div {
-            height: auto !important;
-            overflow: visible !important;
-            page-break-after: avoid !important;
-            break-after: avoid !important;
-          }
-
-          .pos-print-area * {
-            visibility: visible !important;
-          }
+          @page { margin: 0; }
+          html, body { width: var(--receipt-width); margin: 0 !important; padding: 0 !important; background: #fff !important; }
+          body * { visibility: hidden !important; }
+          .pos-receipt, .pos-receipt * { visibility: visible !important; }
+          .receipt-preview-modal { display: block !important; position: static !important; width: var(--receipt-width) !important; min-height: 0 !important; padding: 0 !important; background: #fff !important; }
+          .receipt-preview-shell, .receipt-preview-stage { display: contents !important; }
+          .pos-receipt { display: block !important; position: absolute; left: 0; top: 0; width: var(--receipt-width); min-height: 0; margin: 0; box-shadow: none; page-break-after: avoid; break-after: avoid; }
         }
       `}</style>
+
     </div>
   );
 }

@@ -15,12 +15,25 @@ interface RouteCustomer {
   route_id?: number | null;
 }
 
+interface AssignedLoadRoute {
+  route_id?: number | null;
+  sequence_no?: number | null;
+  route?: {
+    id?: number;
+    name?: string;
+    origin?: string;
+    destination?: string;
+  } | null;
+}
+
 export default function DistributionPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
   const [routeResolving, setRouteResolving] = useState(true);
   const [assignedRouteId, setAssignedRouteId] = useState<number | null>(null);
+  const [assignedRouteIds, setAssignedRouteIds] = useState<number[]>([]);
   const [assignedRouteName, setAssignedRouteName] = useState('');
+  const [assignedRouteNames, setAssignedRouteNames] = useState<string[]>([]);
   const [customerCount, setCustomerCount] = useState(0);
   const [invoiceCount, setInvoiceCount] = useState(0);
   const [returnCount, setReturnCount] = useState(0);
@@ -54,12 +67,12 @@ export default function DistributionPage() {
   }, [token]);
 
   useEffect(() => {
-    if (token && assignedRouteId) {
+    if (token && assignedRouteIds.length > 0) {
       fetchRouteCustomers();
     } else {
       setRouteCustomers([]);
     }
-  }, [token, assignedRouteId]);
+  }, [token, assignedRouteIds]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -106,7 +119,9 @@ export default function DistributionPage() {
       const employeeId = Number(userRes.data?.employee_id || userRes.data?.employee?.id || 0);
       if (!employeeId) {
         setAssignedRouteId(null);
+        setAssignedRouteIds([]);
         setAssignedRouteName('');
+        setAssignedRouteNames([]);
         localStorage.removeItem('distribution_assigned_route_id');
         localStorage.removeItem('distribution_assigned_route_name');
         return;
@@ -122,17 +137,36 @@ export default function DistributionPage() {
       const assignedLoad = activeAssignedLoads[0];
       if (!assignedLoad?.route_id) {
         setAssignedRouteId(null);
+        setAssignedRouteIds([]);
         setAssignedRouteName('');
+        setAssignedRouteNames([]);
         localStorage.removeItem('distribution_assigned_route_id');
         localStorage.removeItem('distribution_assigned_route_name');
         return;
       }
 
       const routeId = Number(assignedLoad.route_id);
-      const routeName = assignedLoad.route?.name || '';
+      const loadRoutes: AssignedLoadRoute[] = Array.isArray(assignedLoad.load_routes)
+        ? [...assignedLoad.load_routes].sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0))
+        : [];
+      const routeEntries = loadRoutes.length > 0
+        ? loadRoutes
+        : [{ route_id: routeId, route: assignedLoad.route }];
+      const routeNames = routeEntries
+        .map((entry) => {
+          const route = entry.route;
+          return route?.name || [route?.origin, route?.destination].filter(Boolean).join(' to ') || '';
+        })
+        .filter(Boolean);
+      const routeIds = routeEntries
+        .map((entry) => Number(entry.route_id || entry.route?.id || 0))
+        .filter((id) => id > 0);
+      const routeName = routeNames[0] || assignedLoad.route?.name || '';
 
       setAssignedRouteId(routeId);
+      setAssignedRouteIds(Array.from(new Set(routeIds)));
       setAssignedRouteName(routeName);
+      setAssignedRouteNames(routeNames);
       localStorage.setItem('distribution_assigned_route_id', String(routeId));
       localStorage.setItem('distribution_assigned_route_name', routeName);
     } catch (error) {
@@ -142,7 +176,9 @@ export default function DistributionPage() {
       const cachedRouteName = localStorage.getItem('distribution_assigned_route_name') || '';
       if (cachedRouteId) {
         setAssignedRouteId(Number(cachedRouteId));
+        setAssignedRouteIds([Number(cachedRouteId)]);
         setAssignedRouteName(cachedRouteName);
+        setAssignedRouteNames(cachedRouteName ? [cachedRouteName] : []);
       }
     } finally {
       setRouteResolving(false);
@@ -184,7 +220,7 @@ export default function DistributionPage() {
 
       const allCustomers: RouteCustomer[] = res.data?.data?.data || [];
       const filtered = allCustomers.filter((customer) =>
-        String(customer.route_id ?? '') === String(assignedRouteId ?? '')
+        assignedRouteIds.map(String).includes(String(customer.route_id ?? ''))
       );
 
       setRouteCustomers(filtered);
@@ -255,7 +291,9 @@ export default function DistributionPage() {
             <p className="text-sm text-gray-500 mt-3">Detecting assigned route...</p>
           ) : assignedRouteId ? (
             <p className="text-sm text-green-700 mt-3 font-medium">
-              Auto route enabled: {assignedRouteName || `Route #${assignedRouteId}`}
+              Auto route enabled: {assignedRouteNames.length > 0
+                ? assignedRouteNames.join(' | ')
+                : (assignedRouteName || `Route #${assignedRouteId}`)}
             </p>
           ) : null}
         </div>

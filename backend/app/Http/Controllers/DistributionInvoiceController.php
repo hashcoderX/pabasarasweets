@@ -8,17 +8,23 @@ use App\Models\DistributionPayment;
 use App\Models\InventoryItem;
 use App\Models\Load;
 use App\Models\LoadItem;
+use App\Models\Company;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
+use Barryvdh\DomPDF\Facade\Pdf;
 
 class DistributionInvoiceController extends Controller
 {
     public function index(Request $request): JsonResponse
     {
-        $query = DistributionInvoice::with(['customer:id,shop_name,customer_code,route_id', 'items']);
+        $query = DistributionInvoice::with([
+            'customer:id,shop_name,customer_code,route_id',
+            'items',
+            'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status',
+        ]);
 
         $user = $request->user();
 
@@ -236,6 +242,88 @@ class DistributionInvoiceController extends Controller
             'data' => $invoice,
             'message' => 'Distribution invoice retrieved successfully',
         ]);
+    }
+
+    public function receipt(string $id)
+    {
+        $invoice = DistributionInvoice::with([
+            'customer:id,shop_name,customer_code,address,phone',
+            'items',
+            'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status',
+        ])->find($id);
+
+        if (!$invoice) {
+            return response()->json(['success' => false, 'message' => 'Distribution invoice not found'], 404);
+        }
+
+        $company = Company::query()->first();
+        $escape = static fn ($value): string => e((string) ($value ?? ''));
+        $money = static fn ($value): string => number_format((float) ($value ?? 0), 2);
+        $logo = '';
+
+        if ($company?->logo_path) {
+            $logoPath = storage_path('app/public/' . ltrim((string) $company->logo_path, '/'));
+            if (is_file($logoPath)) {
+                $mime = mime_content_type($logoPath) ?: 'image/png';
+                $logo = 'data:' . $mime . ';base64,' . base64_encode((string) file_get_contents($logoPath));
+            }
+        }
+
+        $notes = (string) ($invoice->notes ?? '');
+        $returnLines = [];
+        $returnTotal = 0;
+        $returnMode = '';
+        foreach (preg_split('/\R/', $notes) ?: [] as $line) {
+            $trimmed = trim($line);
+            if (str_starts_with($trimmed, '- ') && str_contains($notes, '[ITEM RETURNS]')) {
+                $returnLines[] = substr($trimmed, 2);
+            }
+            if (str_starts_with($trimmed, 'Total return value:')) {
+                $returnTotal = (float) preg_replace('/[^0-9.\-]/', '', substr($trimmed, strlen('Total return value:')));
+            }
+            if (str_starts_with($trimmed, 'Return mode:')) {
+                $returnMode = $trimmed;
+            }
+        }
+
+        $itemRows = '';
+        foreach ($invoice->items as $item) {
+            $quantity = (float) $item->quantity;
+            $price = (float) $item->unit_price;
+            $itemRows .= '<tr><td>' . $escape($item->item_name) . '<br><small>' . $escape($item->item_code) . '</small></td><td class="right">' . $money($quantity) . '</td><td class="right">' . $money($price) . '</td><td class="right">' . $money($quantity * $price) . '</td></tr>';
+        }
+
+        $paymentRows = '';
+        foreach ($invoice->payments as $payment) {
+            $paymentDate = $payment->payment_date ? date('Y-m-d', strtotime((string) $payment->payment_date)) : '';
+            $paymentRows .= '<tr><td>' . $escape(strtoupper((string) $payment->payment_method)) . '</td><td>' . $escape($paymentDate) . '</td><td>' . $escape($payment->reference_no) . '</td><td class="right">' . $money($payment->amount) . '</td></tr>';
+        }
+
+        $returnSection = $returnLines || $returnTotal > 0 ? '<section><h3>Returns / Exchange</h3>' . implode('', array_map(fn ($line) => '<div>' . $escape($line) . '</div>', $returnLines)) . ($returnTotal > 0 ? '<div><strong>Total return value:</strong> ' . $money($returnTotal) . '</div>' : '') . ($returnMode ? '<div>' . $escape($returnMode) . '</div>' : '') . '</section>' : '';
+        $paid = (float) ($invoice->paid_amount ?? 0);
+        $outstanding = max(0, (float) $invoice->total - $paid);
+
+        $invoiceDate = $invoice->invoice_date ? date('Y-m-d', strtotime((string) $invoice->invoice_date)) : '';
+        $html = '<!doctype html><html><head><meta charset="utf-8"><style>
+            @page { margin: 12mm; }
+            * { box-sizing: border-box; } body { font-family: DejaVu Sans, sans-serif; color: #172033; font-size: 10px; margin: 0; }
+            .header { text-align: center; border-bottom: 2px solid #079669; padding-bottom: 9px; margin-bottom: 12px; }
+            .logo { max-width: 42mm; max-height: 24mm; margin-bottom: 5px; } h1 { color: #087f68; margin: 0; font-size: 19px; } h2 { margin: 2px 0 0; font-size: 11px; font-weight: normal; color: #536174; }
+            .meta { width: 100%; margin-bottom: 12px; } .meta td { vertical-align: top; padding: 2px 0; } .right { text-align: right; } h3 { background: #e8f8f2; border-left: 4px solid #079669; padding: 6px 8px; font-size: 11px; margin: 10px 0 5px; }
+            table { width: 100%; border-collapse: collapse; } th { background: #f0f5f5; text-align: left; padding: 6px; } td { border-bottom: 1px solid #e5ebeb; padding: 6px; } small { color: #687585; }
+            .summary { width: 50%; margin-left: auto; margin-top: 8px; } .summary td { border: 0; padding: 3px; } .total td { border-top: 2px solid #079669; font-weight: bold; font-size: 12px; }
+            .footer { text-align: center; color: #687585; margin-top: 18px; border-top: 1px solid #dce7e4; padding-top: 8px; }
+        </style></head><body>
+            <div class="header">' . ($logo ? '<img class="logo" src="' . $logo . '">' : '') . '<h1>' . $escape($company?->name ?: 'Company') . '</h1>' . ($company?->address ? '<h2>' . $escape($company->address) . '</h2>' : '') . ($company?->phone ? '<h2>Tel: ' . $escape($company->phone) . '</h2>' : '') . ($company?->email ? '<h2>' . $escape($company->email) . '</h2>' : '') . '</div>
+            <table class="meta"><tr><td><strong>Invoice:</strong> ' . $escape($invoice->invoice_number) . '<br><strong>Date:</strong> ' . $escape($invoiceDate) . '</td><td class="right"><strong>Customer:</strong><br>' . $escape($invoice->customer?->shop_name) . '<br>' . $escape($invoice->customer?->customer_code) . ($invoice->customer?->address ? '<br>' . $escape($invoice->customer->address) : '') . '</td></tr></table>
+            <section><h3>Billing Item Details</h3><table><thead><tr><th>Item</th><th class="right">Qty</th><th class="right">Unit Price</th><th class="right">Amount</th></tr></thead><tbody>' . $itemRows . '</tbody></table></section>
+            ' . $returnSection . '
+            <section><h3>Payment Details</h3>' . ($paymentRows ? '<table><thead><tr><th>Method</th><th>Date</th><th>Reference / Cheque</th><th class="right">Amount</th></tr></thead><tbody>' . $paymentRows . '</tbody></table>' : '<div>No payments recorded.</div>') . '</section>
+            <table class="summary"><tr><td>Subtotal</td><td class="right">' . $money($invoice->subtotal) . '</td></tr><tr><td>Discount</td><td class="right">-' . $money($invoice->discount) . '</td></tr><tr class="total"><td>Total</td><td class="right">' . $money($invoice->total) . '</td></tr><tr><td>Paid</td><td class="right">' . $money($paid) . '</td></tr><tr><td>Outstanding</td><td class="right">' . $money($outstanding) . '</td></tr></table>
+            <div class="footer">Generated invoice receipt</div>
+        </body></html>';
+
+        return Pdf::loadHTML($html)->setPaper('a4')->download('invoice-receipt-' . $invoice->invoice_number . '.pdf');
     }
 
     public function update(Request $request, string $id): JsonResponse
