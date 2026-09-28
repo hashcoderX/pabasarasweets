@@ -43,6 +43,16 @@ interface LoadRoutingInfo {
   created_at?: string;
 }
 
+interface CustomersPageCache {
+  savedAt: number;
+  customers: Customer[];
+  routes: RouteOption[];
+  routeId: string;
+  routeIds: string[];
+}
+
+const getCustomersCacheKey = (token: string) => `distribution_customers_cache_${token.slice(-16)}`;
+
 export default function DistributionCustomersPage() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -108,6 +118,18 @@ export default function DistributionCustomersPage() {
       router.push('/');
     } else {
       setToken(storedToken);
+      try {
+        const cached = JSON.parse(localStorage.getItem(getCustomersCacheKey(storedToken)) || 'null') as CustomersPageCache | null;
+        if (cached) {
+          setCustomers(cached.customers || []);
+          setRoutes(cached.routes || []);
+          setAssignedRouteId(cached.routeId || '');
+          setAssignedRouteIds(cached.routeIds || []);
+          setLoading(false);
+        }
+      } catch {
+        localStorage.removeItem(getCustomersCacheKey(storedToken));
+      }
     }
   }, [router]);
 
@@ -119,7 +141,7 @@ export default function DistributionCustomersPage() {
   }, [token]);
 
   useEffect(() => {
-    if (token) {
+    if (token && (isAdmin || assignedRouteIds.length > 0 || assignedRouteId || selectedRouteFilter)) {
       fetchCustomers();
     }
   }, [token, assignedRouteId, assignedRouteIds, selectedRouteFilter, isAdmin]);
@@ -214,9 +236,10 @@ export default function DistributionCustomersPage() {
       : null;
 
     try {
-      const userRes = await axios.get('/api/user', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const [userRes, loadsRes] = await Promise.all([
+        axios.get('/api/user', { headers: { Authorization: `Bearer ${token}` } }),
+        axios.get('/api/vehicle-loading/loads', { headers: { Authorization: `Bearer ${token}` } }),
+      ]);
 
       const userData = userRes.data || {};
       const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
@@ -256,10 +279,6 @@ export default function DistributionCustomersPage() {
       }
       if (!employeeId) return;
 
-      const loadsRes = await axios.get('/api/vehicle-loading/loads', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
       const loads: LoadRoutingInfo[] = Array.isArray(loadsRes.data)
         ? loadsRes.data
         : (loadsRes.data?.data || []);
@@ -279,6 +298,7 @@ export default function DistributionCustomersPage() {
         setAssignedRouteId(firstAssignedRouteId);
         setAssignedRouteIds(assignedRouteIdsFromLoad);
         localStorage.setItem('distribution_assigned_route_id', firstAssignedRouteId);
+        persistCustomersCache({ routeId: firstAssignedRouteId, routeIds: assignedRouteIdsFromLoad });
       } else if (routeFromQuery) {
         setAssignedRouteId(routeFromQuery);
         setAssignedRouteIds([routeFromQuery]);
@@ -322,11 +342,25 @@ export default function DistributionCustomersPage() {
           outstanding: Number(customer.outstanding ?? 0),
         }))
       );
+      persistCustomersCache({
+        customers: scopedCustomers.map((customer) => ({ ...customer, outstanding: Number(customer.outstanding ?? 0) })),
+      });
     } catch (error) {
       console.error('Error fetching customers:', error);
       setCustomers([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const persistCustomersCache = (updates: Partial<CustomersPageCache>) => {
+    if (!token || typeof window === 'undefined') return;
+    try {
+      const key = getCustomersCacheKey(token);
+      const previous = JSON.parse(localStorage.getItem(key) || '{}') as Partial<CustomersPageCache>;
+      localStorage.setItem(key, JSON.stringify({ ...previous, ...updates, savedAt: Date.now() }));
+    } catch {
+      // Cache is only an optimization.
     }
   };
 
@@ -336,6 +370,7 @@ export default function DistributionCustomersPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       setRoutes(Array.isArray(res.data) ? res.data : (res.data?.data || []));
+      persistCustomersCache({ routes: Array.isArray(res.data) ? res.data : (res.data?.data || []) });
     } catch (error) {
       console.error('Error fetching routes:', error);
       setRoutes([]);

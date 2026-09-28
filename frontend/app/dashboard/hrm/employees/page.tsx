@@ -40,7 +40,9 @@ interface Employee {
   tax_relief_eligible?: boolean;
   apit_tax_amount?: number;
   apit_tax_rate?: number;
-  status: 'active' | 'inactive';
+  status: 'active' | 'inactive' | 'resigned';
+  resigned_at?: string | null;
+  resignation_reason?: string | null;
   user?: { role?: string };
   reporting_person_id?: number | null;
   reporting_person?: {
@@ -197,7 +199,7 @@ export default function Employees() {
   const [designationId, setDesignationId] = useState('');
   const [reportingPersonId, setReportingPersonId] = useState('');
   const [branchId, setBranchId] = useState('');
-  const [status, setStatus] = useState<'active' | 'inactive'>('active');
+  const [status, setStatus] = useState<'active' | 'inactive' | 'resigned'>('active');
 
   // Documents state
   const [documents, setDocuments] = useState<EmployeeDocument[]>([]);
@@ -766,6 +768,24 @@ export default function Employees() {
     );
   };
 
+  const confirmResignEmployee = (employee: Employee) => {
+    openConfirm(
+      'Mark Employee Resigned',
+      `Mark ${employee.first_name} ${employee.last_name} as resigned? They will be excluded from future payroll generation and recalculation.`,
+      async () => {
+        try {
+          await axios.post(`/api/hr/employees/${employee.id}/resign`, {}, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          await fetchEmployees(token);
+          showNotice('Success', `${employee.first_name} ${employee.last_name} was marked as resigned.`, 'success');
+        } catch (error: any) {
+          showNotice('Error', error?.response?.data?.message || 'Failed to mark employee as resigned.', 'error');
+        }
+      }
+    );
+  };
+
   const openProfile = async (employee: Employee) => {
     try {
       setProfileLoading(true);
@@ -1247,6 +1267,7 @@ export default function Employees() {
                 <option value="all">All Status</option>
                 <option value="active">Active</option>
                 <option value="inactive">Inactive</option>
+                <option value="resigned">Resigned</option>
               </select>
 
               <select
@@ -1417,6 +1438,12 @@ export default function Employees() {
                               <span className="w-4 h-4">🔑</span>
                               <span>Reset Password</span>
                             </button>
+                            {employee.status === 'active' && (
+                              <button role="menuitem" onClick={() => { confirmResignEmployee(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-amber-700 hover:bg-amber-50">
+                                <span className="w-4 h-4">↗</span>
+                                <span>Mark Resigned</span>
+                              </button>
+                            )}
                             <div className="my-1 h-px bg-gray-200" />
                             <div className="relative">
                               <button
@@ -1985,11 +2012,12 @@ export default function Employees() {
                   </label>
                   <select
                     value={status}
-                    onChange={(e) => setStatus(e.target.value as 'active' | 'inactive')}
+                    onChange={(e) => setStatus(e.target.value as 'active' | 'inactive' | 'resigned')}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900"
                   >
                     <option value="active">Active</option>
                     <option value="inactive">Inactive</option>
+                    <option value="resigned">Resigned</option>
                   </select>
                 </div>
               </div>

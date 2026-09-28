@@ -75,6 +75,7 @@ const SECTION_FALLBACK_ACTIONS: Record<string, string[]> = {
     'Manage Leave',
     'Manage Payroll',
     'Manage Candidates',
+    'Manage Sales Targets',
   ],
   distribution: [
     'View Customers',

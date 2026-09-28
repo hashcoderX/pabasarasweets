@@ -304,7 +304,9 @@ class EmployeeController extends Controller
             'designation_name' => 'nullable|required_without:designation_id|string|max:255',
             'reporting_person_id' => 'nullable|exists:employees,id',
             'branch_id' => 'sometimes|required|exists:companies,id',
-            'status' => 'in:active,inactive',
+            'status' => 'in:active,inactive,resigned',
+            'resigned_at' => 'nullable|date',
+            'resignation_reason' => 'nullable|string',
         ]);
 
         if (array_key_exists('reporting_person_id', $validated)) {
@@ -361,6 +363,8 @@ class EmployeeController extends Controller
             'apit_tax_amount' => $apit['amount'],
             'apit_tax_rate' => $apit['rate'],
             'status' => $validated['status'] ?? $employee->status,
+            'resigned_at' => $validated['resigned_at'] ?? $employee->resigned_at,
+            'resignation_reason' => $validated['resignation_reason'] ?? $employee->resignation_reason,
         ];
 
         $employee->update($updateData);
@@ -382,6 +386,25 @@ class EmployeeController extends Controller
             'user:id,employee_id,role,email,name',
             'reportingPerson:id,employee_code,first_name,last_name',
         ]));
+    }
+
+    public function resign(Request $request, Employee $employee): JsonResponse
+    {
+        $validated = $request->validate([
+            'resigned_at' => 'nullable|date',
+            'resignation_reason' => 'nullable|string|max:2000',
+        ]);
+
+        $employee->update([
+            'status' => 'resigned',
+            'resigned_at' => $validated['resigned_at'] ?? now()->toDateString(),
+            'resignation_reason' => $validated['resignation_reason'] ?? null,
+        ]);
+
+        return response()->json([
+            'message' => 'Employee marked as resigned successfully.',
+            'employee' => $employee->fresh()->load(['department', 'designation', 'branch']),
+        ]);
     }
 
     /**

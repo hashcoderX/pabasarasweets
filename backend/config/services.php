@@ -40,4 +40,11 @@ return [
         'model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
     ],
 
+    'traccar' => [
+        'enabled' => env('TRACCAR_ENABLED', false),
+        'endpoint' => env('TRACCAR_ENDPOINT'),
+        'api_token' => env('TRACCAR_API_TOKEN'),
+        'device_id' => env('TRACCAR_DEVICE_ID'),
+    ],
+
 ];

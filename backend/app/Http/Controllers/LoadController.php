@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\DistributionInvoice;
 use App\Models\DistributionPayment;
+use App\Models\Employee;
 use App\Models\InventoryItem;
 use App\Models\Load;
 use App\Models\LoadRoute;
@@ -16,6 +17,39 @@ use Illuminate\Validation\ValidationException;
 
 class LoadController extends Controller
 {
+    private function resolveAccessibleEmployeeIds(int $employeeId): array
+    {
+        $accessible = [$employeeId];
+        $frontier = [$employeeId];
+        $visited = [$employeeId => true];
+        $maxDepth = 12;
+        $depth = 0;
+
+        while (!empty($frontier) && $depth < $maxDepth) {
+            $childIds = Employee::query()
+                ->whereIn('reporting_person_id', $frontier)
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->all();
+
+            $nextFrontier = [];
+            foreach ($childIds as $childId) {
+                if (isset($visited[$childId])) {
+                    continue;
+                }
+
+                $visited[$childId] = true;
+                $accessible[] = $childId;
+                $nextFrontier[] = $childId;
+            }
+
+            $frontier = $nextFrontier;
+            $depth++;
+        }
+
+        return $accessible;
+    }
+
     /**
      * Display a listing of the resource.
      */
@@ -29,7 +63,8 @@ class LoadController extends Controller
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
 
             if (!$isAdmin && $user->employee_id) {
-                $query->where('sales_ref_id', $user->employee_id);
+                $accessibleEmployeeIds = $this->resolveAccessibleEmployeeIds((int) $user->employee_id);
+                $query->whereIn('sales_ref_id', $accessibleEmployeeIds);
             }
         }
 

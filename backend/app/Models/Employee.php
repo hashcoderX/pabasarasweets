@@ -46,6 +46,8 @@ class Employee extends Model
         'apit_tax_rate',
         'employee_type',
         'status',
+        'resigned_at',
+        'resignation_reason',
     ];
 
     protected $casts = [
@@ -63,6 +65,7 @@ class Employee extends Model
         'tax_relief_eligible' => 'boolean',
         'apit_tax_amount' => 'decimal:2',
         'apit_tax_rate' => 'decimal:2',
+        'resigned_at' => 'date',
     ];
 
     public function tenant(): BelongsTo

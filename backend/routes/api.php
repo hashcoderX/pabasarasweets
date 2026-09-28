@@ -62,6 +62,7 @@ Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth:sanc
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('companies', CompanyController::class);
+    Route::apiResource('sales-targets', \App\Http\Controllers\SalesTargetController::class);
     Route::get('petty-cash-transactions', [\App\Http\Controllers\PettyCashTransactionController::class, 'index']);
     Route::post('petty-cash-transactions', [\App\Http\Controllers\PettyCashTransactionController::class, 'store']);
     Route::delete('petty-cash-transactions/{id}', [\App\Http\Controllers\PettyCashTransactionController::class, 'destroy']);
@@ -91,6 +92,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('designations', DesignationController::class);
         Route::apiResource('employees', EmployeeController::class);
+        Route::post('employees/{employee}/resign', [EmployeeController::class, 'resign']);
         Route::post('employees/{employee}/reset-password', [EmployeeController::class, 'resetPassword']);
         Route::apiResource('candidates', CandidateController::class);
         // Candidate nested resources

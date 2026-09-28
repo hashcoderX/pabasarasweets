@@ -49,7 +49,7 @@ class StoreEmployeeRequest extends FormRequest
             'designation_name' => 'nullable|required_without:designation_id|string|max:255',
             'reporting_person_id' => 'nullable|exists:employees,id',
             'branch_id' => 'required|exists:companies,id',
-            'status' => 'in:active,inactive',
+            'status' => 'in:active,inactive,resigned',
         ];
     }
 }

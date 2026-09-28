@@ -41,6 +41,14 @@ type LoadRow = {
   load_number?: string;
   load_date?: string;
   delivery_date?: string | null;
+  sales_ref_id?: number | null;
+  sales_ref?: {
+    id?: number;
+    employee_code?: string;
+    first_name?: string;
+    last_name?: string;
+    name?: string;
+  } | null;
   route?: {
     id?: number;
     name?: string;
@@ -70,6 +78,7 @@ type LoadRow = {
 type RolePermission = { name?: string };
 type UserRole = string | { name?: string; permissions?: RolePermission[] };
 type RouteShape = { name?: string; origin?: string; destination?: string };
+type EmployeeLite = { id: number; reporting_person_id?: number | null; employee_code?: string; first_name?: string; last_name?: string };
 
 const getRouteLabel = (route?: RouteShape | null) => {
   if (!route) return '-';
@@ -139,6 +148,11 @@ export default function DistributionSalesReportPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentEmployeeId, setCurrentEmployeeId] = useState(0);
+  const [teamMemberIds, setTeamMemberIds] = useState<number[]>([]);
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [viewScope, setViewScope] = useState<'all' | 'my' | 'team'>('all');
+  const [salesRefFilter, setSalesRefFilter] = useState('all');
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -204,6 +218,34 @@ export default function DistributionSalesReportPage() {
     }
   }, [API_URL, fetchPaginated, token]);
 
+  const buildTeamMemberIds = useCallback((employees: EmployeeLite[], managerId: number) => {
+    const teamIds: number[] = [];
+    const visited = new Set<number>([managerId]);
+    let frontier = [managerId];
+    let depth = 0;
+
+    while (frontier.length > 0 && depth < 12) {
+      const frontierSet = new Set(frontier);
+      const children = employees
+        .filter((employee) => {
+          const reportingPersonId = Number(employee.reporting_person_id || 0);
+          return reportingPersonId > 0 && frontierSet.has(reportingPersonId);
+        })
+        .map((employee) => Number(employee.id))
+        .filter((id) => id > 0 && !visited.has(id));
+
+      children.forEach((id) => {
+        visited.add(id);
+        teamIds.push(id);
+      });
+
+      frontier = children;
+      depth += 1;
+    }
+
+    return teamIds;
+  }, []);
+
   useEffect(() => {
     if (!token) return;
 
@@ -233,7 +275,7 @@ export default function DistributionSalesReportPage() {
         });
 
         const roleBlob = roleNames.join(' ');
-        const isAdminUser =
+        const adminUser =
           !employeeId ||
           roleBlob.includes('super admin') ||
           roleBlob.includes('superadmin') ||
@@ -246,7 +288,39 @@ export default function DistributionSalesReportPage() {
           roleBlob.includes('sales representative') ||
           roleBlob.includes('sales_ref');
 
-        if (!isAdminUser && !hasReportPermission && !isSalesRef) {
+        setCurrentEmployeeId(employeeId);
+        setIsAdminUser(adminUser);
+
+        if (employeeId > 0) {
+          try {
+            const employeesRes = await axios.get('/api/hr/employees', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+
+            const employeeRows = Array.isArray(employeesRes.data) ? (employeesRes.data as EmployeeLite[]) : [];
+            const teamIds = buildTeamMemberIds(employeeRows, employeeId);
+            setTeamMemberIds(teamIds);
+
+            if (adminUser) {
+              setViewScope('all');
+            } else if (teamIds.length > 0) {
+              setViewScope('team');
+            } else {
+              setViewScope(isSalesRef ? 'my' : 'all');
+            }
+          } catch (employeeError) {
+            console.error('Error loading team hierarchy:', employeeError);
+            setTeamMemberIds([]);
+            if (!adminUser) {
+              setViewScope(isSalesRef ? 'my' : 'all');
+            }
+          }
+        } else {
+          setTeamMemberIds([]);
+          setViewScope('all');
+        }
+
+        if (!adminUser && !hasReportPermission && !isSalesRef) {
           router.push('/dashboard');
           return;
         }
@@ -261,7 +335,7 @@ export default function DistributionSalesReportPage() {
     };
 
     verifyAccess();
-  }, [token, router, fetchRows]);
+  }, [token, router, fetchRows, buildTeamMemberIds]);
 
   const loadById = useMemo(() => {
     const map = new Map<number, LoadRow>();
@@ -310,6 +384,30 @@ export default function DistributionSalesReportPage() {
       .map(([id, label]) => ({ id, label }))
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [invoices, loadById]);
+
+  const salesRefOptions = useMemo(() => {
+    const map = new Map<number, string>();
+
+    loads.forEach((load) => {
+      const salesRefId = Number(load.sales_ref_id || load.sales_ref?.id || 0);
+      if (!salesRefId) return;
+
+      const label = load.sales_ref
+        ? [load.sales_ref.employee_code, load.sales_ref.first_name, load.sales_ref.last_name]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || load.sales_ref.name || `Sales Ref #${salesRefId}`
+        : `Sales Ref #${salesRefId}`;
+
+      if (!map.has(salesRefId)) {
+        map.set(salesRefId, label);
+      }
+    });
+
+    return Array.from(map.entries())
+      .map(([id, label]) => ({ id: String(id), label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [loads]);
 
   useEffect(() => {
     setRouteFilter('all');
@@ -378,10 +476,24 @@ export default function DistributionSalesReportPage() {
     }
   }, [routeFilter, routeOptions]);
 
+  useEffect(() => {
+    if (salesRefFilter === 'all') return;
+    if (!salesRefOptions.some((option) => option.id === salesRefFilter)) {
+      setSalesRefFilter('all');
+    }
+  }, [salesRefFilter, salesRefOptions]);
+
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
 
     return salesRows.filter((row) => {
+      const linkedLoad = row.loadId ? loadById.get(row.loadId) : null;
+      const salesRefId = Number(linkedLoad?.sales_ref_id || linkedLoad?.sales_ref?.id || 0);
+
+      if (viewScope === 'my' && currentEmployeeId > 0 && salesRefId !== currentEmployeeId) return false;
+      if (viewScope === 'team' && teamMemberIds.length > 0 && !teamMemberIds.includes(salesRefId)) return false;
+      if (salesRefFilter !== 'all' && String(salesRefId) !== salesRefFilter) return false;
+
       if (statusFilter !== 'all' && row.status !== statusFilter) return false;
       if (customerFilter !== 'all' && row.customerName !== customerFilter) return false;
 
@@ -418,7 +530,43 @@ export default function DistributionSalesReportPage() {
 
       return text.includes(term);
     });
-  }, [salesRows, search, statusFilter, customerFilter, loadFilter, routeFilter, fromDate, toDate, loadById]);
+  }, [salesRows, search, statusFilter, customerFilter, loadFilter, routeFilter, fromDate, toDate, loadById, viewScope, currentEmployeeId, teamMemberIds, salesRefFilter]);
+
+  const teamPerformanceRows = useMemo(() => {
+    const map = new Map<number, { id: number; name: string; invoices: number; sales: number; collected: number; outstanding: number }>();
+
+    filteredRows.forEach((row) => {
+      const linkedLoad = row.loadId ? loadById.get(row.loadId) : null;
+      const salesRefId = Number(linkedLoad?.sales_ref_id || linkedLoad?.sales_ref?.id || 0);
+      if (!salesRefId) return;
+
+      const salesRefName = linkedLoad?.sales_ref
+        ? [linkedLoad.sales_ref.employee_code, linkedLoad.sales_ref.first_name, linkedLoad.sales_ref.last_name]
+            .filter(Boolean)
+            .join(' ')
+            .trim() || linkedLoad.sales_ref.name || `Sales Ref #${salesRefId}`
+        : `Sales Ref #${salesRefId}`;
+
+      if (!map.has(salesRefId)) {
+        map.set(salesRefId, {
+          id: salesRefId,
+          name: salesRefName,
+          invoices: 0,
+          sales: 0,
+          collected: 0,
+          outstanding: 0,
+        });
+      }
+
+      const current = map.get(salesRefId)!;
+      current.invoices += 1;
+      current.sales += row.salesAmount;
+      current.collected += row.collectedAmount;
+      current.outstanding += row.outstandingAmount;
+    });
+
+    return Array.from(map.values()).sort((a, b) => b.sales - a.sales);
+  }, [filteredRows, loadById]);
 
   const summary = useMemo(() => {
     const totalInvoices = filteredRows.length;
@@ -618,7 +766,7 @@ export default function DistributionSalesReportPage() {
         )}
 
         <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-10 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
               <input
@@ -691,6 +839,32 @@ export default function DistributionSalesReportPage() {
               />
             </div>
             <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">View Scope</label>
+              <select
+                value={viewScope}
+                onChange={(e) => setViewScope(e.target.value as 'all' | 'my' | 'team')}
+                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                {isAdminUser && <option value="all">All Sales Refs</option>}
+                {currentEmployeeId > 0 && <option value="my">My Sales</option>}
+                {teamMemberIds.length > 0 && <option value="team">My Team Sales</option>}
+                {!isAdminUser && currentEmployeeId <= 0 && <option value="all">All</option>}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Sales Ref</label>
+              <select
+                value={salesRefFilter}
+                onChange={(e) => setSalesRefFilter(e.target.value)}
+                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                <option value="all">All</option>
+                {salesRefOptions.map((salesRef) => (
+                  <option key={salesRef.id} value={salesRef.id}>{salesRef.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">To Date</label>
               <input
                 type="date"
@@ -699,7 +873,7 @@ export default function DistributionSalesReportPage() {
                 className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
               />
             </div>
-            <div className="md:col-span-8 flex justify-end">
+            <div className="md:col-span-10 flex justify-end">
               <button
                 type="button"
                 onClick={() => fetchRows()}
@@ -732,6 +906,29 @@ export default function DistributionSalesReportPage() {
             <span>Outstanding: <strong>{formatMoney(summary.totalOutstanding)}</strong></span>
             <span>Avg Invoice: <strong>{formatMoney(summary.averageInvoice)}</strong></span>
           </div>
+
+          {teamPerformanceRows.length > 0 && (
+            <div className="border-b border-gray-100 bg-white px-4 py-4">
+              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.12em] text-gray-600">Team Performance</h3>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {teamPerformanceRows.map((member) => {
+                  const progress = member.sales > 0 ? Math.min(100, (member.collected / member.sales) * 100) : 0;
+                  return (
+                    <div key={member.id} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                      <div className="mb-1 flex items-center justify-between">
+                        <p className="text-sm font-semibold text-gray-900">{member.name}</p>
+                        <p className="text-xs text-gray-600">Invoices: {member.invoices}</p>
+                      </div>
+                      <p className="text-xs text-gray-700">Sales {formatMoney(member.sales)} | Collected {formatMoney(member.collected)} | Outstanding {formatMoney(member.outstanding)}</p>
+                      <div className="mt-2 h-2 rounded-full bg-gray-200">
+                        <div className="h-2 rounded-full bg-gradient-to-r from-cyan-500 to-teal-500" style={{ width: `${progress}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">

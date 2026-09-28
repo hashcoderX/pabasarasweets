@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DistributionInvoice;
 use App\Models\DistributionPayment;
 use App\Models\DistributionCustomer;
+use App\Models\Employee;
 use App\Models\Load;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,6 +15,39 @@ use Illuminate\Support\Facades\Validator;
 
 class DistributionPaymentController extends Controller
 {
+    private function resolveAccessibleEmployeeIds(int $employeeId): array
+    {
+        $accessible = [$employeeId];
+        $frontier = [$employeeId];
+        $visited = [$employeeId => true];
+        $maxDepth = 12;
+        $depth = 0;
+
+        while (!empty($frontier) && $depth < $maxDepth) {
+            $childIds = Employee::query()
+                ->whereIn('reporting_person_id', $frontier)
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->all();
+
+            $nextFrontier = [];
+            foreach ($childIds as $childId) {
+                if (isset($visited[$childId])) {
+                    continue;
+                }
+
+                $visited[$childId] = true;
+                $accessible[] = $childId;
+                $nextFrontier[] = $childId;
+            }
+
+            $frontier = $nextFrontier;
+            $depth++;
+        }
+
+        return $accessible;
+    }
+
     public function index(Request $request): JsonResponse
     {
         $query = DistributionPayment::with([
@@ -27,7 +61,8 @@ class DistributionPaymentController extends Controller
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
 
             if (!$isAdmin && $user->employee_id) {
-                $routeIds = Load::where('sales_ref_id', $user->employee_id)
+                $accessibleEmployeeIds = $this->resolveAccessibleEmployeeIds((int) $user->employee_id);
+                $routeIds = Load::whereIn('sales_ref_id', $accessibleEmployeeIds)
                     ->whereIn('status', ['pending', 'in_transit', 'delivered'])
                     ->pluck('route_id')
                     ->filter()

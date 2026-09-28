@@ -5,19 +5,56 @@ namespace App\Http\Controllers;
 use App\Models\DistributionInvoice;
 use App\Models\DistributionInvoiceItem;
 use App\Models\DistributionPayment;
+use App\Models\Employee;
 use App\Models\InventoryItem;
 use App\Models\Load;
 use App\Models\LoadItem;
 use App\Models\Company;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use Barryvdh\DomPDF\Facade\Pdf;
 
 class DistributionInvoiceController extends Controller
 {
+    private function resolveAccessibleEmployeeIds(int $employeeId): array
+    {
+        $accessible = [$employeeId];
+        $frontier = [$employeeId];
+        $visited = [$employeeId => true];
+        $maxDepth = 12;
+        $depth = 0;
+
+        while (!empty($frontier) && $depth < $maxDepth) {
+            $childIds = Employee::query()
+                ->whereIn('reporting_person_id', $frontier)
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->all();
+
+            $nextFrontier = [];
+            foreach ($childIds as $childId) {
+                if (isset($visited[$childId])) {
+                    continue;
+                }
+
+                $visited[$childId] = true;
+                $accessible[] = $childId;
+                $nextFrontier[] = $childId;
+            }
+
+            $frontier = $nextFrontier;
+            $depth++;
+        }
+
+        return $accessible;
+    }
+
     public function index(Request $request): JsonResponse
     {
         $query = DistributionInvoice::with([
@@ -32,9 +69,10 @@ class DistributionInvoiceController extends Controller
             $isAdmin = (!$user->employee_id) || $user->hasRole('Super Admin');
 
             if (!$isAdmin && $user->employee_id) {
+                $accessibleEmployeeIds = $this->resolveAccessibleEmployeeIds((int) $user->employee_id);
                 $loads = Load::with('loadRoutes:load_id,route_id')
                     ->select(['id', 'route_id'])
-                    ->where('sales_ref_id', $user->employee_id)
+                    ->whereIn('sales_ref_id', $accessibleEmployeeIds)
                     ->whereIn('status', ['pending', 'in_transit', 'delivered'])
                     ->get();
 
@@ -218,6 +256,7 @@ class DistributionInvoiceController extends Controller
 
             return $invoice->load(['customer:id,shop_name,customer_code', 'items']);
         });
+                    $this->pushInvoiceLocationToTraccar($invoice);
 
         return response()->json([
             'success' => true,
@@ -225,6 +264,85 @@ class DistributionInvoiceController extends Controller
             'message' => 'Distribution invoice created successfully',
         ], 201);
     }
+
+                private function pushInvoiceLocationToTraccar(DistributionInvoice $invoice): void
+                {
+                    $enabled = (bool) config('services.traccar.enabled', false);
+                    $endpoint = trim((string) config('services.traccar.endpoint', ''));
+
+                    if (!$enabled || $endpoint === '') {
+                        return;
+                    }
+
+                    $points = [
+                        [
+                            'type' => 'ref',
+                            'lat' => $invoice->ref_latitude,
+                            'lon' => $invoice->ref_longitude,
+                            'accuracy' => $invoice->ref_gps_accuracy,
+                            'captured_at' => $invoice->ref_gps_captured_at,
+                        ],
+                        [
+                            'type' => 'billing',
+                            'lat' => $invoice->billing_latitude,
+                            'lon' => $invoice->billing_longitude,
+                            'accuracy' => $invoice->billing_gps_accuracy,
+                            'captured_at' => $invoice->billing_gps_captured_at,
+                        ],
+                    ];
+
+                    $configuredDeviceId = trim((string) config('services.traccar.device_id', ''));
+                    $deviceId = $configuredDeviceId !== ''
+                        ? $configuredDeviceId
+                        : 'invoice-' . (string) ($invoice->created_by ?? $invoice->id);
+
+                    $apiToken = trim((string) config('services.traccar.api_token', ''));
+
+                    foreach ($points as $point) {
+                        $lat = is_null($point['lat']) ? null : (float) $point['lat'];
+                        $lon = is_null($point['lon']) ? null : (float) $point['lon'];
+                        if (is_null($lat) || is_null($lon)) {
+                            continue;
+                        }
+
+                        $capturedAt = $point['captured_at'] ? Carbon::parse((string) $point['captured_at']) : now();
+
+                        $payload = [
+                            'deviceId' => $deviceId,
+                            'latitude' => $lat,
+                            'longitude' => $lon,
+                            'fixTime' => $capturedAt->toIso8601String(),
+                            'attributes' => [
+                                'source' => 'distribution_invoice',
+                                'invoice_id' => $invoice->id,
+                                'invoice_number' => $invoice->invoice_number,
+                                'point_type' => $point['type'],
+                                'accuracy' => is_null($point['accuracy']) ? null : (float) $point['accuracy'],
+                            ],
+                        ];
+
+                        try {
+                            $request = Http::timeout(5)->acceptJson();
+                            if ($apiToken !== '') {
+                                $request = $request->withToken($apiToken);
+                            }
+
+                            $response = $request->post($endpoint, $payload);
+                            if ($response->failed()) {
+                                Log::warning('Traccar invoice location push failed', [
+                                    'invoice_id' => $invoice->id,
+                                    'status' => $response->status(),
+                                    'body' => $response->body(),
+                                ]);
+                            }
+                        } catch (\Throwable $e) {
+                            Log::warning('Traccar invoice location push exception', [
+                                'invoice_id' => $invoice->id,
+                                'message' => $e->getMessage(),
+                            ]);
+                        }
+                    }
+                }
 
     public function show(string $id): JsonResponse
     {

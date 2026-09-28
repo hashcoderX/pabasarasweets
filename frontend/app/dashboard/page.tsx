@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { createApiClient } from '@/lib/apiClient';
 
@@ -17,6 +17,15 @@ type DashboardModule = {
   description?: string;
 };
 
+type SalesTargetPreview = {
+  id: number;
+  period_key?: string;
+  target_amount?: number | string;
+  achieved_amount?: number | string;
+  target_quantity?: number | string;
+  achieved_quantity?: number | string;
+};
+
 export default function Dashboard() {
   const [token, setToken] = useState('');
   const [userRoles, setUserRoles] = useState<string[]>([]);
@@ -31,6 +40,9 @@ export default function Dashboard() {
   const [widgetPermissionLoading, setWidgetPermissionLoading] = useState(false);
   const [widgetPermissionSaving, setWidgetPermissionSaving] = useState(false);
   const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
+  const [salesTargets, setSalesTargets] = useState<SalesTargetPreview[]>([]);
+  const [targetsLoading, setTargetsLoading] = useState(false);
   const router = useRouter();
   const apiClient = createApiClient();
 
@@ -87,6 +99,9 @@ export default function Dashboard() {
           roleBlob.includes('admin');
 
         const isOutletUser = roleNames.some((role) => role.includes('outlet_user'));
+        const salesRefUser = roleNames.some(
+          (role) => role.includes('sales ref') || role.includes('sales representative') || role.includes('sales_ref')
+        );
         if (!adminUser && isOutletUser) {
           router.push('/outlet-pos');
           return;
@@ -95,6 +110,7 @@ export default function Dashboard() {
         setUserRoles(Array.from(new Set(roleNames)));
         setUserPermissions(Array.from(new Set(permissionNames.filter(Boolean))));
         setIsAdminUser(adminUser);
+        setIsSalesRefUser(salesRefUser);
 
         try {
           const widgetRes = await apiClient.get('/dashboard/widgets/me', {
@@ -111,6 +127,7 @@ export default function Dashboard() {
         setUserRoles([]);
         setUserPermissions([]);
         setIsAdminUser(false);
+        setIsSalesRefUser(false);
         setWidgetVisibility({});
       } finally {
         setAccessReady(true);
@@ -119,6 +136,55 @@ export default function Dashboard() {
 
     fetchUserAccess();
   }, [token, router]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const fetchSalesTargetPreview = async () => {
+      try {
+        setTargetsLoading(true);
+        const response = await apiClient.get('/sales-targets', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 500 },
+        });
+
+        const payload = response.data?.data;
+        const items = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+        setSalesTargets(items);
+      } catch (error) {
+        console.error('Error loading sales target preview:', error);
+        setSalesTargets([]);
+      } finally {
+        setTargetsLoading(false);
+      }
+    };
+
+    fetchSalesTargetPreview();
+  }, [token]);
+
+  const targetsSummary = useMemo(() => {
+    const safeNumber = (value: unknown) => {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : 0;
+    };
+
+    const totalTargetAmount = salesTargets.reduce((sum, item) => sum + safeNumber(item.target_amount), 0);
+    const totalAchievedAmount = salesTargets.reduce((sum, item) => sum + safeNumber(item.achieved_amount), 0);
+    const totalTargetQty = salesTargets.reduce((sum, item) => sum + safeNumber(item.target_quantity), 0);
+    const totalAchievedQty = salesTargets.reduce((sum, item) => sum + safeNumber(item.achieved_quantity), 0);
+
+    const amountProgress = totalTargetAmount > 0 ? Math.min(100, (totalAchievedAmount / totalTargetAmount) * 100) : 0;
+    const qtyProgress = totalTargetQty > 0 ? Math.min(100, (totalAchievedQty / totalTargetQty) * 100) : 0;
+
+    return {
+      totalTargetAmount,
+      totalAchievedAmount,
+      totalTargetQty,
+      totalAchievedQty,
+      amountProgress,
+      qtyProgress,
+    };
+  }, [salesTargets]);
 
   const hasModuleAccess = (keywords: string[]) => {
     if (isAdminUser) return true;
@@ -514,6 +580,96 @@ export default function Dashboard() {
         </div>
 
         {/* Module Cards */}
+        <section className="mb-10 rounded-2xl border border-white/30 bg-white/80 p-5 shadow-xl backdrop-blur-sm">
+          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-xl font-bold text-gray-900">Sales Target Preview</h3>
+              <p className="text-sm text-gray-600">Quick view of total targets vs achieved values after login.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => router.push('/dashboard/reports/distribution/sales')}
+                className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
+              >
+                View Team Performance
+              </button>
+              {!isSalesRefUser && (
+                <button
+                  type="button"
+                  onClick={() => router.push('/dashboard/hrm/sales-targets')}
+                  className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                >
+                  Open Sales Targets
+                </button>
+              )}
+            </div>
+          </div>
+
+          {targetsLoading ? (
+            <div className="rounded-xl border border-dashed border-red-200 bg-red-50/40 p-6 text-center text-sm text-red-700">
+              Loading target preview...
+            </div>
+          ) : salesTargets.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-600">
+              No sales targets available yet.
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="rounded-xl border border-red-100 bg-gradient-to-br from-red-50 to-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-red-500">Amount Progress</p>
+                  <div className="mt-2 flex items-end justify-between">
+                    <p className="text-2xl font-bold text-gray-900">{targetsSummary.amountProgress.toFixed(1)}%</p>
+                    <p className="text-xs text-gray-600">Target {targetsSummary.totalTargetAmount.toFixed(2)}</p>
+                  </div>
+                  <div className="mt-3 h-3 rounded-full bg-red-100">
+                    <div className="h-3 rounded-full bg-gradient-to-r from-red-500 to-pink-500 transition-all" style={{ width: `${targetsSummary.amountProgress}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-gray-700">Achieved {targetsSummary.totalAchievedAmount.toFixed(2)}</p>
+                </div>
+
+                <div className="rounded-xl border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-600">Quantity Progress</p>
+                  <div className="mt-2 flex items-end justify-between">
+                    <p className="text-2xl font-bold text-gray-900">{targetsSummary.qtyProgress.toFixed(1)}%</p>
+                    <p className="text-xs text-gray-600">Target {targetsSummary.totalTargetQty.toFixed(2)}</p>
+                  </div>
+                  <div className="mt-3 h-3 rounded-full bg-cyan-100">
+                    <div className="h-3 rounded-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all" style={{ width: `${targetsSummary.qtyProgress}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-gray-700">Achieved {targetsSummary.totalAchievedQty.toFixed(2)}</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-gray-200 bg-white p-4">
+                <p className="mb-3 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Target vs Achieved</p>
+                <div className="space-y-3">
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-sm text-gray-700">
+                      <span>Amount</span>
+                      <span>{targetsSummary.totalAchievedAmount.toFixed(2)} / {targetsSummary.totalTargetAmount.toFixed(2)}</span>
+                    </div>
+                    <div className="h-4 rounded-full bg-gray-100 p-0.5">
+                      <div className="h-3 rounded-full bg-gradient-to-r from-red-500 to-pink-500" style={{ width: `${targetsSummary.amountProgress}%` }} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-sm text-gray-700">
+                      <span>Quantity</span>
+                      <span>{targetsSummary.totalAchievedQty.toFixed(2)} / {targetsSummary.totalTargetQty.toFixed(2)}</span>
+                    </div>
+                    <div className="h-4 rounded-full bg-gray-100 p-0.5">
+                      <div className="h-3 rounded-full bg-gradient-to-r from-cyan-500 to-blue-500" style={{ width: `${targetsSummary.qtyProgress}%` }} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mb-16">
           {visibleModules.map((module, index) => (
             <div

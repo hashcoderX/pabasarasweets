@@ -20,6 +20,7 @@ interface LoadItemInfo {
   load_id: number;
   product_code: string;
   name: string;
+  loaded_qty: number;
   qty: number;
   sell_price: number;
 }
@@ -31,6 +32,7 @@ interface LoadItemSuggestion {
   item_name: string;
   unit: string;
   load_qty: number;
+  load_available_qty: number;
   sell_price: number;
   warehouse_stock: number;
 }
@@ -712,6 +714,7 @@ export default function DistributionInvoicesPage() {
         load_id: Number(li.load_id),
         product_code: String(li.product_code),
         name: String(li.name ?? ''),
+        loaded_qty: Number(li.loaded_qty ?? li.qty) || 0,
         qty: Number(li.qty) || 0,
         sell_price: Number(li.sell_price) || 0,
       }));
@@ -1350,11 +1353,20 @@ export default function DistributionInvoicesPage() {
     if (!search) return [] as LoadItemSuggestion[];
 
     const inventoryByCode = new Map(items.map((item) => [item.code, item] as const));
+    const lineQtyByLoadItemId = lines.reduce((map, line) => {
+      if (!line.source_load_item_id) return map;
+      const previous = map.get(line.source_load_item_id) || 0;
+      map.set(line.source_load_item_id, previous + Number(line.quantity || 0));
+      return map;
+    }, new Map<number, number>());
 
     return loadItems
       .filter((loadItem) => !activeLoadId || String(loadItem.load_id) === String(activeLoadId))
       .map((loadItem) => {
         const matchedInventory = inventoryByCode.get(loadItem.product_code);
+        const loadQty = Number(loadItem.loaded_qty) || Number(loadItem.qty) || 0;
+        const currentAvailableFromServer = Number(loadItem.qty) || 0;
+        const usedQty = lineQtyByLoadItemId.get(loadItem.id) || 0;
 
         return {
           load_item_id: loadItem.id,
@@ -1362,7 +1374,8 @@ export default function DistributionInvoicesPage() {
           item_code: loadItem.product_code,
           item_name: loadItem.name || matchedInventory?.name || loadItem.product_code,
           unit: matchedInventory?.unit || 'qty',
-          load_qty: Number(loadItem.qty) || 0,
+          load_qty: loadQty,
+          load_available_qty: Math.max(0, currentAvailableFromServer - usedQty),
           sell_price: loadItem.sell_price > 0 ? loadItem.sell_price : Number(matchedInventory?.sell_price || 0),
           warehouse_stock: Number(matchedInventory?.current_stock || 0),
         } as LoadItemSuggestion;
@@ -1371,7 +1384,7 @@ export default function DistributionInvoicesPage() {
         item.item_code.toLowerCase().includes(search) || item.item_name.toLowerCase().includes(search)
       )
       .slice(0, 8);
-  }, [itemSearch, loadItems, items, activeLoadId]);
+  }, [itemSearch, loadItems, items, activeLoadId, lines]);
   const selectedItem = useMemo(() => {
     if (selectedLoadItemId) {
       const selectedLoadRow = loadItems.find((li) => String(li.id) === String(selectedLoadItemId));
@@ -1741,11 +1754,18 @@ export default function DistributionInvoicesPage() {
     const effectiveLoadId = selectedLoadId ? Number(selectedLoadId) : null;
     const billToBillAmount = Number(lastBillAmount || 0);
     const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillAmount > 0;
-    const chequeEntries = paymentCheques.length > 0
-      ? paymentCheques
-      : [{ amount: paymentAmount, chequeDate: paymentChequeDate, reference: paymentReference, bankName: paymentBankName }];
+    const chequeEntries = [
+      { amount: paymentAmount, chequeDate: paymentChequeDate, reference: paymentReference, bankName: paymentBankName },
+      ...paymentCheques,
+    ];
     if (!customerId || lines.length === 0) {
       setQtyWarningMessage('Select customer and add at least one item line.');
+      setQtyWarningOpen(true);
+      return;
+    }
+
+    if (!isEditing && !refGpsSnapshot) {
+      setQtyWarningMessage('Capture Ref GPS before creating the invoice to enable location tracking.');
       setQtyWarningOpen(true);
       return;
     }
@@ -1877,7 +1897,7 @@ export default function DistributionInvoicesPage() {
               if (paymentMethod === 'check' && paymentChequeDate) {
                 parts.push(`Cheques: ${chequeEntries.length}`);
                 chequeEntries.forEach((entry, index) => {
-                  parts.push(`Cheque ${index + 1}: ${Number(entry.amount).toFixed(2)} on ${entry.chequeDate}${entry.reference ? ` (${entry.reference})` : ''}`);
+                  parts.push(`Cheque ${index + 1}: ${Number(entry.amount).toFixed(2)} on ${entry.chequeDate}${entry.reference ? ` (${entry.reference})` : ''}${entry.bankName ? ` - ${entry.bankName}` : ''}`);
                 });
               }
               if (paymentBankName.trim()) {
@@ -2056,11 +2076,23 @@ export default function DistributionInvoicesPage() {
           unit_price: it.unit_price,
           discount: Number(it.discount || 0),
         })),
+        paid_amount: paymentPayloads.reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
+        payments: paymentPayloads.map((payment, index) => ({
+          id: -(index + 1),
+          payment_date: payment.date,
+          cheque_date: payment.cheque_date,
+          amount: payment.amount,
+          payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
+          reference_no: payment.reference,
+          bank_name: payment.bank_name,
+          status: 'received',
+        })),
         notes: composedNotes,
       };
 
       setShowModal(false);
       resetInvoiceForm();
+      openReceiptPreview(pseudoInvoice);
 
       setQtyWarningMessage('No internet connection. Invoice saved locally and will sync automatically when connection is available.');
       setQtyWarningOpen(true);
@@ -2075,6 +2107,7 @@ export default function DistributionInvoicesPage() {
       setSaving(true);
 
       let savedInvoice: any = null;
+      let savedPaymentEntries: PaymentEntry[] = [];
 
       if (isEditing) {
         const updateRes = await axios.put(
@@ -2126,6 +2159,7 @@ export default function DistributionInvoicesPage() {
           }));
           if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for payment.');
           await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
+          savedPaymentEntries = paymentPayloads;
         } catch (paymentError: any) {
           console.error('Failed to record payment for invoice:', paymentError);
           setQtyWarningMessage(paymentError?.response?.data?.message || 'Invoice saved, but payment could not be recorded.');
@@ -2165,6 +2199,23 @@ export default function DistributionInvoicesPage() {
       await fetchData();
 
       if (!isEditing && savedInvoice) {
+        const paidAmount = Number(savedInvoice.paid_amount || 0) + savedPaymentEntries.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+        const receiptInvoice: InvoiceRecord = {
+          ...savedInvoice,
+          paid_amount: paidAmount,
+          status: paidAmount >= Number(savedInvoice.total || 0) ? 'paid' : paidAmount > 0 ? 'partial' : savedInvoice.status,
+          payments: savedPaymentEntries.map((payment, index) => ({
+            id: -(index + 1),
+            payment_date: payment.date,
+            cheque_date: payment.cheque_date,
+            amount: payment.amount,
+            payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
+            reference_no: payment.reference,
+            bank_name: payment.bank_name,
+            status: 'received',
+          })),
+        } as InvoiceRecord;
+        openReceiptPreview(receiptInvoice);
       }
     } catch (error: any) {
       if (!isEditing && !error?.response) {
@@ -2933,7 +2984,7 @@ export default function DistributionInvoicesPage() {
                                 >
                                   <div className="text-sm font-medium text-slate-900">{item.item_code} - {item.item_name}</div>
                                   <div className="text-xs text-slate-500">
-                                    {`Load: ${item.load_qty.toFixed(2)} ${item.unit} | Stock: ${item.warehouse_stock} ${item.unit} | Price: ${item.sell_price.toFixed(2)}`}
+                                    {`Load: ${item.load_qty.toFixed(2)} ${item.unit} | Load Available: ${item.load_available_qty.toFixed(2)} ${item.unit} | Stock: ${item.warehouse_stock} ${item.unit} | Price: ${item.sell_price.toFixed(2)}`}
                                   </div>
                                 </button>
                               );
@@ -2953,6 +3004,11 @@ export default function DistributionInvoicesPage() {
                           const matchingLoad = loadItems.find(
                             (li) => String(li.id) === String(selectedLoadItemId)
                           );
+                          const reservedQty = matchingLoad
+                            ? lines
+                                .filter((line) => line.source_load_item_id === matchingLoad.id)
+                                .reduce((sum, line) => sum + Number(line.quantity || 0), 0)
+                            : 0;
                           const priceFromLoad = matchingLoad && matchingLoad.sell_price > 0
                             ? matchingLoad.sell_price
                             : selectedItem.sell_price;
@@ -2961,7 +3017,7 @@ export default function DistributionInvoicesPage() {
                             <p className="mt-1 text-xs text-green-700">
                               Selected: {selectedItem.name}
                               {matchingLoad
-                                ? ` | Load: ${Number(matchingLoad.qty).toFixed(2)} ${selectedItem.unit}`
+                                ? ` | Load: ${Number(matchingLoad.loaded_qty ?? matchingLoad.qty).toFixed(2)} ${selectedItem.unit} | Available: ${Math.max(0, Number(matchingLoad.qty) - reservedQty).toFixed(2)} ${selectedItem.unit}`
                                 : ''}
                               {` | Warehouse: ${selectedItem.current_stock} ${selectedItem.unit}`}
                               {` | Price: ${priceFromLoad.toFixed(2)}`}
@@ -3435,24 +3491,24 @@ export default function DistributionInvoicesPage() {
 
             </section>
 
-            <section className="mt-2 rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50/70 via-white to-emerald-50/45 p-3 shadow-sm sm:p-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-amber-100 bg-white/90 p-4">
-                  <div className="flex items-center justify-between mb-2">
+            <section className="mt-3 rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50/70 via-white to-emerald-50/45 p-4 shadow-sm sm:mt-4 sm:p-5">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
+                <div className="rounded-xl border border-amber-100 bg-white/90 p-4 shadow-sm sm:p-5">
+                  <div className="mb-3 flex items-center justify-between">
                     <h4 className="text-sm font-semibold text-gray-800">Item Returns (Expired / Damaged)</h4>
                     <span className="text-xs text-gray-500">Optional</span>
                   </div>
-                  <p className="text-xs text-gray-500 mb-3">
+                  <p className="mb-4 text-xs leading-relaxed text-gray-500">
                     Search products, enter return quantity, and we will calculate the value of expired or damaged items returned on this visit.
                   </p>
 
-                  <div className="space-y-2">
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-[11px] text-gray-600 mb-1">
-                      <div className="inline-flex rounded-full border border-amber-200 bg-white p-1">
+                  <div className="space-y-3">
+                    <div className="mb-2 flex flex-col gap-3 text-[11px] text-gray-600 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="inline-flex rounded-full border border-amber-200 bg-white p-1.5">
                         <button
                           type="button"
                           onClick={() => setInlineReturnMode('deduct')}
-                          className={`px-2.5 py-1 rounded-full border text-xs font-medium ${
+                          className={`rounded-full border px-3.5 py-1.5 text-xs font-medium ${
                             inlineReturnMode === 'deduct'
                               ? 'border-green-600 bg-green-600 text-white'
                               : 'bg-transparent text-gray-700 border-transparent'
@@ -3463,7 +3519,7 @@ export default function DistributionInvoicesPage() {
                         <button
                           type="button"
                           onClick={() => setInlineReturnMode('exchange')}
-                          className={`ml-1 px-2.5 py-1 rounded-full border text-xs font-medium ${
+                          className={`ml-1 rounded-full border px-3.5 py-1.5 text-xs font-medium ${
                             inlineReturnMode === 'exchange'
                               ? 'border-green-200 bg-emerald-50 text-green-700'
                               : 'bg-transparent text-gray-700 border-transparent'
@@ -3481,9 +3537,9 @@ export default function DistributionInvoicesPage() {
                         </span>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-5 gap-2">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
                       <div className="sm:col-span-2">
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Return Item</label>
+                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Return Item</label>
                         <div className="relative">
                           <input
                             type="text"
@@ -3500,7 +3556,7 @@ export default function DistributionInvoicesPage() {
                               }
                             }}
                             placeholder="Type item code or name"
-                            className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                            className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm"
                           />
                           {showReturnSuggestions && returnSuggestionItems.length > 0 && (
                             <div className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-amber-100 bg-white shadow-xl">
@@ -3520,7 +3576,7 @@ export default function DistributionInvoicesPage() {
                         </div>
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Return Qty</label>
+                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Return Qty</label>
                         <input
                           type="number"
                           step="0.01"
@@ -3534,48 +3590,48 @@ export default function DistributionInvoicesPage() {
                               setReturnAmountInput(qty > 0 ? (qty * Number(selected.sell_price || 0)).toFixed(2) : '');
                             }
                           }}
-                            className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                            className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm"
                           placeholder="0.00"
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Amount</label>
+                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Amount</label>
                         <input
                           type="number"
                           step="0.01"
                           value={returnAmountInput}
                           onChange={(e) => setReturnAmountInput(e.target.value)}
-                          className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                          className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm"
                           placeholder="0.00"
                         />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Damage Mark</label>
-                        <label className="inline-flex h-[42px] w-full items-center justify-center rounded-xl border border-amber-200 bg-white px-3 py-2 text-sm text-slate-800 shadow-sm">
+                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Damage</label>
+                        <div className="flex h-[44px] w-full items-center rounded-xl border border-amber-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm">
                           <input
                             type="checkbox"
-                            className="mr-2"
+                            aria-label="Damage mark"
+                            className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-2 focus:ring-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
                             checked={returnDamageInput}
                             disabled={inlineReturnMode !== 'deduct'}
                             onChange={(e) => setReturnDamageInput(e.target.checked)}
                           />
-                          Damaged
-                        </label>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="flex justify-end">
+                    <div className="flex justify-end pt-1">
                       <button
                         type="button"
                         onClick={addReturnLine}
-                        className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-3 py-1 text-xs font-semibold text-white shadow-md shadow-amber-200/70 transition hover:from-amber-600 hover:to-orange-700"
+                        className="rounded-lg bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-md shadow-amber-200/70 transition hover:from-amber-600 hover:to-orange-700"
                       >
                         Add Return
                       </button>
                     </div>
 
                     {returnLines.length > 0 && (
-                      <div className="mt-2">
+                      <div className="mt-3">
                         <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white md:block">
                           <table className="min-w-full divide-y divide-slate-200">
                             <thead className="bg-slate-100/80">
@@ -3783,10 +3839,11 @@ export default function DistributionInvoicesPage() {
                                   {inlineReturnMode === 'deduct' && (
                                     <div className="mt-1">
                                       {isEditing ? (
-                                        <label className="inline-flex items-center text-[10px] text-gray-600">
+                                        <div className="inline-flex items-center">
                                           <input
                                             type="checkbox"
-                                            className="mr-1"
+                                            aria-label="Mark return as damaged"
+                                            className="h-4 w-4"
                                             checked={line.is_damaged}
                                             onChange={(e) =>
                                               updateReturnLine(
@@ -3795,8 +3852,7 @@ export default function DistributionInvoicesPage() {
                                               )
                                             }
                                           />
-                                          Damaged
-                                        </label>
+                                        </div>
                                       ) : (
                                         <div className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${line.is_damaged ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>
                                           {line.is_damaged ? 'Damaged' : 'Normal'}
@@ -4006,7 +4062,7 @@ export default function DistributionInvoicesPage() {
                             </button>
                           </div>
                           {paymentCheques.map((cheque, index) => (
-                            <div key={`cheque-${index}`} className="grid grid-cols-1 gap-2 sm:grid-cols-4">
+                            <div key={`cheque-${index}`} className="grid grid-cols-1 gap-2 sm:grid-cols-5">
                               <input
                                 type="number"
                                 min="0.01"
@@ -4027,6 +4083,13 @@ export default function DistributionInvoicesPage() {
                                 value={cheque.reference}
                                 onChange={(e) => setPaymentCheques((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, reference: e.target.value } : row))}
                                 placeholder="Cheque number"
+                                className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900"
+                              />
+                              <input
+                                type="text"
+                                value={cheque.bankName}
+                                onChange={(e) => setPaymentCheques((prev) => prev.map((row, rowIndex) => rowIndex === index ? { ...row, bankName: e.target.value } : row))}
+                                placeholder="Bank / Branch"
                                 className="rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900"
                               />
                               <button
@@ -4417,6 +4480,29 @@ export default function DistributionInvoicesPage() {
                   </div>
                 );
               })()}
+
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-xs text-slate-700 space-y-2">
+                <div className="font-semibold text-emerald-800">Payment Details</div>
+                {(viewInvoice.payments || []).length === 0 ? (
+                  <p className="text-slate-500">No payments recorded.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {viewInvoice.payments?.map((payment, index) => (
+                      <div key={payment.id} className="rounded-md border border-emerald-100 bg-white px-2 py-2">
+                        <div className="flex justify-between gap-2 font-medium">
+                          <span>#{index + 1} {String(payment.payment_method || '').toUpperCase()}</span>
+                          <span>{Number(payment.amount || 0).toFixed(2)}</span>
+                        </div>
+                        <div>Date: {payment.payment_date || '-'}</div>
+                        {payment.cheque_date && <div>Cheque date: {payment.cheque_date}</div>}
+                        {payment.reference_no && <div>Cheque / Reference: {payment.reference_no}</div>}
+                        {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
+                        {payment.status && <div>Status: {payment.status}</div>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {((viewInvoice.ref_latitude != null && viewInvoice.ref_longitude != null) ||
                 (viewInvoice.billing_latitude != null && viewInvoice.billing_longitude != null)) && (

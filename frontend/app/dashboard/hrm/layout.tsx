@@ -15,6 +15,7 @@ export default function HRMLayout({
     { name: 'Departments', href: '/dashboard/hrm/departments', icon: '🏢' },
     { name: 'Designations', href: '/dashboard/hrm/designations', icon: '📋' },
     { name: 'Candidates', href: '/dashboard/hrm/candidates', icon: '🎯' },
+    { name: 'Sales Targets ⭐', href: '/dashboard/hrm/sales-targets', icon: '📈' },
   ];
 
   return (
