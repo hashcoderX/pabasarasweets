@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
@@ -36,6 +36,38 @@ type PaginatedResponse<T> = {
   next_page_url?: string | null;
 };
 
+type PermissionLike = {
+  name?: string;
+};
+
+type RoleLike = {
+  name?: string;
+  permissions?: PermissionLike[];
+};
+
+type UserProfile = {
+  employee_id?: number | null;
+  employee?: { id?: number | null } | null;
+  role?: string | null;
+  roles?: Array<string | RoleLike>;
+};
+
+type LoadRouteEntry = {
+  route_id?: number | null;
+  route?: RouteInfo | null;
+  sequence_no?: number | null;
+};
+
+type LoadInfo = {
+  id: number;
+  sales_ref_id?: number | null;
+  sales_ref?: { id?: number | null } | null;
+  route_id?: number | null;
+  route?: RouteInfo | null;
+  load_routes?: LoadRouteEntry[];
+  loadRoutes?: LoadRouteEntry[];
+};
+
 export default function DistributionCustomerReportPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
@@ -45,6 +77,8 @@ export default function DistributionCustomerReportPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | CustomerStatus>('all');
   const [routeFilter, setRouteFilter] = useState('all');
   const [errorMessage, setErrorMessage] = useState('');
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
+  const [allocatedRoutes, setAllocatedRoutes] = useState<RouteInfo[]>([]);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -59,67 +93,75 @@ export default function DistributionCustomerReportPage() {
     setToken(storedToken);
   }, [router]);
 
-  useEffect(() => {
-    if (!token) return;
+  const loadSalesRefAllocatedRoutes = useCallback(async (authToken: string, employeeId: number) => {
+    if (!employeeId) {
+      setAllocatedRoutes([]);
+      return;
+    }
 
-    const verifyAccess = async () => {
-      try {
-        const userRes = await axios.get('/api/user', {
-          headers: { Authorization: `Bearer ${token}` },
+    try {
+      const routeMap = new Map<number, RouteInfo>();
+      let nextUrl: string | null = `${API_URL}/api/vehicle-loading/loads?per_page=200`;
+      let pageCount = 0;
+
+      while (nextUrl && pageCount < 50) {
+        const response: { data: { data?: PaginatedResponse<LoadInfo> } } = await axios.get(nextUrl, {
+          headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
         });
 
-        const userData = userRes.data || {};
-        const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
+        const payload = response.data?.data;
+        const pageRows = Array.isArray(payload?.data) ? payload.data : [];
 
-        const roleNames = [
-          String(userData?.role || ''),
-          ...(Array.isArray(userData?.roles)
-            ? userData.roles.map((role: any) => String(role?.name || role || ''))
-            : []),
-        ]
-          .map((role) => role.trim().toLowerCase())
-          .filter(Boolean);
+        pageRows
+          .filter((load) => Number(load.sales_ref_id || load.sales_ref?.id || 0) === employeeId)
+          .forEach((load) => {
+            const entries = Array.isArray(load.load_routes)
+              ? load.load_routes
+              : Array.isArray(load.loadRoutes)
+                ? load.loadRoutes
+                : [];
 
-        const permissionNames = Array.isArray(userData?.roles)
-          ? userData.roles.flatMap((role: any) =>
-              Array.isArray(role?.permissions)
-                ? role.permissions.map((permission: any) => String(permission?.name || '').trim().toLowerCase())
-                : []
-            )
-          : [];
+            entries.forEach((entry) => {
+              const routeId = Number(entry.route_id || entry.route?.id || 0);
+              if (!routeId) return;
+              const route: RouteInfo = {
+                id: routeId,
+                name: entry.route?.name,
+                origin: entry.route?.origin,
+                destination: entry.route?.destination,
+              };
+              if (!routeMap.has(routeId)) routeMap.set(routeId, route);
+            });
 
-        const roleBlob = roleNames.join(' ');
-        const isAdminUser =
-          !employeeId ||
-          roleBlob.includes('super admin') ||
-          roleBlob.includes('superadmin') ||
-          roleBlob.includes('administrator') ||
-          roleBlob.includes('admin');
+            const primaryRouteId = Number(load.route_id || load.route?.id || 0);
+            if (primaryRouteId > 0 && !routeMap.has(primaryRouteId)) {
+              routeMap.set(primaryRouteId, {
+                id: primaryRouteId,
+                name: load.route?.name,
+                origin: load.route?.origin,
+                destination: load.route?.destination,
+              });
+            }
+          });
 
-        const hasReportPermission = permissionNames.some((permission: string) => permission.includes('report'));
-        const isSalesRef =
-          roleBlob.includes('sales ref') ||
-          roleBlob.includes('sales representative') ||
-          roleBlob.includes('sales_ref');
-
-        if (!isAdminUser && !hasReportPermission && !isSalesRef) {
-          router.push('/dashboard');
-          return;
-        }
-
-        await fetchRows(token);
-      } catch (error) {
-        console.error('Error checking customer report access:', error);
-        router.push('/dashboard');
-      } finally {
-        setAccessReady(true);
+        nextUrl = payload?.next_page_url || null;
+        pageCount += 1;
       }
-    };
 
-    verifyAccess();
-  }, [token, router]);
+      setAllocatedRoutes(
+        Array.from(routeMap.values()).sort((a, b) => {
+          const left = String(a.name || `${a.origin || ''} ${a.destination || ''}`).trim();
+          const right = String(b.name || `${b.origin || ''} ${b.destination || ''}`).trim();
+          return left.localeCompare(right);
+        })
+      );
+    } catch (error) {
+      console.error('Error loading sales ref allocated routes:', error);
+      setAllocatedRoutes([]);
+    }
+  }, [API_URL]);
 
-  const fetchRows = async (authToken?: string) => {
+  const fetchRows = useCallback(async (authToken?: string) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
 
@@ -152,24 +194,118 @@ export default function DistributionCustomerReportPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [API_URL, token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const verifyAccess = async () => {
+      try {
+        const userRes = await axios.get('/api/user', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const userData = (userRes.data || {}) as UserProfile;
+        const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
+
+        const roleNames = [
+          String(userData?.role || ''),
+          ...(Array.isArray(userData?.roles)
+            ? userData.roles.map((role) => String(typeof role === 'string' ? role : role?.name || ''))
+            : []),
+        ]
+          .map((role) => role.trim().toLowerCase())
+          .filter(Boolean);
+
+        const permissionNames = Array.isArray(userData?.roles)
+          ? userData.roles.flatMap((role) =>
+              typeof role === 'string'
+                ? []
+                : Array.isArray(role?.permissions)
+                ? role.permissions.map((permission) => String(permission?.name || '').trim().toLowerCase())
+                : []
+            )
+          : [];
+
+        const roleBlob = roleNames.join(' ');
+        const isAdminUser =
+          !employeeId ||
+          roleBlob.includes('super admin') ||
+          roleBlob.includes('superadmin') ||
+          roleBlob.includes('administrator') ||
+          roleBlob.includes('admin');
+
+        const hasReportPermission = permissionNames.some((permission: string) => permission.includes('report'));
+        const isSalesRef =
+          roleBlob.includes('sales ref') ||
+          roleBlob.includes('sales representative') ||
+          roleBlob.includes('sales_ref');
+
+        if (!isAdminUser && !hasReportPermission && !isSalesRef) {
+          router.push('/dashboard');
+          return;
+        }
+
+        setIsSalesRefUser(isSalesRef && !isAdminUser);
+        if (isSalesRef && employeeId > 0) {
+          await loadSalesRefAllocatedRoutes(token, employeeId);
+        } else {
+          setAllocatedRoutes([]);
+        }
+
+        await fetchRows(token);
+      } catch (error) {
+        console.error('Error checking customer report access:', error);
+        router.push('/dashboard');
+      } finally {
+        setAccessReady(true);
+      }
+    };
+
+    verifyAccess();
+  }, [token, router, fetchRows, loadSalesRefAllocatedRoutes]);
 
   const routeOptions = useMemo(() => {
-    return Array.from(
-      new Set(
-        rows
-          .map((row) => row.route?.name)
-          .filter((name): name is string => Boolean(name && name.trim()))
-      )
-    ).sort();
-  }, [rows]);
+    if (isSalesRefUser && allocatedRoutes.length > 0) {
+      return allocatedRoutes.map((route) => ({
+        id: String(route.id),
+        label: route.name || [route.origin, route.destination].filter(Boolean).join(' -> ') || `Route #${route.id}`,
+      }));
+    }
+
+    const routeMap = new Map<number, string>();
+    rows.forEach((row) => {
+      const routeId = Number(row.route_id || row.route?.id || 0);
+      if (!routeId) return;
+      const label = row.route?.name || [row.route?.origin, row.route?.destination].filter(Boolean).join(' -> ') || `Route #${routeId}`;
+      routeMap.set(routeId, label);
+    });
+
+    return Array.from(routeMap.entries())
+      .map(([id, label]) => ({ id: String(id), label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [rows, isSalesRefUser, allocatedRoutes]);
+
+  const allowedRouteIdSet = useMemo(() => {
+    if (!isSalesRefUser || allocatedRoutes.length === 0) return null;
+    return new Set(allocatedRoutes.map((route) => Number(route.id)).filter((id) => id > 0));
+  }, [isSalesRefUser, allocatedRoutes]);
+
+  useEffect(() => {
+    if (routeFilter === 'all') return;
+    if (!routeOptions.some((option) => option.id === routeFilter)) {
+      setRouteFilter('all');
+    }
+  }, [routeFilter, routeOptions]);
 
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
 
     return rows.filter((row) => {
       if (statusFilter !== 'all' && row.status !== statusFilter) return false;
-      if (routeFilter !== 'all' && String(row.route?.name || '') !== routeFilter) return false;
+      const rowRouteId = Number(row.route_id || row.route?.id || 0);
+      if (allowedRouteIdSet && rowRouteId > 0 && !allowedRouteIdSet.has(rowRouteId)) return false;
+      if (routeFilter !== 'all' && String(rowRouteId) !== routeFilter) return false;
 
       if (!term) return true;
 
@@ -189,7 +325,7 @@ export default function DistributionCustomerReportPage() {
 
       return text.includes(term);
     });
-  }, [rows, search, statusFilter, routeFilter]);
+  }, [rows, search, statusFilter, routeFilter, allowedRouteIdSet]);
 
   const summary = useMemo(() => {
     const total = filteredRows.length;
@@ -267,7 +403,7 @@ export default function DistributionCustomerReportPage() {
     doc.setFontSize(10);
     doc.text(`Generated: ${new Date().toLocaleString()}`, 40, 58);
     doc.text(`Status Filter: ${statusFilter === 'all' ? 'ALL' : statusFilter.toUpperCase()}`, 40, 72);
-    doc.text(`Route Filter: ${routeFilter === 'all' ? 'ALL' : routeFilter}`, 40, 86);
+    doc.text(`Route Filter: ${routeFilter === 'all' ? 'ALL' : (routeOptions.find((route) => route.id === routeFilter)?.label || routeFilter)}`, 40, 86);
 
     autoTable(doc, {
       startY: 100,
@@ -405,8 +541,8 @@ export default function DistributionCustomerReportPage() {
                 className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
               >
                 <option value="all">All</option>
-                {routeOptions.map((routeName) => (
-                  <option key={routeName} value={routeName}>{routeName}</option>
+                {routeOptions.map((route) => (
+                  <option key={route.id} value={route.id}>{route.label}</option>
                 ))}
               </select>
             </div>

@@ -9,11 +9,21 @@ import autoTable from 'jspdf-autotable';
 
 type ReturnStatus = 'pending' | 'approved' | 'rejected';
 type SettlementType = 'bill_deduction' | 'cash_refund' | 'item_exchange';
+type BillingLinkFilter = 'all' | 'with_billing' | 'without_billing';
+
+type RouteInfo = {
+  id: number;
+  name?: string;
+  origin?: string;
+  destination?: string;
+};
 
 type CustomerInfo = {
   id: number;
   shop_name?: string;
   customer_code?: string;
+  route_id?: number | null;
+  route?: RouteInfo | null;
 };
 
 type InvoiceInfo = {
@@ -53,6 +63,65 @@ type PaginatedResponse<T> = {
   next_page_url?: string | null;
 };
 
+type LoadRouteEntry = {
+  route_id?: number | null;
+  route?: RouteInfo | null;
+};
+
+type LoadInfo = {
+  id: number;
+  sales_ref_id?: number | null;
+  sales_ref?: { id?: number | null } | null;
+  route_id?: number | null;
+  route?: RouteInfo | null;
+  load_routes?: LoadRouteEntry[];
+  loadRoutes?: LoadRouteEntry[];
+};
+
+type PermissionLike = {
+  name?: string;
+};
+
+type RoleLike = {
+  name?: string;
+  permissions?: PermissionLike[];
+};
+
+type UserProfile = {
+  employee_id?: number | null;
+  employee?: { id?: number | null } | null;
+  role?: string | null;
+  roles?: Array<string | RoleLike>;
+};
+
+type LookupCustomer = {
+  id: number;
+  shop_name?: string;
+  customer_code?: string;
+};
+
+type LookupInvoice = {
+  id: number;
+  invoice_number?: string;
+  customer_id?: number | null;
+};
+
+type LookupInventoryItem = {
+  id: number;
+  code?: string;
+  item_code?: string;
+  product_code?: string;
+  sku?: string;
+  name?: string;
+  type?: string;
+  item_type?: string;
+  category?: string;
+  category_name?: string;
+  item_category?: string;
+  stock_type?: string;
+  inventory_type?: string;
+};
+
 export default function DistributionReturnsReportPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
@@ -62,12 +131,60 @@ export default function DistributionReturnsReportPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | ReturnStatus>('all');
   const [settlementFilter, setSettlementFilter] = useState<'all' | SettlementType>('all');
   const [customerFilter, setCustomerFilter] = useState('all');
+  const [routeFilter, setRouteFilter] = useState('all');
+  const [billingLinkFilter, setBillingLinkFilter] = useState<BillingLinkFilter>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
+  const [allocatedRoutes, setAllocatedRoutes] = useState<RouteInfo[]>([]);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [savingReturn, setSavingReturn] = useState(false);
+  const [createErrorMessage, setCreateErrorMessage] = useState('');
+  const [createCustomers, setCreateCustomers] = useState<LookupCustomer[]>([]);
+  const [createInvoices, setCreateInvoices] = useState<LookupInvoice[]>([]);
+  const [createInventoryItems, setCreateInventoryItems] = useState<LookupInventoryItem[]>([]);
+  const [createForm, setCreateForm] = useState({
+    return_number: `RET-${Date.now()}`,
+    customer_id: '',
+    distribution_invoice_id: '',
+    inventory_item_id: '',
+    return_date: new Date().toISOString().split('T')[0],
+    total_quantity: '',
+    total_amount: '',
+    status: 'pending' as ReturnStatus,
+    reason: '',
+    notes: '',
+  });
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
+  const routeLabel = (route?: RouteInfo | null) =>
+    route?.name || [route?.origin, route?.destination].filter(Boolean).join(' -> ') || '';
+
+  const getInventoryCode = (item: LookupInventoryItem) =>
+    String(item.code || item.item_code || item.product_code || item.sku || '').trim();
+
+  const isRawMaterialInventory = (item: LookupInventoryItem) => {
+    const code = getInventoryCode(item).toLowerCase();
+    if (code.startsWith('rm-') || code.startsWith('raw-')) return true;
+    if (String(item.name || '').trim().toLowerCase().startsWith('rm-')) return true;
+
+    const flags = [
+      item.type,
+      item.item_type,
+      item.category,
+      item.category_name,
+      item.item_category,
+      item.stock_type,
+      item.inventory_type,
+    ]
+      .map((value) => String(value || '').toLowerCase())
+      .join(' ');
+
+    return flags.includes('raw_material') || flags.includes('raw material');
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -82,28 +199,99 @@ export default function DistributionReturnsReportPage() {
   useEffect(() => {
     if (!token) return;
 
+    const loadSalesRefAllocatedRoutes = async (authToken: string, employeeId: number) => {
+      if (!employeeId) {
+        setAllocatedRoutes([]);
+        return;
+      }
+
+      try {
+        const routeMap = new Map<number, RouteInfo>();
+        let nextUrl: string | null = `${API_URL}/api/vehicle-loading/loads?per_page=200`;
+        let pageCount = 0;
+
+        while (nextUrl && pageCount < 50) {
+          const response: { data: { data?: PaginatedResponse<LoadInfo> } } = await axios.get(nextUrl, {
+            headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
+          });
+
+          const payload = response.data?.data;
+          const pageRows = Array.isArray(payload?.data) ? payload.data : [];
+
+          pageRows
+            .filter((load) => Number(load.sales_ref_id || load.sales_ref?.id || 0) === employeeId)
+            .forEach((load) => {
+              const routeEntries = Array.isArray(load.load_routes)
+                ? load.load_routes
+                : Array.isArray(load.loadRoutes)
+                  ? load.loadRoutes
+                  : [];
+
+              routeEntries.forEach((entry) => {
+                const routeId = Number(entry.route_id || entry.route?.id || 0);
+                if (!routeId) return;
+                if (!routeMap.has(routeId)) {
+                  routeMap.set(routeId, {
+                    id: routeId,
+                    name: entry.route?.name,
+                    origin: entry.route?.origin,
+                    destination: entry.route?.destination,
+                  });
+                }
+              });
+
+              const primaryRouteId = Number(load.route_id || load.route?.id || 0);
+              if (primaryRouteId > 0 && !routeMap.has(primaryRouteId)) {
+                routeMap.set(primaryRouteId, {
+                  id: primaryRouteId,
+                  name: load.route?.name,
+                  origin: load.route?.origin,
+                  destination: load.route?.destination,
+                });
+              }
+            });
+
+          nextUrl = payload?.next_page_url || null;
+          pageCount += 1;
+        }
+
+        setAllocatedRoutes(
+          Array.from(routeMap.values()).sort((a, b) =>
+            routeLabel(a).localeCompare(routeLabel(b))
+          )
+        );
+      } catch (error) {
+        console.error('Error loading allocated routes for returns report:', error);
+        setAllocatedRoutes([]);
+      }
+    };
+
     const verifyAccess = async () => {
       try {
         const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
         });
 
-        const userData = userRes.data || {};
+        const userData = (userRes.data || {}) as UserProfile;
         const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
 
         const roleNames = [
           String(userData?.role || ''),
           ...(Array.isArray(userData?.roles)
-            ? userData.roles.map((role: any) => String(role?.name || role || ''))
+            ? userData.roles.map((role) =>
+                typeof role === 'string' ? role : String(role?.name || '')
+              )
             : []),
         ]
           .map((role) => role.trim().toLowerCase())
           .filter(Boolean);
 
         const permissionNames = Array.isArray(userData?.roles)
-          ? userData.roles.flatMap((role: any) =>
-              Array.isArray(role?.permissions)
-                ? role.permissions.map((permission: any) => String(permission?.name || '').trim().toLowerCase())
+          ? userData.roles.flatMap((role) =>
+              typeof role === 'string'
+                ? []
+                : Array.isArray(role?.permissions)
+                ? role.permissions.map((permission) => String(permission?.name || '').trim().toLowerCase())
                 : []
             )
           : [];
@@ -121,6 +309,13 @@ export default function DistributionReturnsReportPage() {
           roleBlob.includes('sales ref') ||
           roleBlob.includes('sales representative') ||
           roleBlob.includes('sales_ref');
+
+        setIsSalesRefUser(isSalesRef && !isAdminUser);
+        if (isSalesRef && employeeId > 0) {
+          await loadSalesRefAllocatedRoutes(token, employeeId);
+        } else {
+          setAllocatedRoutes([]);
+        }
 
         if (!isAdminUser && !hasReportPermission && !isSalesRef) {
           router.push('/dashboard');
@@ -174,6 +369,133 @@ export default function DistributionReturnsReportPage() {
     }
   };
 
+  const resetCreateForm = () => {
+    setCreateForm({
+      return_number: `RET-${Date.now()}`,
+      customer_id: '',
+      distribution_invoice_id: '',
+      inventory_item_id: '',
+      return_date: new Date().toISOString().split('T')[0],
+      total_quantity: '',
+      total_amount: '',
+      status: 'pending',
+      reason: '',
+      notes: '',
+    });
+  };
+
+  const loadCreateLookups = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    try {
+      const [customersRes, invoicesRes, inventoryRes] = await Promise.all([
+        axios.get('/api/distribution/customers', {
+          headers: { Authorization: `Bearer ${tokenToUse}` },
+          params: { per_page: 1000 },
+        }),
+        axios.get('/api/distribution/invoices', {
+          headers: { Authorization: `Bearer ${tokenToUse}` },
+          params: { per_page: 1000 },
+        }),
+        axios.get('/api/stock/inventory', {
+          headers: { Authorization: `Bearer ${tokenToUse}` },
+          params: { per_page: 1000 },
+        }),
+      ]);
+
+      const customerRows = Array.isArray(customersRes.data?.data?.data)
+        ? customersRes.data.data.data
+        : Array.isArray(customersRes.data?.data)
+          ? customersRes.data.data
+          : [];
+      const invoiceRows = Array.isArray(invoicesRes.data?.data?.data)
+        ? invoicesRes.data.data.data
+        : Array.isArray(invoicesRes.data?.data)
+          ? invoicesRes.data.data
+          : [];
+      const inventoryRows = Array.isArray(inventoryRes.data?.data?.data)
+        ? inventoryRes.data.data.data
+        : Array.isArray(inventoryRes.data?.data)
+          ? inventoryRes.data.data
+          : [];
+
+      const inventoryOptions = (inventoryRows as LookupInventoryItem[]).filter((item) => !isRawMaterialInventory(item));
+
+      setCreateCustomers(customerRows as LookupCustomer[]);
+      setCreateInvoices(invoiceRows as LookupInvoice[]);
+      setCreateInventoryItems(inventoryOptions);
+    } catch (error) {
+      console.error('Error loading return modal lookups:', error);
+      setCreateCustomers([]);
+      setCreateInvoices([]);
+      setCreateInventoryItems([]);
+    }
+  };
+
+  const openCreateModal = async () => {
+    setCreateErrorMessage('');
+    resetCreateForm();
+    await loadCreateLookups();
+    setShowCreateModal(true);
+  };
+
+  const submitCreateReturn = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!token) return;
+
+    if (!createForm.customer_id) {
+      setCreateErrorMessage('Please select a customer.');
+      return;
+    }
+
+    const quantity = Number(createForm.total_quantity || 0);
+    const amount = Number(createForm.total_amount || 0);
+    if (quantity <= 0 || amount < 0) {
+      setCreateErrorMessage('Please enter valid quantity and amount.');
+      return;
+    }
+
+    try {
+      setSavingReturn(true);
+      setCreateErrorMessage('');
+
+      await axios.post('/api/distribution/returns', {
+        return_number: createForm.return_number,
+        customer_id: Number(createForm.customer_id),
+        distribution_invoice_id: createForm.distribution_invoice_id ? Number(createForm.distribution_invoice_id) : null,
+        returned_inventory_item_id: createForm.inventory_item_id ? Number(createForm.inventory_item_id) : null,
+        return_date: createForm.return_date,
+        total_quantity: quantity,
+        total_amount: amount,
+        settlement_type: 'bill_deduction',
+        settlement_amount: amount,
+        exchange_inventory_item_id: null,
+        exchange_quantity: 0,
+        reason: createForm.reason || null,
+        status: createForm.status,
+        notes: createForm.notes || null,
+      }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      setShowCreateModal(false);
+      resetCreateForm();
+      await fetchRows(token);
+    } catch (error: unknown) {
+      const message =
+        typeof error === 'object' &&
+        error !== null &&
+        'response' in error &&
+        (error as { response?: { data?: { message?: string } } }).response?.data?.message
+          ? String((error as { response?: { data?: { message?: string } } }).response?.data?.message)
+          : 'Failed to record return.';
+      setCreateErrorMessage(message);
+    } finally {
+      setSavingReturn(false);
+    }
+  };
+
   const customerOptions = useMemo(() => {
     return Array.from(
       new Set(
@@ -184,6 +506,41 @@ export default function DistributionReturnsReportPage() {
     ).sort();
   }, [rows]);
 
+  const routeOptions = useMemo(() => {
+    if (isSalesRefUser && allocatedRoutes.length > 0) {
+      return allocatedRoutes.map((route) => ({
+        id: String(route.id),
+        label: routeLabel(route),
+      }));
+    }
+
+    const routeMap = new Map<number, string>();
+    rows.forEach((row) => {
+      const routeId = Number(row.customer?.route_id || row.customer?.route?.id || 0);
+      if (!routeId) return;
+      routeMap.set(routeId, routeLabel(row.customer?.route));
+    });
+
+    return Array.from(routeMap.entries())
+      .map(([id, label]) => ({ id: String(id), label: label || `Route #${id}` }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [rows, isSalesRefUser, allocatedRoutes]);
+
+  const createInvoiceOptions = useMemo(() => {
+    const selectedCustomerId = Number(createForm.customer_id || 0);
+    if (!selectedCustomerId) return createInvoices;
+    return createInvoices.filter((invoice) => Number(invoice.customer_id || 0) === selectedCustomerId);
+  }, [createInvoices, createForm.customer_id]);
+
+  const safeCreateInventoryItems = createInventoryItems.filter((item) => !isRawMaterialInventory(item));
+
+  useEffect(() => {
+    if (routeFilter === 'all') return;
+    if (!routeOptions.some((option) => option.id === routeFilter)) {
+      setRouteFilter('all');
+    }
+  }, [routeFilter, routeOptions]);
+
   const parseAmount = (value?: number) => Number(value || 0);
 
   const filteredRows = useMemo(() => {
@@ -193,6 +550,11 @@ export default function DistributionReturnsReportPage() {
       if (statusFilter !== 'all' && row.status !== statusFilter) return false;
       if (settlementFilter !== 'all' && row.settlement_type !== settlementFilter) return false;
       if (customerFilter !== 'all' && String(row.customer?.shop_name || '') !== customerFilter) return false;
+      if (routeFilter !== 'all' && String(row.customer?.route_id || row.customer?.route?.id || '') !== routeFilter) return false;
+
+      const hasBillingInvoice = Boolean(row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number);
+      if (billingLinkFilter === 'with_billing' && !hasBillingInvoice) return false;
+      if (billingLinkFilter === 'without_billing' && hasBillingInvoice) return false;
 
       if (fromDate) {
         const d = row.return_date ? new Date(row.return_date) : null;
@@ -223,7 +585,7 @@ export default function DistributionReturnsReportPage() {
 
       return text.includes(term);
     });
-  }, [rows, search, statusFilter, settlementFilter, customerFilter, fromDate, toDate]);
+  }, [rows, search, statusFilter, settlementFilter, customerFilter, routeFilter, billingLinkFilter, fromDate, toDate]);
 
   const summary = useMemo(() => {
     const totalReturns = filteredRows.length;
@@ -248,6 +610,10 @@ export default function DistributionReturnsReportPage() {
       approved: filteredRows.filter((row) => row.status === 'approved').length,
       rejected: filteredRows.filter((row) => row.status === 'rejected').length,
     };
+    const billingCounts = {
+      withBilling: filteredRows.filter((row) => Boolean(row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number)).length,
+      withoutBilling: filteredRows.filter((row) => !Boolean(row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number)).length,
+    };
 
     return {
       totalReturns,
@@ -256,6 +622,7 @@ export default function DistributionReturnsReportPage() {
       settlementAmount,
       settlementTotals,
       statusCounts,
+      billingCounts,
     };
   }, [filteredRows]);
 
@@ -292,9 +659,10 @@ export default function DistributionReturnsReportPage() {
   };
 
   const rowToExport = (row: ReturnRow) => {
+    const hasBillingInvoice = Boolean(row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number);
     return [
       row.return_number || '-',
-      row.invoice?.invoice_number || '-',
+      hasBillingInvoice ? (row.invoice?.invoice_number || '-') : 'WITHOUT BILLING',
       row.customer?.customer_code || '-',
       row.customer?.shop_name || '-',
       toDateLabel(row.return_date),
@@ -461,7 +829,7 @@ export default function DistributionReturnsReportPage() {
         )}
 
         <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
               <input
@@ -512,6 +880,31 @@ export default function DistributionReturnsReportPage() {
               </select>
             </div>
             <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Route</label>
+              <select
+                value={routeFilter}
+                onChange={(e) => setRouteFilter(e.target.value)}
+                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                <option value="all">All</option>
+                {routeOptions.map((route) => (
+                  <option key={route.id} value={route.id}>{route.label}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Billing Link</label>
+              <select
+                value={billingLinkFilter}
+                onChange={(e) => setBillingLinkFilter(e.target.value as BillingLinkFilter)}
+                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                <option value="all">All</option>
+                <option value="with_billing">With Billing</option>
+                <option value="without_billing">Without Billing</option>
+              </select>
+            </div>
+            <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">From Date</label>
               <input
                 type="date"
@@ -542,6 +935,9 @@ export default function DistributionReturnsReportPage() {
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
+            <button onClick={() => void openCreateModal()} className="px-4 py-2 rounded-md text-sm font-medium border border-emerald-200 bg-emerald-600 text-white hover:bg-emerald-700">
+              Add Return
+            </button>
             <button onClick={viewPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">
               View PDF
             </button>
@@ -552,6 +948,19 @@ export default function DistributionReturnsReportPage() {
               Download CSV (Excel)
             </button>
           </div>
+
+          {isSalesRefUser && allocatedRoutes.length > 0 && (
+            <div className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Allocated Routes Preview</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {allocatedRoutes.map((route) => (
+                  <span key={route.id} className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-2.5 py-1 text-xs text-emerald-800">
+                    {routeLabel(route)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
@@ -563,6 +972,8 @@ export default function DistributionReturnsReportPage() {
             <span>Bill Deduction: <strong>{formatMoney(summary.settlementTotals.bill_deduction)}</strong></span>
             <span>Cash Refund: <strong>{formatMoney(summary.settlementTotals.cash_refund)}</strong></span>
             <span>Item Exchange: <strong>{formatMoney(summary.settlementTotals.item_exchange)}</strong></span>
+            <span>With Billing: <strong>{summary.billingCounts.withBilling}</strong></span>
+            <span>Without Billing: <strong>{summary.billingCounts.withoutBilling}</strong></span>
           </div>
 
           <div className="overflow-x-auto">
@@ -592,7 +1003,15 @@ export default function DistributionReturnsReportPage() {
                   filteredRows.map((row, idx) => (
                     <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.return_number || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.invoice?.invoice_number || '-'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        {row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number ? (
+                          row.invoice?.invoice_number || '-'
+                        ) : (
+                          <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">
+                            WITHOUT BILLING
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3 text-sm text-gray-900 font-medium">
                         {(row.customer?.customer_code || '-') + ' - ' + (row.customer?.shop_name || '-')}
                       </td>
@@ -624,6 +1043,171 @@ export default function DistributionReturnsReportPage() {
             </table>
           </div>
         </section>
+
+        {showCreateModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-6xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+              <div className="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-2xl font-semibold text-slate-900">Add Return</h3>
+                  <p className="text-sm text-slate-600">Link a return to a customer and optionally to an invoice and item.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(false)}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                >
+                  Close
+                </button>
+              </div>
+
+              {createErrorMessage && (
+                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {createErrorMessage}
+                </div>
+              )}
+
+              <form onSubmit={submitCreateReturn}>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                  <label className="text-sm font-medium text-slate-700">
+                    Return Number
+                    <input
+                      type="text"
+                      value={createForm.return_number}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, return_number: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                      required
+                    />
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Customer
+                    <select
+                      value={createForm.customer_id}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, customer_id: e.target.value, distribution_invoice_id: '' }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                      required
+                    >
+                      <option value="">Select Customer</option>
+                      {createCustomers.map((customer) => (
+                        <option key={customer.id} value={customer.id}>
+                          {(customer.shop_name || '-') + (customer.customer_code ? ` (${customer.customer_code})` : '')}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Linked Invoice (optional)
+                    <select
+                      value={createForm.distribution_invoice_id}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, distribution_invoice_id: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                    >
+                      <option value="">Select Invoice</option>
+                      {createInvoiceOptions.map((invoice) => (
+                        <option key={invoice.id} value={invoice.id}>{invoice.invoice_number || `Invoice #${invoice.id}`}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Return Date
+                    <input
+                      type="date"
+                      value={createForm.return_date}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, return_date: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                      required
+                    />
+                  </label>
+
+                  <label className="text-sm font-medium text-slate-700">
+                    Returned Item (optional)
+                    <select
+                      value={createForm.inventory_item_id}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, inventory_item_id: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                    >
+                      <option value="">Select Item</option>
+                      {safeCreateInventoryItems.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {(getInventoryCode(item) || '-') + ' - ' + (item.name || '-')}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Total Quantity
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={createForm.total_quantity}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, total_quantity: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                      required
+                    />
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Total Amount
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={createForm.total_amount}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, total_amount: e.target.value }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                      required
+                    />
+                  </label>
+                  <label className="text-sm font-medium text-slate-700">
+                    Status
+                    <select
+                      value={createForm.status}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, status: e.target.value as ReturnStatus }))}
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                    >
+                      <option value="pending">Pending</option>
+                      <option value="approved">Approved</option>
+                      <option value="rejected">Rejected</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <label className="text-sm font-medium text-slate-700 md:col-span-1">
+                    Reason
+                    <input
+                      type="text"
+                      value={createForm.reason}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, reason: e.target.value }))}
+                      placeholder="Reason for return"
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                    />
+                  </label>
+                  <label className="text-sm font-medium text-slate-700 md:col-span-2">
+                    Notes
+                    <input
+                      type="text"
+                      value={createForm.notes}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, notes: e.target.value }))}
+                      placeholder="Additional details"
+                      className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-black"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-5 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingReturn}
+                    className="rounded-md bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                  >
+                    {savingReturn ? 'Saving...' : 'Record Return'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

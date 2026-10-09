@@ -23,7 +23,30 @@ type PendingOfflineReturnPayload = {
   reason: string;
   status: string;
   notes: string;
-  inventory_item_id: number | null;
+  returned_inventory_item_id: number | null;
+};
+
+type InventoryOption = {
+  id: number;
+  code?: string;
+  item_code?: string;
+  product_code?: string;
+  sku?: string;
+  name?: string;
+  type?: string;
+  item_type?: string;
+  category?: string;
+  category_name?: string;
+  item_category?: string;
+  stock_type?: string;
+  inventory_type?: string;
+};
+
+type ReturnLineItem = {
+  lineId: string;
+  inventory_item_id: string;
+  quantity: string;
+  amount: string;
 };
 
 export default function DistributionReturnsPage() {
@@ -33,12 +56,16 @@ export default function DistributionReturnsPage() {
   const [returns, setReturns] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [invoices, setInvoices] = useState<any[]>([]);
-  const [inventory, setInventory] = useState<any[]>([]);
+  const [inventory, setInventory] = useState<InventoryOption[]>([]);
   const [viewReturn, setViewReturn] = useState<any | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
   const [pendingOfflineReturns, setPendingOfflineReturns] = useState<OfflineQueueEntry<PendingOfflineReturnPayload>[]>([]);
   const [syncingOfflineReturns, setSyncingOfflineReturns] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [returnLineItems, setReturnLineItems] = useState<ReturnLineItem[]>([
+    { lineId: `line-${Date.now()}`, inventory_item_id: '', quantity: '', amount: '' },
+  ]);
 
   const [form, setForm] = useState({
     return_number: '',
@@ -54,6 +81,45 @@ export default function DistributionReturnsPage() {
   });
 
   const router = useRouter();
+
+  const resetReturnForm = () => {
+    setForm({
+      return_number: `RET-${Date.now()}`,
+      customer_id: '',
+      distribution_invoice_id: '',
+      return_date: new Date().toISOString().split('T')[0],
+      total_quantity: '',
+      total_amount: '',
+      reason: '',
+      status: 'pending',
+      notes: '',
+      inventory_item_id: '',
+    });
+    setReturnLineItems([{ lineId: `line-${Date.now()}`, inventory_item_id: '', quantity: '', amount: '' }]);
+  };
+
+  const getInventoryCode = (item: InventoryOption) =>
+    String(item.code || item.item_code || item.product_code || item.sku || '').trim();
+
+  const isRawMaterialInventory = (item: InventoryOption) => {
+    const code = getInventoryCode(item).toLowerCase();
+    if (code.startsWith('rm-') || code.startsWith('raw-')) return true;
+    if (String(item.name || '').trim().toLowerCase().startsWith('rm-')) return true;
+
+    const flags = [
+      item.type,
+      item.item_type,
+      item.category,
+      item.category_name,
+      item.item_category,
+      item.stock_type,
+      item.inventory_type,
+    ]
+      .map((value) => String(value || '').toLowerCase())
+      .join(' ');
+
+    return flags.includes('raw_material') || flags.includes('raw material');
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -99,7 +165,12 @@ export default function DistributionReturnsPage() {
       setReturns(returnsRes.data?.data?.data || []);
       setCustomers(customersRes.data?.data?.data || []);
       setInvoices(invoicesRes.data?.data?.data || []);
-      setInventory(inventoryRes.data?.data?.data || inventoryRes.data?.data || []);
+      const inventoryRows = Array.isArray(inventoryRes.data?.data?.data)
+        ? inventoryRes.data.data.data
+        : Array.isArray(inventoryRes.data?.data)
+          ? inventoryRes.data.data
+          : [];
+      setInventory((inventoryRows as InventoryOption[]).filter((item) => !isRawMaterialInventory(item)));
       setForm((prev) => ({ ...prev, return_number: `RET-${Date.now()}` }));
     } catch (error) {
       console.error('Error loading returns data:', error);
@@ -166,13 +237,55 @@ export default function DistributionReturnsPage() {
 
   const createReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const validLineItems = returnLineItems.filter((line) => {
+      const qty = Number(line.quantity || 0);
+      const amount = Number(line.amount || 0);
+      return Boolean(line.inventory_item_id) && qty > 0 && amount >= 0;
+    });
+
+    if (validLineItems.length === 0) {
+      alert('Please add at least one return item with quantity and amount.');
+      return;
+    }
+
+    const computedQuantity = validLineItems.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+    const computedAmount = validLineItems.reduce((sum, line) => sum + Number(line.amount || 0), 0);
+    const firstReturnedItemId = Number(validLineItems[0].inventory_item_id);
+
+    const normalizedLineItems = validLineItems.map((line) => {
+      const selectedItem = inventory.find((item) => Number(item.id) === Number(line.inventory_item_id));
+      return {
+        inventory_item_id: Number(line.inventory_item_id),
+        item_code: selectedItem ? getInventoryCode(selectedItem) : '',
+        item_name: selectedItem?.name || '',
+        quantity: Number(line.quantity || 0),
+        amount: Number(line.amount || 0),
+      };
+    });
+
+    const multiItemSection = [
+      '[RETURN ITEMS]',
+      ...normalizedLineItems.map(
+        (line, index) =>
+          `${index + 1}. ${line.item_code || '-'} ${line.item_name || '-'} | Qty: ${line.quantity.toFixed(2)} | Amount: ${line.amount.toFixed(2)}`
+      ),
+      '[/RETURN ITEMS]',
+    ].join('\n');
+
+    const mergedNotes = [form.notes?.trim(), multiItemSection].filter(Boolean).join('\n\n');
+
     const payload: PendingOfflineReturnPayload = {
-      ...form,
+      return_number: form.return_number,
       customer_id: Number(form.customer_id),
       distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
-      inventory_item_id: form.inventory_item_id ? Number(form.inventory_item_id) : null,
-      total_quantity: Number(form.total_quantity || 0),
-      total_amount: Number(form.total_amount || 0),
+      returned_inventory_item_id: firstReturnedItemId,
+      return_date: form.return_date,
+      total_quantity: computedQuantity,
+      total_amount: computedAmount,
+      reason: form.reason,
+      status: form.status,
+      notes: mergedNotes,
     };
 
     const queueReturnOffline = () => {
@@ -183,18 +296,7 @@ export default function DistributionReturnsPage() {
       };
 
       setPendingOfflineReturns((previous) => [...previous, entry]);
-      setForm({
-        return_number: `RET-${Date.now()}`,
-        customer_id: '',
-        distribution_invoice_id: '',
-        return_date: new Date().toISOString().split('T')[0],
-        total_quantity: '',
-        total_amount: '',
-        reason: '',
-        status: 'pending',
-        notes: '',
-        inventory_item_id: '',
-      });
+      resetReturnForm();
       alert('No internet connection. Return saved offline and will sync automatically when connection is restored.');
     };
 
@@ -207,18 +309,8 @@ export default function DistributionReturnsPage() {
       setSaving(true);
       await axios.post('/api/distribution/returns', payload, { headers: { Authorization: `Bearer ${token}` } });
 
-      setForm({
-        return_number: `RET-${Date.now()}`,
-        customer_id: '',
-        distribution_invoice_id: '',
-        return_date: new Date().toISOString().split('T')[0],
-        total_quantity: '',
-        total_amount: '',
-        reason: '',
-        status: 'pending',
-        notes: '',
-        inventory_item_id: '',
-      });
+      resetReturnForm();
+      setShowCreateModal(false);
       fetchData();
     } catch (error: any) {
       if (isLikelyNetworkError(error)) {
@@ -275,143 +367,20 @@ export default function DistributionReturnsPage() {
         <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Record new return</h2>
-              <p className="text-xs text-gray-500">Link a return to a customer and optionally to an invoice and item.</p>
+              <h2 className="text-sm font-semibold text-gray-900">Return actions</h2>
+              <p className="text-xs text-gray-500">Click Add Return to open the return-entry modal.</p>
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                resetReturnForm();
+                setShowCreateModal(true);
+              }}
+              className="w-full sm:w-auto rounded-md bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700"
+            >
+              Add Return
+            </button>
           </div>
-
-          <form onSubmit={createReturn} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Return Number</label>
-                <input
-                  value={form.return_number}
-                  onChange={(e) => setForm({ ...form, return_number: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
-                <select
-                  value={form.customer_id}
-                  onChange={(e) => setForm({ ...form, customer_id: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                  required
-                >
-                  <option value="">Select Customer</option>
-                  {customers.map((customer) => (
-                    <option key={customer.id} value={customer.id}>{customer.shop_name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Linked Invoice (optional)</label>
-                <select
-                  value={form.distribution_invoice_id}
-                  onChange={(e) => setForm({ ...form, distribution_invoice_id: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                >
-                  <option value="">Select Invoice</option>
-                  {invoices.map((invoice) => (
-                    <option key={invoice.id} value={invoice.id}>{invoice.invoice_number}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Return Date</label>
-                <input
-                  type="date"
-                  value={form.return_date}
-                  onChange={(e) => setForm({ ...form, return_date: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Returned Item (optional)</label>
-                <select
-                  value={form.inventory_item_id}
-                  onChange={(e) => setForm({ ...form, inventory_item_id: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                >
-                  <option value="">Select Item</option>
-                  {inventory.map((item) => (
-                    <option key={item.id} value={item.id}>{item.code} - {item.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Total Quantity</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={form.total_quantity}
-                  onChange={(e) => setForm({ ...form, total_quantity: e.target.value })}
-                  placeholder="0.00"
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Total Amount</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={form.total_amount}
-                  onChange={(e) => setForm({ ...form, total_amount: e.target.value })}
-                  placeholder="0.00"
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
-                <select
-                  value={form.status}
-                  onChange={(e) => setForm({ ...form, status: e.target.value })}
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                >
-                  <option value="pending">Pending</option>
-                  <option value="approved">Approved</option>
-                  <option value="rejected">Rejected</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 items-end">
-              <div className="md:col-span-1">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
-                <input
-                  value={form.reason}
-                  onChange={(e) => setForm({ ...form, reason: e.target.value })}
-                  placeholder="Reason for return"
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                />
-              </div>
-              <div className="md:col-span-1">
-                <label className="block text-xs font-medium text-gray-700 mb-1">Notes</label>
-                <input
-                  value={form.notes}
-                  onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                  placeholder="Additional details"
-                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                />
-              </div>
-              <div className="md:col-span-1 flex justify-end">
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="w-full md:w-auto bg-green-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-green-700 disabled:opacity-50"
-                >
-                  {saving ? 'Saving...' : 'Record Return'}
-                </button>
-              </div>
-            </div>
-          </form>
         </section>
 
         <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
@@ -486,6 +455,245 @@ export default function DistributionReturnsPage() {
           </div>
         </section>
       </main>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
+          <div className="w-full max-w-5xl rounded-xl border border-gray-200 bg-white p-4 shadow-2xl max-h-[92vh] overflow-y-auto">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Add Return</h3>
+                <p className="text-xs text-gray-500">Link a return to a customer and optionally to an invoice and item.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateModal(false)}
+                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+
+            <form onSubmit={createReturn} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Return Number</label>
+                  <input
+                    value={form.return_number}
+                    onChange={(e) => setForm({ ...form, return_number: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
+                  <select
+                    value={form.customer_id}
+                    onChange={(e) => setForm({ ...form, customer_id: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    required
+                  >
+                    <option value="">Select Customer</option>
+                    {customers.map((customer) => (
+                      <option key={customer.id} value={customer.id}>{customer.shop_name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Linked Invoice (optional)</label>
+                  <select
+                    value={form.distribution_invoice_id}
+                    onChange={(e) => setForm({ ...form, distribution_invoice_id: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                  >
+                    <option value="">Select Invoice</option>
+                    {invoices.map((invoice) => (
+                      <option key={invoice.id} value={invoice.id}>{invoice.invoice_number}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Return Date</label>
+                  <input
+                    type="date"
+                    value={form.return_date}
+                    onChange={(e) => setForm({ ...form, return_date: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-900">Return Items</h4>
+                    <p className="text-xs text-gray-500">Add one or more items to this return bill.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setReturnLineItems((prev) => [
+                        ...prev,
+                        { lineId: `line-${Date.now()}-${prev.length}`, inventory_item_id: '', quantity: '', amount: '' },
+                      ])
+                    }
+                    className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"
+                  >
+                    + Add Item
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {returnLineItems.map((line, index) => (
+                    <div key={line.lineId} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end rounded-md border border-gray-200 p-2">
+                      <div className="md:col-span-6">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Item</label>
+                        <select
+                          value={line.inventory_item_id}
+                          onChange={(e) =>
+                            setReturnLineItems((prev) =>
+                              prev.map((row) =>
+                                row.lineId === line.lineId ? { ...row, inventory_item_id: e.target.value } : row
+                              )
+                            )
+                          }
+                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                          required={index === 0}
+                        >
+                          <option value="">Select Item</option>
+                          {inventory.filter((item) => !isRawMaterialInventory(item)).map((item) => (
+                            <option key={item.id} value={item.id}>{getInventoryCode(item) || '-'} - {item.name || '-'}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Qty</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={line.quantity}
+                          onChange={(e) =>
+                            setReturnLineItems((prev) =>
+                              prev.map((row) => (row.lineId === line.lineId ? { ...row, quantity: e.target.value } : row))
+                            )
+                          }
+                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                          placeholder="0.00"
+                          required={index === 0}
+                        />
+                      </div>
+                      <div className="md:col-span-3">
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Amount</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={line.amount}
+                          onChange={(e) =>
+                            setReturnLineItems((prev) =>
+                              prev.map((row) => (row.lineId === line.lineId ? { ...row, amount: e.target.value } : row))
+                            )
+                          }
+                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                          placeholder="0.00"
+                          required={index === 0}
+                        />
+                      </div>
+                      <div className="md:col-span-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setReturnLineItems((prev) =>
+                              prev.length > 1 ? prev.filter((row) => row.lineId !== line.lineId) : prev
+                            )
+                          }
+                          disabled={returnLineItems.length === 1}
+                          className="w-full rounded-md border border-red-200 bg-red-50 px-2 py-2 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Total Quantity</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={returnLineItems.reduce((sum, line) => sum + Number(line.quantity || 0), 0).toFixed(2)}
+                    className="w-full rounded-md border border-gray-300 bg-gray-50 text-sm text-black px-2 py-2"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Total Amount</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={returnLineItems.reduce((sum, line) => sum + Number(line.amount || 0), 0).toFixed(2)}
+                    className="w-full rounded-md border border-gray-300 bg-gray-50 text-sm text-black px-2 py-2"
+                    readOnly
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+                  <select
+                    value={form.status}
+                    onChange={(e) => setForm({ ...form, status: e.target.value })}
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 items-end">
+                <div className="md:col-span-1">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+                  <input
+                    value={form.reason}
+                    onChange={(e) => setForm({ ...form, reason: e.target.value })}
+                    placeholder="Reason for return"
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                  />
+                </div>
+                <div className="md:col-span-1">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Notes</label>
+                  <input
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    placeholder="Additional details"
+                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                  />
+                </div>
+                <div className="md:col-span-1 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateModal(false)}
+                    className="w-full md:w-auto rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="w-full md:w-auto bg-green-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {saving ? 'Saving...' : 'Record Return'}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {viewReturn && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">

@@ -206,7 +206,7 @@ export default function ReportsPage() {
           { name: 'Outstanding Report', description: 'Outstanding balances and aging', icon: '⏳', path: '/dashboard/reports/distribution/outstanding' },
           { name: 'Invoice Report', description: 'Invoice summary and trend analysis', icon: '🧾', path: '/dashboard/reports/distribution/invoice' },
           { name: 'Sales Report', description: 'Sales value by invoice with collection tracking', icon: '📈', path: '/dashboard/reports/distribution/sales' },
-          { name: 'Sales Summary Report', description: 'Load-wise sales summary with collections and outstanding.', icon: '📊', path: '/dashboard/reports/distribution/sales-summary' },
+          { name: 'Sales Summary Report', description: 'Latest sales details with load/date filters and sales-ref allocated loads.', icon: '📊', path: '/dashboard/reports/distribution/sales-summary' },
           { name: 'Delivery Balance Sheet', description: 'Delivery-wise net sales, returns and outstanding', icon: '📚', path: '/dashboard/reports/distribution/delivery-balance' },
           { name: 'Collection Report', description: 'Collections by customer and date', icon: '💵', path: '/dashboard/reports/distribution/collection' },
           { name: 'Returns Report', description: 'Product returns and settlement summary', icon: '↩️', path: '/dashboard/reports/distribution/returns' },

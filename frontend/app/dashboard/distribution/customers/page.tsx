@@ -222,6 +222,11 @@ export default function DistributionCustomersPage() {
     return routes.filter((route) => allowedIds.has(String(route.id)));
   }, [isAdmin, routes, assignedRouteIds, assignedRouteId]);
 
+  const modalRouteOptions = useMemo(() => {
+    if (isAdmin) return routes;
+    return routeFilterOptions;
+  }, [isAdmin, routes, routeFilterOptions]);
+
   useEffect(() => {
     if (isAdmin || !selectedRouteFilter) return;
     const allowedIds = new Set(routeFilterOptions.map((route) => String(route.id)));
@@ -378,13 +383,17 @@ export default function DistributionCustomersPage() {
   };
 
   const resetForm = () => {
+    const defaultRouteId = isAdmin
+      ? selectedRouteFilter
+      : (selectedRouteFilter || assignedRouteIds[0] || assignedRouteId || '');
+
     setFormData({
       shop_name: '',
       customer_code: generateCustomerCode(),
       owner_name: '',
       phone: '',
       address: '',
-      route_id: isAdmin ? selectedRouteFilter : (assignedRouteId || ''),
+      route_id: defaultRouteId,
       outstanding: '',
       status: 'active',
     });
@@ -818,16 +827,15 @@ export default function DistributionCustomersPage() {
                   <select
                     value={formData.route_id}
                     onChange={(e) => setFormData({ ...formData, route_id: e.target.value })}
-                    disabled={assignedRouteIds.length > 0 || !!assignedRouteId}
-                    className="w-full rounded-xl border border-cyan-200 bg-gradient-to-b from-white to-cyan-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    className="w-full rounded-xl border border-cyan-200 bg-gradient-to-b from-white to-cyan-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                   >
                     <option value="">Select Route</option>
-                    {routes.map((route) => (
-                      <option key={route.id} value={route.id}>{route.name} ({route.origin} G�� {route.destination})</option>
+                    {modalRouteOptions.map((route) => (
+                      <option key={route.id} value={route.id}>{route.name} ({route.origin}{' -> '}{route.destination})</option>
                     ))}
                   </select>
-                  {(assignedRouteIds.length > 0 || assignedRouteId) && (
-                    <p className="mt-1 text-xs font-medium text-emerald-700">Route is auto-locked from your allocated load routes.</p>
+                  {!isAdmin && modalRouteOptions.length > 0 && (
+                    <p className="mt-1 text-xs font-medium text-emerald-700">Routes are loaded from your allocated load routes. You can select any allocated route.</p>
                   )}
                 </div>
                 <div>

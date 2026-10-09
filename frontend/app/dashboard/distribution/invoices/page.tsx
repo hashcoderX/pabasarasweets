@@ -278,6 +278,7 @@ export default function DistributionInvoicesPage() {
 
   const [qtyWarningOpen, setQtyWarningOpen] = useState(false);
   const [qtyWarningMessage, setQtyWarningMessage] = useState('');
+  const [bypassRefGpsCheckOnce, setBypassRefGpsCheckOnce] = useState(false);
   const [deleteConfirmInvoice, setDeleteConfirmInvoice] = useState<InvoiceRecord | null>(null);
 
   const [editingLineId, setEditingLineId] = useState<string | null>(null);
@@ -1764,10 +1765,13 @@ export default function DistributionInvoicesPage() {
       return;
     }
 
-    if (!isEditing && !refGpsSnapshot) {
+    if (!isEditing && !refGpsSnapshot && !bypassRefGpsCheckOnce) {
       setQtyWarningMessage('Capture Ref GPS before creating the invoice to enable location tracking.');
       setQtyWarningOpen(true);
       return;
+    }
+    if (bypassRefGpsCheckOnce) {
+      setBypassRefGpsCheckOnce(false);
     }
 
     if (assignedRouteIds.length > 0 && !scopedCustomers.some((customer) => customer.id === Number(customerId))) {
@@ -4136,6 +4140,7 @@ export default function DistributionInvoicesPage() {
                       Cancel
                     </button>
                     <button
+                      id="create-invoice-submit-button"
                       type="submit"
                       disabled={saving}
                       className="w-full rounded-xl border border-transparent bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-200/70 transition hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 sm:w-auto"
@@ -4155,10 +4160,31 @@ export default function DistributionInvoicesPage() {
           <div className="bg-white rounded-lg shadow-xl max-w-sm w-11/12 p-4 border border-red-100">
             <h4 className="text-sm font-semibold text-red-700 mb-2">Notice</h4>
             <p className="text-sm text-gray-700 whitespace-pre-line">{qtyWarningMessage}</p>
-            <div className="mt-4 flex justify-end">
+            <div className="mt-4 flex justify-end gap-2">
+              {qtyWarningMessage === 'Capture Ref GPS before creating the invoice to enable location tracking.' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBypassRefGpsCheckOnce(true);
+                    setQtyWarningOpen(false);
+                    setTimeout(() => {
+                      const submitButton = document.getElementById('create-invoice-submit-button');
+                      if (submitButton instanceof HTMLButtonElement) {
+                        submitButton.click();
+                      }
+                    }, 0);
+                  }}
+                  className="px-4 py-2 text-sm font-medium rounded-md bg-emerald-600 text-white hover:bg-emerald-700"
+                >
+                  Continue
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => setQtyWarningOpen(false)}
+                onClick={() => {
+                  setBypassRefGpsCheckOnce(false);
+                  setQtyWarningOpen(false);
+                }}
                 className="px-4 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
               >
                 OK
@@ -4566,9 +4592,20 @@ export default function DistributionInvoicesPage() {
       {receiptPreviewInvoice && (() => {
         const invoice = receiptPreviewInvoice;
         const notes = String(invoice.notes || '');
-        const returnLines = notes.split('\n').filter((line) => line.trim().startsWith('- '));
-        const returnTotalLine = notes.split('\n').find((line) => line.trim().startsWith('Total return value:'));
-        const returnModeLine = notes.split('\n').find((line) => line.trim().startsWith('Return mode:'));
+        const noteLines = notes.split('\n');
+        const itemReturnsHeaderIndex = noteLines.findIndex((line) => line.trim() === '[ITEM RETURNS]');
+        const itemReturnsLines: string[] = [];
+        if (itemReturnsHeaderIndex >= 0) {
+          for (let i = itemReturnsHeaderIndex + 1; i < noteLines.length; i += 1) {
+            const line = noteLines[i];
+            if (line.trim().startsWith('[')) break;
+            itemReturnsLines.push(line);
+          }
+        }
+        const returnLines = itemReturnsLines.filter((line) => line.trim().startsWith('- '));
+        const returnTotalLine = itemReturnsLines.find((line) => line.trim().startsWith('Total return value:'));
+        const returnModeLine = itemReturnsLines.find((line) => line.trim().startsWith('Return mode:'));
+        const hasReturnSection = returnLines.length > 0 || Boolean(returnTotalLine) || Boolean(returnModeLine);
         const subtotal = Number(invoice.subtotal ?? invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0));
         const paid = Number(invoice.paid_amount || 0);
         const total = Number(invoice.total || 0);
@@ -4628,7 +4665,7 @@ export default function DistributionInvoicesPage() {
                     ))}
                   </section>
 
-                  {(returnLines.length > 0 || returnTotalLine || returnModeLine) && (
+                  {hasReturnSection && (
                     <section>
                       <h2>Returns / Exchange</h2>
                       {returnLines.map((line, index) => <p key={`return-${index}`}>{line.replace(/^-\s*/, '')}</p>)}
