@@ -69,7 +69,7 @@ export default function DeliveryCashAccountReportPage() {
       let pages = 0;
 
       while (nextUrl && pages < 100) {
-        const response = await api.get(nextUrl);
+        const response: any = await api.get(nextUrl);
         const payload: PaginatedPayload<T> = response.data?.data || response.data;
 
         if (Array.isArray(payload)) {

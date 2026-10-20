@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
+import { isAxiosError } from 'axios';
 import axios from '@/lib/http';
 
 interface Employee {
@@ -202,7 +203,7 @@ export default function Leaves() {
       fetchLeaves();
     } catch (error) {
       console.error('Error saving leave:', error);
-      if (axios.isAxiosError(error) && error.response?.status === 422) {
+      if (isAxiosError(error) && error.response?.status === 422) {
         const responseData = error.response.data as { message?: string; errors?: Record<string, string[]> };
         const firstFieldError = responseData?.errors
           ? Object.values(responseData.errors).flat()[0]
@@ -273,7 +274,7 @@ export default function Leaves() {
       fetchLeaves();
     } catch (error) {
       console.error('Error processing approval:', error);
-      if (axios.isAxiosError(error) && error.response?.status === 422) {
+      if (isAxiosError(error) && error.response?.status === 422) {
         const responseData = error.response.data as { message?: string; errors?: Record<string, string[]> };
         const firstFieldError = responseData?.errors
           ? Object.values(responseData.errors).flat()[0]
