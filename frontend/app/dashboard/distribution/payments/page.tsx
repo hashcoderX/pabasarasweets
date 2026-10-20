@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
@@ -26,6 +26,35 @@ type PendingOfflinePaymentPayload = {
   notes: string;
 };
 
+interface CompanyProfile {
+  name?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  logo_url?: string;
+}
+
+interface OutstandingReceiptAllocation {
+  invoiceNumber: string;
+  invoiceDate: string;
+  dueBefore: number;
+  paidAmount: number;
+  dueAfter: number;
+}
+
+interface OutstandingReceiptPreview {
+  paymentNumber: string;
+  customerName: string;
+  customerCode: string;
+  paymentDate: string;
+  paymentMethod: string;
+  referenceNo: string;
+  bankName: string;
+  notes: string;
+  totalAmount: number;
+  allocations: OutstandingReceiptAllocation[];
+}
+
 function DistributionPaymentsPageContent() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -45,6 +74,9 @@ function DistributionPaymentsPageContent() {
   const [syncingOfflinePayments, setSyncingOfflinePayments] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const [paymentEntryMode, setPaymentEntryMode] = useState<'default' | 'outstanding'>('default');
+  const [receiptCompany, setReceiptCompany] = useState<CompanyProfile>({});
+  const [outstandingReceiptPreview, setOutstandingReceiptPreview] = useState<OutstandingReceiptPreview | null>(null);
+  const [receiptPrintLayout, setReceiptPrintLayout] = useState<'80mm' | 'dotmatrix' | 'a4'>('80mm');
   const pageSize = 10;
 
   const [form, setForm] = useState({
@@ -74,6 +106,21 @@ function DistributionPaymentsPageContent() {
       resolveAssignedRoute();
       fetchData();
     }
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    void axios.get('/api/companies', {
+      headers: { Authorization: `Bearer ${token}` },
+      params: { per_page: 1 },
+    }).then((response) => {
+      const rows = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+      if (Array.isArray(rows) && rows[0]) {
+        setReceiptCompany(rows[0] as CompanyProfile);
+      }
+    }).catch((error) => {
+      console.error('Error loading company profile for payment receipt:', error);
+    });
   }, [token]);
 
   useEffect(() => {
@@ -517,6 +564,65 @@ function DistributionPaymentsPageContent() {
     };
   }, [token, pendingOfflinePayments.length, syncOfflinePayments]);
 
+  const formatPaymentMethod = (method: string) =>
+    String(method || '').replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+  const openOutstandingReceiptPreview = (
+    customerId: number,
+    paymentDate: string,
+    paymentMethod: string,
+    referenceNo: string,
+    bankName: string,
+    notes: string,
+    paymentRows: PendingOfflinePaymentPayload[],
+    paymentNumber: string,
+  ) => {
+    const customer = scopedCustomers.find((row) => Number(row?.id || 0) === Number(customerId))
+      || customers.find((row) => Number(row?.id || 0) === Number(customerId));
+    const invoiceMap = new Map<number, any>(
+      scopedInvoices
+        .filter((invoice) => Number(invoice?.customer_id || 0) === Number(customerId))
+        .map((invoice) => [Number(invoice?.id || 0), invoice]),
+    );
+
+    const allocations: OutstandingReceiptAllocation[] = paymentRows.map((row) => {
+      const invoiceId = Number(row.distribution_invoice_id || 0);
+      const invoice = invoiceId > 0 ? invoiceMap.get(invoiceId) : null;
+      const dueBefore = invoice ? getInvoiceDueAmount(invoice) : 0;
+      const paidAmount = Number(row.amount || 0);
+      const dueAfter = invoice ? Math.max(0, dueBefore - paidAmount) : 0;
+
+      return {
+        invoiceNumber: invoice?.invoice_number || 'Outstanding Credit',
+        invoiceDate: invoice?.invoice_date ? String(invoice.invoice_date) : paymentDate,
+        dueBefore,
+        paidAmount,
+        dueAfter,
+      };
+    });
+
+    setOutstandingReceiptPreview({
+      paymentNumber,
+      customerName: String(customer?.shop_name || `Customer #${customerId}`),
+      customerCode: String(customer?.customer_code || '-'),
+      paymentDate,
+      paymentMethod: formatPaymentMethod(paymentMethod),
+      referenceNo: referenceNo.trim(),
+      bankName: bankName.trim(),
+      notes: notes.trim(),
+      totalAmount: paymentRows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+      allocations,
+    });
+  };
+
+  const printOutstandingReceipt = () => {
+    if (!outstandingReceiptPreview) return;
+    const width = receiptPrintLayout === '80mm' ? '80mm' : '210mm';
+    document.documentElement.style.setProperty('--outstanding-receipt-width', width);
+    document.documentElement.setAttribute('data-outstanding-print-layout', receiptPrintLayout);
+    window.print();
+  };
+
   const createPayment = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -610,6 +716,7 @@ function DistributionPaymentsPageContent() {
     };
 
     const paymentRows = buildOutstandingAllocation();
+    const shouldPreviewOutstandingReceipt = paymentEntryMode === 'outstanding';
 
     const queuePaymentOffline = () => {
       const queuedEntries: OfflineQueueEntry<PendingOfflinePaymentPayload>[] = paymentRows.map((payload) => ({
@@ -633,6 +740,18 @@ function DistributionPaymentsPageContent() {
       });
       setShowPaymentModal(false);
       setPaymentEntryMode('default');
+      if (shouldPreviewOutstandingReceipt) {
+        openOutstandingReceiptPreview(
+          customerId,
+          form.payment_date,
+          form.payment_method,
+          form.reference_no,
+          form.bank_name,
+          form.notes,
+          paymentRows,
+          form.payment_number,
+        );
+      }
       alert('No internet connection. Payment saved offline and will sync automatically when connection is restored.');
     };
 
@@ -663,13 +782,28 @@ function DistributionPaymentsPageContent() {
       });
       setShowPaymentModal(false);
       setPaymentEntryMode('default');
+      if (shouldPreviewOutstandingReceipt) {
+        openOutstandingReceiptPreview(
+          customerId,
+          form.payment_date,
+          form.payment_method,
+          form.reference_no,
+          form.bank_name,
+          form.notes,
+          paymentRows,
+          form.payment_number,
+        );
+      }
       fetchData();
-    } catch (error: any) {
+    } catch (error) {
       if (isLikelyNetworkError(error)) {
         queuePaymentOffline();
         return;
       }
-      alert(error?.response?.data?.message || 'Failed to record payment');
+      const message = typeof error === 'object' && error !== null && 'response' in error
+        ? String((error as { response?: { data?: { message?: string } } }).response?.data?.message || '')
+        : '';
+      alert(message || 'Failed to record payment');
     } finally {
       setSaving(false);
     }
@@ -1254,6 +1388,257 @@ function DistributionPaymentsPageContent() {
           </div>
         </div>
       )}
+
+      {outstandingReceiptPreview && (
+        <div className="outstanding-receipt-modal fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-3 sm:p-6">
+          <div className="outstanding-receipt-shell flex max-h-[96vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-slate-100 shadow-2xl">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Outstanding Payment Bill Preview</h3>
+                <p className="text-xs text-slate-500">Print as 80mm receipt, dot matrix slip, or A4 statement.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={receiptPrintLayout}
+                  onChange={(event) => setReceiptPrintLayout(event.target.value as '80mm' | 'dotmatrix' | 'a4')}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+                >
+                  <option value="80mm">80mm</option>
+                  <option value="dotmatrix">Dot Matrix</option>
+                  <option value="a4">A4</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setOutstandingReceiptPreview(null)}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={printOutstandingReceipt}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+                >
+                  Print
+                </button>
+              </div>
+            </div>
+
+            <div className="outstanding-receipt-stage flex-1 overflow-auto p-5">
+              <article
+                className={`outstanding-receipt-sheet mx-auto bg-white text-slate-900 shadow-lg ${receiptPrintLayout}`}
+                style={{ '--outstanding-receipt-width': receiptPrintLayout === '80mm' ? '80mm' : '210mm' } as CSSProperties}
+              >
+                <header className="outstanding-receipt-header text-center">
+                  {receiptCompany.logo_url && <img src={receiptCompany.logo_url} alt="Company logo" className="mx-auto mb-2 max-h-16 max-w-[80%] object-contain" />}
+                  <h1 className="text-base font-extrabold">{receiptCompany.name || 'Company'}</h1>
+                  {receiptCompany.address && <p>{receiptCompany.address}</p>}
+                  {receiptCompany.phone && <p>Tel: {receiptCompany.phone}</p>}
+                  {receiptCompany.email && <p>{receiptCompany.email}</p>}
+                </header>
+
+                <div className="outstanding-receipt-divider" />
+                <section className="outstanding-receipt-meta">
+                  <p><strong>Payment No:</strong> {outstandingReceiptPreview.paymentNumber}</p>
+                  <p><strong>Date:</strong> {new Date(outstandingReceiptPreview.paymentDate).toLocaleDateString()}</p>
+                  <p><strong>Customer:</strong> {outstandingReceiptPreview.customerName}</p>
+                  <p><strong>Code:</strong> {outstandingReceiptPreview.customerCode || '-'}</p>
+                  <p><strong>Method:</strong> {outstandingReceiptPreview.paymentMethod}</p>
+                  {outstandingReceiptPreview.referenceNo && <p><strong>Reference:</strong> {outstandingReceiptPreview.referenceNo}</p>}
+                  {outstandingReceiptPreview.bankName && <p><strong>Bank:</strong> {outstandingReceiptPreview.bankName}</p>}
+                </section>
+
+                <div className="outstanding-receipt-divider" />
+                <section>
+                  <h2>Outstanding Allocation</h2>
+                  {receiptPrintLayout === '80mm' ? (
+                    <div className="outstanding-receipt-list">
+                      {outstandingReceiptPreview.allocations.map((line, index) => (
+                        <div key={`${line.invoiceNumber}-${index}`} className="outstanding-receipt-list-item">
+                          <div className="line-one">
+                            <span>{line.invoiceNumber}</span>
+                            <span>{line.invoiceDate ? new Date(line.invoiceDate).toLocaleDateString() : '-'}</span>
+                          </div>
+                          <div className="line-two">
+                            <span>Due: {line.dueBefore.toFixed(2)}</span>
+                            <span>Paid: {line.paidAmount.toFixed(2)}</span>
+                            <span>Bal: {line.dueAfter.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <table className="outstanding-receipt-table">
+                      <thead>
+                        <tr>
+                          <th>Invoice</th>
+                          <th>Date</th>
+                          <th className="num">Due Before</th>
+                          <th className="num">Paid</th>
+                          <th className="num">Due After</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {outstandingReceiptPreview.allocations.map((line, index) => (
+                          <tr key={`${line.invoiceNumber}-${index}`}>
+                            <td>{line.invoiceNumber}</td>
+                            <td>{line.invoiceDate ? new Date(line.invoiceDate).toLocaleDateString() : '-'}</td>
+                            <td className="num">{line.dueBefore.toFixed(2)}</td>
+                            <td className="num">{line.paidAmount.toFixed(2)}</td>
+                            <td className="num">{line.dueAfter.toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </section>
+
+                <div className="outstanding-receipt-divider" />
+                <section className="outstanding-receipt-summary">
+                  <p className="total"><span>Total Paid</span><strong>{outstandingReceiptPreview.totalAmount.toFixed(2)}</strong></p>
+                  {outstandingReceiptPreview.notes && <p><span>Notes</span><strong>{outstandingReceiptPreview.notes}</strong></p>}
+                </section>
+
+                <footer className="outstanding-receipt-footer">
+                  Received by: ____________________ &nbsp;|&nbsp; Customer Sign: ____________________
+                </footer>
+              </article>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style jsx global>{`
+        .outstanding-receipt-sheet {
+          width: var(--outstanding-receipt-width);
+          min-height: 140mm;
+          padding: 6mm;
+          font-family: Arial, sans-serif;
+          font-size: 12px;
+          line-height: 1.4;
+        }
+        .outstanding-receipt-sheet.dotmatrix {
+          font-family: "Courier New", Courier, monospace;
+          font-size: 11px;
+          letter-spacing: 0.2px;
+        }
+        .outstanding-receipt-sheet.a4 {
+          width: 210mm;
+          max-width: 210mm;
+          min-height: 297mm;
+          padding: 12mm;
+          font-size: 13px;
+        }
+        .outstanding-receipt-header p,
+        .outstanding-receipt-meta p {
+          margin: 2px 0;
+        }
+        .outstanding-receipt-divider {
+          border-top: 1px dashed #475569;
+          margin: 8px 0;
+        }
+        .outstanding-receipt-sheet h2 {
+          margin: 6px 0 5px;
+          border-left: 3px solid #059669;
+          padding-left: 6px;
+          font-size: 12px;
+          font-weight: 800;
+          text-transform: uppercase;
+        }
+        .outstanding-receipt-table {
+          width: 100%;
+          border-collapse: collapse;
+        }
+        .outstanding-receipt-table th,
+        .outstanding-receipt-table td {
+          border-bottom: 1px dotted #94a3b8;
+          padding: 4px 2px;
+          text-align: left;
+        }
+        .outstanding-receipt-table .num {
+          text-align: right;
+        }
+        .outstanding-receipt-list-item {
+          border-bottom: 1px dotted #94a3b8;
+          padding: 4px 0;
+        }
+        .outstanding-receipt-list-item .line-one,
+        .outstanding-receipt-list-item .line-two {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .outstanding-receipt-list-item .line-one {
+          font-weight: 700;
+        }
+        .outstanding-receipt-list-item .line-two {
+          margin-top: 2px;
+          font-size: 11px;
+        }
+        .outstanding-receipt-summary p {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          margin: 4px 0;
+        }
+        .outstanding-receipt-summary .total {
+          border-top: 1px solid #0f766e;
+          padding-top: 6px;
+          font-size: 14px;
+        }
+        .outstanding-receipt-footer {
+          margin-top: 16px;
+          border-top: 1px dashed #475569;
+          padding-top: 8px;
+          text-align: center;
+          font-weight: 700;
+        }
+        @media print {
+          body * {
+            visibility: hidden !important;
+          }
+          .outstanding-receipt-modal,
+          .outstanding-receipt-modal * {
+            visibility: visible !important;
+          }
+          .outstanding-receipt-modal {
+            display: block !important;
+            position: static !important;
+            width: var(--outstanding-receipt-width) !important;
+            min-height: 0 !important;
+            padding: 0 !important;
+            background: #fff !important;
+          }
+          .outstanding-receipt-shell,
+          .outstanding-receipt-stage {
+            display: contents !important;
+          }
+          .outstanding-receipt-sheet {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: var(--outstanding-receipt-width);
+            margin: 0;
+            box-shadow: none;
+            border: none;
+            min-height: 0;
+          }
+          html[data-outstanding-print-layout="a4"] .outstanding-receipt-modal,
+          html[data-outstanding-print-layout="a4"] .outstanding-receipt-sheet,
+          html[data-outstanding-print-layout="dotmatrix"] .outstanding-receipt-modal,
+          html[data-outstanding-print-layout="dotmatrix"] .outstanding-receipt-sheet {
+            width: 210mm !important;
+          }
+          html[data-outstanding-print-layout="a4"] .outstanding-receipt-sheet {
+            min-height: 297mm;
+            padding: 12mm;
+          }
+          html[data-outstanding-print-layout="dotmatrix"] .outstanding-receipt-sheet {
+            min-height: 0;
+            padding: 8mm;
+          }
+        }
+      `}</style>
     </div>
   );
 }

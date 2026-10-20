@@ -51,6 +51,17 @@ interface CustomersPageCache {
   routeIds: string[];
 }
 
+interface DistributionInvoiceSnapshot {
+  id: number;
+  customer_id?: number | null;
+  invoice_date?: string | null;
+  total?: number | string;
+  paid_amount?: number | string;
+  due_amount?: number | string;
+  balance_amount?: number | string;
+  status?: string | null;
+}
+
 const getCustomersCacheKey = (token: string) => `distribution_customers_cache_${token.slice(-16)}`;
 
 export default function DistributionCustomersPage() {
@@ -319,12 +330,51 @@ export default function DistributionCustomersPage() {
   };
 
   const fetchCustomers = async () => {
+    const getInvoiceDueAmount = (invoice: DistributionInvoiceSnapshot): number => {
+      const explicitDue = Number(invoice?.due_amount ?? invoice?.balance_amount ?? 0);
+      if (explicitDue > 0) return explicitDue;
+
+      const total = Number(invoice?.total ?? 0);
+      const paid = Number(invoice?.paid_amount ?? 0);
+      const derived = total - paid;
+      return derived > 0 ? derived : 0;
+    };
+
+    const fetchAllInvoices = async (): Promise<DistributionInvoiceSnapshot[]> => {
+      const rows: DistributionInvoiceSnapshot[] = [];
+      let page = 1;
+      let hasNextPage = true;
+
+      while (hasNextPage && page <= 40) {
+        const res = await axios.get('/api/distribution/invoices', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 200, page },
+        });
+
+        const payload = res.data?.data;
+        const pageRows: DistributionInvoiceSnapshot[] = Array.isArray(payload?.data)
+          ? payload.data
+          : Array.isArray(payload)
+            ? payload
+            : [];
+
+        rows.push(...pageRows);
+        hasNextPage = Boolean(payload?.next_page_url) && pageRows.length > 0;
+        page += 1;
+      }
+
+      return rows;
+    };
+
     try {
       setLoading(true);
-      const customersRes = await axios.get('/api/distribution/customers', {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { per_page: 1000 }
-      });
+      const [customersRes, invoicesRows] = await Promise.all([
+        axios.get('/api/distribution/customers', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 1000 },
+        }),
+        fetchAllInvoices(),
+      ]);
 
       const allCustomers: Customer[] = customersRes.data?.data?.data || [];
       const routeFilterId = selectedRouteFilter.trim();
@@ -341,14 +391,31 @@ export default function DistributionCustomersPage() {
         ? baseCustomers.filter((customer) => String(customer.route_id || '') === routeFilterId)
         : baseCustomers;
 
+      const customerOutstandingMap = new Map<number, number>();
+      const scopedCustomerIds = new Set(scopedCustomers.map((customer) => Number(customer.id)));
+      invoicesRows.forEach((invoice) => {
+        const customerId = Number(invoice?.customer_id || 0);
+        if (!customerId || !scopedCustomerIds.has(customerId)) return;
+
+        const status = String(invoice?.status || '').toLowerCase();
+        if (status === 'paid' || status === 'cancelled') return;
+
+        const due = getInvoiceDueAmount(invoice);
+        if (due <= 0) return;
+        customerOutstandingMap.set(customerId, (customerOutstandingMap.get(customerId) || 0) + due);
+      });
+
       setCustomers(
         scopedCustomers.map((customer) => ({
           ...customer,
-          outstanding: Number(customer.outstanding ?? 0),
+          outstanding: Number(customerOutstandingMap.get(Number(customer.id)) || 0),
         }))
       );
       persistCustomersCache({
-        customers: scopedCustomers.map((customer) => ({ ...customer, outstanding: Number(customer.outstanding ?? 0) })),
+        customers: scopedCustomers.map((customer) => ({
+          ...customer,
+          outstanding: Number(customerOutstandingMap.get(Number(customer.id)) || 0),
+        })),
       });
     } catch (error) {
       console.error('Error fetching customers:', error);
