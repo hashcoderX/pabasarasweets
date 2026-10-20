@@ -105,7 +105,16 @@ type SalesSummaryRow = {
   collectionRate: number;
 };
 
+type SalesSummaryCache = {
+  cachedAt: number;
+  invoices: InvoiceRow[];
+  payments: PaymentRow[];
+  loads: LoadRow[];
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+const SALES_SUMMARY_CACHE_TTL_MS = 3 * 60 * 1000;
+const SALES_SUMMARY_CACHE_MAX_CHARS = 2_000_000;
 
 const money = (value: number) =>
   Number(value || 0).toLocaleString(undefined, {
@@ -189,6 +198,14 @@ export default function DistributionSalesSummaryReportPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [currentEmployeeId, setCurrentEmployeeId] = useState(0);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
+  const [cacheKey, setCacheKey] = useState('');
+  const [allocatedPage, setAllocatedPage] = useState(1);
+  const [allocatedRowsPerPage, setAllocatedRowsPerPage] = useState(10);
+  const [summaryPage, setSummaryPage] = useState(1);
+  const [summaryRowsPerPage, setSummaryRowsPerPage] = useState(10);
+  const [latestPage, setLatestPage] = useState(1);
+  const [latestRowsPerPage, setLatestRowsPerPage] = useState(10);
+  const [loadingStep, setLoadingStep] = useState<'idle' | 'loads' | 'invoices' | 'payments'>('idle');
 
   const router = useRouter();
 
@@ -222,33 +239,187 @@ export default function DistributionSalesSummaryReportPage() {
     return rows;
   }, []);
 
-  const loadReportData = useCallback(async (authToken?: string) => {
+  const readSummaryCache = useCallback((key: string): SalesSummaryCache | null => {
+    if (!key) return null;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return null;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const data = parsed as Record<string, unknown>;
+
+      if (
+        typeof data.cachedAt !== 'number' ||
+        !Array.isArray(data.invoices) ||
+        !Array.isArray(data.payments) ||
+        !Array.isArray(data.loads)
+      ) {
+        return null;
+      }
+
+      return {
+        cachedAt: data.cachedAt,
+        invoices: data.invoices as InvoiceRow[],
+        payments: data.payments as PaymentRow[],
+        loads: data.loads as LoadRow[],
+      };
+    } catch (error) {
+      console.error('Error reading sales summary cache:', error);
+      return null;
+    }
+  }, []);
+
+  const writeSummaryCache = useCallback((key: string, rows: Omit<SalesSummaryCache, 'cachedAt'>) => {
+    if (!key) return;
+    try {
+      const payload: SalesSummaryCache = {
+        cachedAt: Date.now(),
+        invoices: rows.invoices.map((invoice) => ({
+          id: invoice.id,
+          invoice_number: invoice.invoice_number,
+          customer_id: invoice.customer_id,
+          customer: invoice.customer
+            ? {
+                id: invoice.customer.id,
+                shop_name: invoice.customer.shop_name,
+                customer_code: invoice.customer.customer_code,
+              }
+            : null,
+          invoice_date: invoice.invoice_date,
+          load_id: invoice.load_id,
+          total: invoice.total,
+          paid_amount: invoice.paid_amount,
+          status: invoice.status,
+        })),
+        payments: rows.payments.map((payment) => ({
+          id: payment.id,
+          distribution_invoice_id: payment.distribution_invoice_id,
+          amount: payment.amount,
+          payment_date: payment.payment_date,
+          status: payment.status,
+        })),
+        loads: rows.loads.map((load) => ({
+          id: load.id,
+          load_number: load.load_number,
+          load_date: load.load_date,
+          delivery_date: load.delivery_date,
+          status: load.status,
+          sales_ref_id: load.sales_ref_id,
+          sales_ref: load.sales_ref
+            ? {
+                id: load.sales_ref.id,
+                employee_code: load.sales_ref.employee_code,
+                first_name: load.sales_ref.first_name,
+                last_name: load.sales_ref.last_name,
+                name: load.sales_ref.name,
+              }
+            : null,
+          vehicle: load.vehicle
+            ? {
+                registration_number: load.vehicle.registration_number,
+                type: load.vehicle.type,
+              }
+            : null,
+          driver: load.driver
+            ? {
+                employee_code: load.driver.employee_code,
+                first_name: load.driver.first_name,
+                last_name: load.driver.last_name,
+                name: load.driver.name,
+              }
+            : null,
+          route: load.route
+            ? {
+                id: load.route.id,
+                name: load.route.name,
+                origin: load.route.origin,
+                destination: load.route.destination,
+              }
+            : null,
+          load_routes: Array.isArray(load.load_routes)
+            ? load.load_routes.map((entry) => ({
+                route_id: entry.route_id,
+                sequence_no: entry.sequence_no,
+                route: entry.route
+                  ? {
+                      id: entry.route.id,
+                      name: entry.route.name,
+                      origin: entry.route.origin,
+                      destination: entry.route.destination,
+                    }
+                  : null,
+              }))
+            : [],
+          loadRoutes: Array.isArray(load.loadRoutes)
+            ? load.loadRoutes.map((entry) => ({
+                route_id: entry.route_id,
+                sequence_no: entry.sequence_no,
+                route: entry.route
+                  ? {
+                      id: entry.route.id,
+                      name: entry.route.name,
+                      origin: entry.route.origin,
+                      destination: entry.route.destination,
+                    }
+                  : null,
+              }))
+            : [],
+        })),
+      };
+
+      const serialized = JSON.stringify(payload);
+      if (serialized.length > SALES_SUMMARY_CACHE_MAX_CHARS) {
+        sessionStorage.removeItem(key);
+        console.warn('Skipping sales summary cache: payload too large.');
+        return;
+      }
+
+      sessionStorage.setItem(key, serialized);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes('quota')) {
+        sessionStorage.removeItem(key);
+        console.warn('Skipping sales summary cache: storage quota exceeded.');
+        return;
+      }
+      console.error('Error writing sales summary cache:', error);
+    }
+  }, []);
+
+  const loadReportData = useCallback(async (authToken?: string, options?: { skipLoading?: boolean; cacheKeyOverride?: string }) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
+    const key = options?.cacheKeyOverride || cacheKey;
 
-    setLoading(true);
+    if (!options?.skipLoading) setLoading(true);
+    setLoadingStep('loads');
     setErrorMessage('');
 
     try {
-      const [invoiceRows, paymentRows, loadRows] = await Promise.all([
-        fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse),
-        fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
-        fetchPaginated<LoadRow>('vehicle-loading/loads', tokenToUse),
-      ]);
-
-      setInvoices(invoiceRows);
-      setPayments(paymentRows);
+      const loadRows = await fetchPaginated<LoadRow>('vehicle-loading/loads', tokenToUse);
       setLoads(loadRows);
+      setLoadingStep('invoices');
+
+      const invoiceRows = await fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse);
+      setInvoices(invoiceRows);
+      setLoadingStep('payments');
+
+      const paymentRows = await fetchPaginated<PaymentRow>('distribution/payments', tokenToUse);
+      setPayments(paymentRows);
+
+      writeSummaryCache(key, {
+        invoices: invoiceRows,
+        payments: paymentRows,
+        loads: loadRows,
+      });
     } catch (error) {
       console.error('Error loading sales summary report data:', error);
-      setInvoices([]);
-      setPayments([]);
-      setLoads([]);
       setErrorMessage('Failed to load sales summary report data.');
     } finally {
-      setLoading(false);
+      setLoadingStep('idle');
+      if (!options?.skipLoading) setLoading(false);
     }
-  }, [fetchPaginated, token]);
+  }, [fetchPaginated, token, cacheKey, writeSummaryCache]);
 
   useEffect(() => {
     if (!token) return;
@@ -306,7 +477,30 @@ export default function DistributionSalesSummaryReportPage() {
           setSalesRefFilter(String(employeeId));
         }
 
-        await loadReportData(token);
+        const resolvedCacheKey = `distribution-sales-summary:v1:employee:${employeeId > 0 ? employeeId : 'admin'}`;
+        setCacheKey(resolvedCacheKey);
+
+        const cachedRows = readSummaryCache(resolvedCacheKey);
+        const cacheHasData = Boolean(
+          cachedRows &&
+          (cachedRows.invoices.length > 0 || cachedRows.payments.length > 0 || cachedRows.loads.length > 0)
+        );
+        const cacheIsFresh = cachedRows ? (Date.now() - cachedRows.cachedAt) < SALES_SUMMARY_CACHE_TTL_MS : false;
+
+        if (cachedRows) {
+          setInvoices(cachedRows.invoices);
+          setPayments(cachedRows.payments);
+          setLoads(cachedRows.loads);
+        }
+
+        setAccessReady(true);
+
+        if (!cacheIsFresh || !cacheHasData) {
+          void loadReportData(token, {
+            skipLoading: Boolean(cachedRows),
+            cacheKeyOverride: resolvedCacheKey,
+          });
+        }
       } catch (error) {
         console.error('Error validating sales summary report access:', error);
         router.push('/dashboard');
@@ -316,7 +510,7 @@ export default function DistributionSalesSummaryReportPage() {
     };
 
     void verifyAndLoad();
-  }, [token, router, loadReportData]);
+  }, [token, router, loadReportData, readSummaryCache]);
 
   const loadById = useMemo(() => {
     const map = new Map<number, LoadRow>();
@@ -531,8 +725,48 @@ export default function DistributionSalesSummaryReportPage() {
       });
   }, [loads, salesRefFilter, isSalesRefUser, currentEmployeeId]);
 
+  const allocatedTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(allocatedLoads.length / allocatedRowsPerPage)),
+    [allocatedLoads.length, allocatedRowsPerPage]
+  );
+
+  const paginatedAllocatedLoads = useMemo(() => {
+    const startIndex = (allocatedPage - 1) * allocatedRowsPerPage;
+    return allocatedLoads.slice(startIndex, startIndex + allocatedRowsPerPage);
+  }, [allocatedLoads, allocatedPage, allocatedRowsPerPage]);
+
+  useEffect(() => {
+    setAllocatedPage(1);
+  }, [salesRefFilter, allocatedRowsPerPage, isSalesRefUser, currentEmployeeId]);
+
+  useEffect(() => {
+    if (allocatedPage > allocatedTotalPages) {
+      setAllocatedPage(allocatedTotalPages);
+    }
+  }, [allocatedPage, allocatedTotalPages]);
+
+  const summaryTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(summaryRows.length / summaryRowsPerPage)),
+    [summaryRows.length, summaryRowsPerPage]
+  );
+
+  const paginatedSummaryRows = useMemo(() => {
+    const startIndex = (summaryPage - 1) * summaryRowsPerPage;
+    return summaryRows.slice(startIndex, startIndex + summaryRowsPerPage);
+  }, [summaryRows, summaryPage, summaryRowsPerPage]);
+
+  useEffect(() => {
+    setSummaryPage(1);
+  }, [fromDate, toDate, loadFilter, salesRefFilter, searchTerm, summaryRowsPerPage]);
+
+  useEffect(() => {
+    if (summaryPage > summaryTotalPages) {
+      setSummaryPage(summaryTotalPages);
+    }
+  }, [summaryPage, summaryTotalPages]);
+
   const latestSalesRows = useMemo(() => {
-    return filteredInvoices.slice(0, 25).map((invoice) => {
+    return filteredInvoices.map((invoice) => {
       const loadId = Number(invoice.load_id || 0);
       const load = loadId ? loadById.get(loadId) : null;
       const gross = Number(invoice.total || 0);
@@ -552,6 +786,35 @@ export default function DistributionSalesSummaryReportPage() {
       };
     });
   }, [filteredInvoices, loadById, paymentsByInvoice]);
+
+  const latestTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(latestSalesRows.length / latestRowsPerPage)),
+    [latestSalesRows.length, latestRowsPerPage]
+  );
+
+  const paginatedLatestSalesRows = useMemo(() => {
+    const startIndex = (latestPage - 1) * latestRowsPerPage;
+    return latestSalesRows.slice(startIndex, startIndex + latestRowsPerPage);
+  }, [latestSalesRows, latestPage, latestRowsPerPage]);
+
+  useEffect(() => {
+    setLatestPage(1);
+  }, [fromDate, toDate, loadFilter, salesRefFilter, searchTerm, latestRowsPerPage]);
+
+  useEffect(() => {
+    if (latestPage > latestTotalPages) {
+      setLatestPage(latestTotalPages);
+    }
+  }, [latestPage, latestTotalPages]);
+
+  const stepMessage = useMemo(() => {
+    if (loadingStep === 'loads') return 'Step 1/3: Loading allocated loads preview...';
+    if (loadingStep === 'invoices') return 'Step 2/3: Loading invoices...';
+    if (loadingStep === 'payments') return 'Step 3/3: Loading payments and finalizing totals...';
+    return '';
+  }, [loadingStep]);
+
+  const isRefreshing = loading || loadingStep !== 'idle';
 
   if (!token || !accessReady) {
     return (
@@ -583,6 +846,11 @@ export default function DistributionSalesSummaryReportPage() {
           {errorMessage && (
             <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {errorMessage}
+            </div>
+          )}
+          {stepMessage && (
+            <div className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800">
+              {stepMessage}
             </div>
           )}
         </section>
@@ -664,7 +932,7 @@ export default function DistributionSalesSummaryReportPage() {
               onClick={() => void loadReportData()}
               className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
             >
-              {loading ? 'Refreshing...' : 'Refresh'}
+              {isRefreshing ? 'Refreshing...' : 'Refresh'}
             </button>
           </div>
         </section>
@@ -717,7 +985,7 @@ export default function DistributionSalesSummaryReportPage() {
                     <td colSpan={7} className="px-4 py-8 text-center text-slate-500">No allocated loads found for current sales-ref filter.</td>
                   </tr>
                 ) : (
-                  allocatedLoads.slice(0, 30).map((row) => (
+                  paginatedAllocatedLoads.map((row) => (
                     <tr key={row.id}>
                       <td className="px-4 py-3 font-medium text-slate-800">{row.loadNumber}</td>
                       <td className="px-4 py-3 text-slate-700">{row.salesRefLabel}</td>
@@ -732,6 +1000,48 @@ export default function DistributionSalesSummaryReportPage() {
               </tbody>
             </table>
           </div>
+          {allocatedLoads.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <p className="text-sm text-slate-600">
+                {(() => {
+                  const startRow = (allocatedPage - 1) * allocatedRowsPerPage + 1;
+                  const endRow = Math.min(allocatedLoads.length, allocatedPage * allocatedRowsPerPage);
+                  return `Showing ${startRow}-${endRow} of ${allocatedLoads.length}`;
+                })()}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-sm text-slate-600" htmlFor="allocated-loads-rows-per-page">Rows</label>
+                <select
+                  id="allocated-loads-rows-per-page"
+                  value={allocatedRowsPerPage}
+                  onChange={(event) => setAllocatedRowsPerPage(Number(event.target.value))}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setAllocatedPage((page) => Math.max(1, page - 1))}
+                  disabled={allocatedPage <= 1}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-slate-700">Page {allocatedPage} of {allocatedTotalPages}</span>
+                <button
+                  type="button"
+                  onClick={() => setAllocatedPage((page) => Math.min(allocatedTotalPages, page + 1))}
+                  disabled={allocatedPage >= allocatedTotalPages}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 shadow overflow-hidden">
@@ -759,7 +1069,7 @@ export default function DistributionSalesSummaryReportPage() {
                     <td colSpan={8} className="px-4 py-8 text-center text-slate-500">No summary rows for current filters.</td>
                   </tr>
                 ) : (
-                  summaryRows.map((row) => (
+                  paginatedSummaryRows.map((row) => (
                     <tr key={row.key}>
                       <td className="px-4 py-3 font-medium text-slate-800">{row.loadLabel}</td>
                       <td className="px-4 py-3 text-slate-700">{row.routeName}</td>
@@ -775,13 +1085,55 @@ export default function DistributionSalesSummaryReportPage() {
               </tbody>
             </table>
           </div>
+          {summaryRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <p className="text-sm text-slate-600">
+                {(() => {
+                  const startRow = (summaryPage - 1) * summaryRowsPerPage + 1;
+                  const endRow = Math.min(summaryRows.length, summaryPage * summaryRowsPerPage);
+                  return `Showing ${startRow}-${endRow} of ${summaryRows.length}`;
+                })()}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-sm text-slate-600" htmlFor="summary-rows-per-page">Rows</label>
+                <select
+                  id="summary-rows-per-page"
+                  value={summaryRowsPerPage}
+                  onChange={(event) => setSummaryRowsPerPage(Number(event.target.value))}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setSummaryPage((page) => Math.max(1, page - 1))}
+                  disabled={summaryPage <= 1}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-slate-700">Page {summaryPage} of {summaryTotalPages}</span>
+                <button
+                  type="button"
+                  onClick={() => setSummaryPage((page) => Math.min(summaryTotalPages, page + 1))}
+                  disabled={summaryPage >= summaryTotalPages}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 shadow overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 bg-slate-50">
             <h2 className="font-semibold text-slate-900">Latest Sales Details</h2>
             <p className="text-xs text-slate-600 mt-0.5">
-              Auto-loaded on page open; currently showing {latestSalesRows.length} latest invoices after filters.
+              Auto-loaded on page open; currently showing {latestSalesRows.length} invoices after filters.
             </p>
           </div>
           <div className="overflow-x-auto">
@@ -805,7 +1157,7 @@ export default function DistributionSalesSummaryReportPage() {
                     <td colSpan={9} className="px-4 py-8 text-center text-slate-500">No invoices match current filters.</td>
                   </tr>
                 ) : (
-                  latestSalesRows.map((row) => (
+                  paginatedLatestSalesRows.map((row) => (
                     <tr key={row.id}>
                       <td className="px-4 py-3 font-medium text-slate-800">{row.invoiceNumber}</td>
                       <td className="px-4 py-3 text-slate-700">{dateLabel(row.invoiceDate)}</td>
@@ -822,6 +1174,48 @@ export default function DistributionSalesSummaryReportPage() {
               </tbody>
             </table>
           </div>
+          {latestSalesRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <p className="text-sm text-slate-600">
+                {(() => {
+                  const startRow = (latestPage - 1) * latestRowsPerPage + 1;
+                  const endRow = Math.min(latestSalesRows.length, latestPage * latestRowsPerPage);
+                  return `Showing ${startRow}-${endRow} of ${latestSalesRows.length}`;
+                })()}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-sm text-slate-600" htmlFor="latest-rows-per-page">Rows</label>
+                <select
+                  id="latest-rows-per-page"
+                  value={latestRowsPerPage}
+                  onChange={(event) => setLatestRowsPerPage(Number(event.target.value))}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setLatestPage((page) => Math.max(1, page - 1))}
+                  disabled={latestPage <= 1}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-slate-700">Page {latestPage} of {latestTotalPages}</span>
+                <button
+                  type="button"
+                  onClick={() => setLatestPage((page) => Math.min(latestTotalPages, page + 1))}
+                  disabled={latestPage >= latestTotalPages}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>

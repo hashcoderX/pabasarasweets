@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
 import {
   DISTRIBUTION_OFFLINE_KEYS,
@@ -44,6 +44,7 @@ export default function DistributionPaymentsPage() {
   const [pendingOfflinePayments, setPendingOfflinePayments] = useState<OfflineQueueEntry<PendingOfflinePaymentPayload>[]>([]);
   const [syncingOfflinePayments, setSyncingOfflinePayments] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [paymentEntryMode, setPaymentEntryMode] = useState<'default' | 'outstanding'>('default');
   const pageSize = 10;
 
   const [form, setForm] = useState({
@@ -60,6 +61,7 @@ export default function DistributionPaymentsPage() {
   });
 
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -73,6 +75,20 @@ export default function DistributionPaymentsPage() {
       fetchData();
     }
   }, [token]);
+
+  useEffect(() => {
+    const entry = (searchParams.get('entry') || '').trim().toLowerCase();
+    const isOutstandingEntry = entry === 'outstanding';
+    setPaymentEntryMode(isOutstandingEntry ? 'outstanding' : 'default');
+    if (isOutstandingEntry) {
+      setShowPaymentModal(true);
+      setForm((prev) => ({
+        ...prev,
+        distribution_invoice_id: '',
+        notes: prev.notes || 'Outstanding collection without invoice',
+      }));
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -239,6 +255,15 @@ export default function DistributionPaymentsPage() {
     if (!customerId) return dueInvoices;
     return dueInvoices.filter((invoice) => Number(invoice?.customer_id || 0) === customerId);
   }, [dueInvoices, form.customer_id]);
+
+  const customerDueInvoicesOrdered = useMemo(() => {
+    return [...customerDueInvoices].sort((a, b) => {
+      const aDate = new Date(String(a?.invoice_date || a?.due_date || a?.created_at || '1970-01-01')).getTime();
+      const bDate = new Date(String(b?.invoice_date || b?.due_date || b?.created_at || '1970-01-01')).getTime();
+      if (aDate !== bDate) return aDate - bDate;
+      return Number(a?.id || 0) - Number(b?.id || 0);
+    });
+  }, [customerDueInvoices]);
 
   const outstandingDebtors = useMemo(() => {
     const customerById = new Map<number, any>();
@@ -507,21 +532,93 @@ export default function DistributionPaymentsPage() {
       }
     }
 
-    const payload: PendingOfflinePaymentPayload = {
-      ...form,
-      distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
-      customer_id: Number(form.customer_id),
-      amount: Number(form.amount || 0),
+    const customerId = Number(form.customer_id || 0);
+    const amount = Number(form.amount || 0);
+    if (!customerId || amount <= 0) {
+      alert('Please select a customer and enter a valid amount.');
+      return;
+    }
+
+    const selectedInvoiceId = form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null;
+    if (paymentEntryMode === 'outstanding' && !selectedInvoiceId && customerDueInvoicesOrdered.length === 0) {
+      alert('Selected customer has no due invoices to settle.');
+      return;
+    }
+
+    const buildOutstandingAllocation = (): PendingOfflinePaymentPayload[] => {
+      if (selectedInvoiceId) {
+        return [{
+          ...form,
+          distribution_invoice_id: selectedInvoiceId,
+          customer_id: customerId,
+          amount,
+        }];
+      }
+
+      if (paymentEntryMode !== 'outstanding') {
+        return [{
+          ...form,
+          distribution_invoice_id: null,
+          customer_id: customerId,
+          amount,
+        }];
+      }
+
+      let remaining = amount;
+      const allocations: PendingOfflinePaymentPayload[] = [];
+
+      customerDueInvoicesOrdered.forEach((invoice, index) => {
+        if (remaining <= 0) return;
+        const due = getInvoiceDueAmount(invoice);
+        if (due <= 0) return;
+
+        const applied = Math.min(remaining, due);
+        if (applied <= 0) return;
+
+        allocations.push({
+          ...form,
+          payment_number: `${form.payment_number}-${index + 1}`,
+          distribution_invoice_id: Number(invoice.id),
+          customer_id: customerId,
+          amount: Number(applied.toFixed(2)),
+          notes: form.notes?.trim() || 'Outstanding allocation by invoice date',
+        });
+        remaining -= applied;
+      });
+
+      if (allocations.length === 0) {
+        return [{
+          ...form,
+          distribution_invoice_id: null,
+          customer_id: customerId,
+          amount,
+        }];
+      }
+
+      if (remaining > 0) {
+        allocations.push({
+          ...form,
+          payment_number: `${form.payment_number}-EX`,
+          distribution_invoice_id: null,
+          customer_id: customerId,
+          amount: Number(remaining.toFixed(2)),
+          notes: form.notes?.trim() || 'Outstanding excess credit (no due invoice linked)',
+        });
+      }
+
+      return allocations;
     };
 
+    const paymentRows = buildOutstandingAllocation();
+
     const queuePaymentOffline = () => {
-      const entry: OfflineQueueEntry<PendingOfflinePaymentPayload> = {
+      const queuedEntries: OfflineQueueEntry<PendingOfflinePaymentPayload>[] = paymentRows.map((payload) => ({
         id: makeOfflineEntryId('dist-payment'),
         createdAt: new Date().toISOString(),
         payload,
-      };
+      }));
 
-      setPendingOfflinePayments((previous) => [...previous, entry]);
+      setPendingOfflinePayments((previous) => [...previous, ...queuedEntries]);
       setForm({
         payment_number: `PAY-${Date.now()}`,
         distribution_invoice_id: '',
@@ -535,6 +632,7 @@ export default function DistributionPaymentsPage() {
         notes: '',
       });
       setShowPaymentModal(false);
+      setPaymentEntryMode('default');
       alert('No internet connection. Payment saved offline and will sync automatically when connection is restored.');
     };
 
@@ -545,7 +643,11 @@ export default function DistributionPaymentsPage() {
 
     try {
       setSaving(true);
-      await axios.post('/api/distribution/payments', payload, { headers: { Authorization: `Bearer ${token}` } });
+      if (paymentRows.length > 1) {
+        await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
+      } else {
+        await axios.post('/api/distribution/payments', paymentRows[0], { headers: { Authorization: `Bearer ${token}` } });
+      }
 
       setForm({
         payment_number: `PAY-${Date.now()}`,
@@ -560,6 +662,7 @@ export default function DistributionPaymentsPage() {
         notes: '',
       });
       setShowPaymentModal(false);
+      setPaymentEntryMode('default');
       fetchData();
     } catch (error: any) {
       if (isLikelyNetworkError(error)) {
@@ -591,10 +694,28 @@ export default function DistributionPaymentsPage() {
             <div className="flex justify-start sm:justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setShowPaymentModal(true)}
+                onClick={() => {
+                  setPaymentEntryMode('default');
+                  setShowPaymentModal(true);
+                }}
                 className="px-4 py-2 bg-green-600 border border-transparent rounded-md text-sm font-medium text-white hover:bg-green-700"
               >
                 Add Payment
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPaymentEntryMode('outstanding');
+                  setForm((prev) => ({
+                    ...prev,
+                    distribution_invoice_id: '',
+                    notes: prev.notes || 'Outstanding collection without invoice',
+                  }));
+                  setShowPaymentModal(true);
+                }}
+                className="px-4 py-2 bg-amber-600 border border-transparent rounded-md text-sm font-medium text-white hover:bg-amber-700"
+              >
+                Add Outstanding Payment
               </button>
               <Link
                 href="/dashboard/distribution"
@@ -867,7 +988,9 @@ export default function DistributionPaymentsPage() {
           <div className="relative w-full h-[90vh] md:h-auto md:w-11/12 max-w-5xl mx-auto bg-white rounded-t-2xl md:rounded-2xl shadow-2xl border border-gray-200 overflow-hidden md:max-h-[90vh] flex flex-col">
             <div className="flex items-start justify-between px-4 md:px-6 pt-4 pb-3 border-b border-gray-100 bg-gray-50/70 backdrop-blur-sm">
               <div>
-                <h3 className="text-base sm:text-lg md:text-xl font-semibold text-gray-900">Record new payment</h3>
+                <h3 className="text-base sm:text-lg md:text-xl font-semibold text-gray-900">
+                  {paymentEntryMode === 'outstanding' ? 'Record outstanding payment' : 'Record new payment'}
+                </h3>
                 <p className="mt-0.5 text-xs sm:text-sm text-gray-500">Capture cash, check, or bank transfer collections.</p>
               </div>
               <button
@@ -882,6 +1005,11 @@ export default function DistributionPaymentsPage() {
 
             <div className="flex-1 overflow-y-auto px-4 md:px-6 pb-4 md:pb-6">
               <form onSubmit={createPayment} className="space-y-4 pt-4">
+                {paymentEntryMode === 'outstanding' && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    Outstanding payment mode: customer and amount are required. Linked invoice is optional.
+                  </div>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Payment Number</label>

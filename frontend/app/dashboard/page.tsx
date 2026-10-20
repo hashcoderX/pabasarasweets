@@ -1,8 +1,10 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { createApiClient } from '@/lib/apiClient';
+import { clearOfflineSession, readOfflineSession } from '@/lib/offlineSession';
+import { syncDistributionOfflineQueues } from '@/lib/distributionSync';
 
 type DashboardModule = {
   id: string;
@@ -26,6 +28,20 @@ type SalesTargetPreview = {
   achieved_quantity?: number | string;
 };
 
+type DashboardAccessCache = {
+  savedAt: number;
+  userRoles: string[];
+  userPermissions: string[];
+  isAdminUser: boolean;
+  isSalesRefUser: boolean;
+  widgetVisibility: Record<string, boolean>;
+};
+
+type SalesTargetCache = {
+  savedAt: number;
+  rows: SalesTargetPreview[];
+};
+
 export default function Dashboard() {
   const [token, setToken] = useState('');
   const [userRoles, setUserRoles] = useState<string[]>([]);
@@ -45,11 +61,21 @@ export default function Dashboard() {
   const [targetsLoading, setTargetsLoading] = useState(false);
   const router = useRouter();
   const apiClient = createApiClient();
+  const syncInFlightRef = useRef(false);
+
+  const getAccessCacheKey = (authToken: string) => `dashboard_access_cache_${authToken.slice(-16)}`;
+  const getSalesTargetCacheKey = (authToken: string) => `dashboard_sales_targets_cache_${authToken.slice(-16)}`;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     if (!storedToken) {
-      router.push('/');
+      const offlineSession = readOfflineSession();
+      if (offlineSession?.token) {
+        localStorage.setItem('token', offlineSession.token);
+        setToken(offlineSession.token);
+      } else {
+        router.push('/');
+      }
     } else {
       setToken(storedToken);
     }
@@ -57,11 +83,27 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     localStorage.removeItem('token');
+    clearOfflineSession();
     router.push('/');
   };
 
   useEffect(() => {
     if (!token) return;
+
+    const hydrateAccessFromCache = () => {
+      try {
+        const cached = JSON.parse(localStorage.getItem(getAccessCacheKey(token)) || 'null') as DashboardAccessCache | null;
+        if (!cached) return false;
+        setUserRoles(Array.isArray(cached.userRoles) ? cached.userRoles : []);
+        setUserPermissions(Array.isArray(cached.userPermissions) ? cached.userPermissions : []);
+        setIsAdminUser(Boolean(cached.isAdminUser));
+        setIsSalesRefUser(Boolean(cached.isSalesRefUser));
+        setWidgetVisibility(cached.widgetVisibility || {});
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     const fetchUserAccess = async () => {
       try {
@@ -118,17 +160,42 @@ export default function Dashboard() {
           });
           const widgetMap = widgetRes.data?.data?.widgets || {};
           setWidgetVisibility(widgetMap);
+          localStorage.setItem(
+            getAccessCacheKey(token),
+            JSON.stringify({
+              savedAt: Date.now(),
+              userRoles: Array.from(new Set(roleNames)),
+              userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
+              isAdminUser: adminUser,
+              isSalesRefUser: salesRefUser,
+              widgetVisibility: widgetMap,
+            } satisfies DashboardAccessCache),
+          );
         } catch (widgetError) {
           console.error('Error fetching widget visibility:', widgetError);
           setWidgetVisibility({});
+          localStorage.setItem(
+            getAccessCacheKey(token),
+            JSON.stringify({
+              savedAt: Date.now(),
+              userRoles: Array.from(new Set(roleNames)),
+              userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
+              isAdminUser: adminUser,
+              isSalesRefUser: salesRefUser,
+              widgetVisibility: {},
+            } satisfies DashboardAccessCache),
+          );
         }
       } catch (error) {
         console.error('Error fetching dashboard access profile:', error);
-        setUserRoles([]);
-        setUserPermissions([]);
-        setIsAdminUser(false);
-        setIsSalesRefUser(false);
-        setWidgetVisibility({});
+        const usedCache = hydrateAccessFromCache();
+        if (!usedCache) {
+          setUserRoles([]);
+          setUserPermissions([]);
+          setIsAdminUser(false);
+          setIsSalesRefUser(false);
+          setWidgetVisibility({});
+        }
       } finally {
         setAccessReady(true);
       }
@@ -139,6 +206,17 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!token) return;
+
+    const hydrateSalesTargetsFromCache = () => {
+      try {
+        const cached = JSON.parse(localStorage.getItem(getSalesTargetCacheKey(token)) || 'null') as SalesTargetCache | null;
+        if (!cached || !Array.isArray(cached.rows)) return false;
+        setSalesTargets(cached.rows);
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     const fetchSalesTargetPreview = async () => {
       try {
@@ -151,15 +229,52 @@ export default function Dashboard() {
         const payload = response.data?.data;
         const items = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
         setSalesTargets(items);
+        localStorage.setItem(
+          getSalesTargetCacheKey(token),
+          JSON.stringify({
+            savedAt: Date.now(),
+            rows: items,
+          } satisfies SalesTargetCache),
+        );
       } catch (error) {
         console.error('Error loading sales target preview:', error);
-        setSalesTargets([]);
+        const usedCache = hydrateSalesTargetsFromCache();
+        if (!usedCache) {
+          setSalesTargets([]);
+        }
       } finally {
         setTargetsLoading(false);
       }
     };
 
     fetchSalesTargetPreview();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token || typeof window === 'undefined') return;
+
+    const syncWhenOnline = async () => {
+      if (!window.navigator.onLine) return;
+      if (syncInFlightRef.current) return;
+
+      syncInFlightRef.current = true;
+      try {
+        await syncDistributionOfflineQueues(token);
+      } catch (error) {
+        console.error('Error syncing distribution offline queues from dashboard:', error);
+      } finally {
+        syncInFlightRef.current = false;
+      }
+    };
+
+    void syncWhenOnline();
+    window.addEventListener('online', syncWhenOnline);
+    window.addEventListener('focus', syncWhenOnline);
+
+    return () => {
+      window.removeEventListener('online', syncWhenOnline);
+      window.removeEventListener('focus', syncWhenOnline);
+    };
   }, [token]);
 
   const targetsSummary = useMemo(() => {

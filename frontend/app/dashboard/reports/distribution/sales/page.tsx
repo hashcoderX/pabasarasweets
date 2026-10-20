@@ -111,13 +111,14 @@ const getLoadRouteEntries = (load?: LoadRow | null) => {
   return Array.from(map.values());
 };
 
-type PaginatedResponse<T> = {
-  data?: T[];
-  next_page_url?: string | null;
+type PaginatedExtractResult<T> = {
+  rows: T[];
+  nextPageUrl: string | null;
 };
 
 type SalesViewRow = {
   id: number;
+  rowKey: string;
   invoiceNumber: string;
   invoiceDate: string;
   customerCode: string;
@@ -131,6 +132,50 @@ type SalesViewRow = {
   salesAmount: number;
   collectedAmount: number;
   outstandingAmount: number;
+};
+
+type SalesRowsCache = {
+  cachedAt: number;
+  invoices: InvoiceRow[];
+  payments: PaymentRow[];
+  loads: LoadRow[];
+};
+
+const SALES_ROWS_CACHE_KEY = 'distribution-sales-report:rows:v1';
+const SALES_ROWS_CACHE_TTL_MS = 5 * 60 * 1000;
+const SALES_ROWS_CACHE_MAX_CHARS = 2_000_000;
+const SALES_ROWS_CACHE_LIMITS = {
+  invoices: 1200,
+  payments: 2500,
+  loads: 1000,
+} as const;
+
+const extractPaginatedRows = <T,>(responseData: unknown): PaginatedExtractResult<T> => {
+  if (!responseData || typeof responseData !== 'object') {
+    return { rows: [], nextPageUrl: null };
+  }
+
+  const root = responseData as Record<string, unknown>;
+  const directData = root.data;
+
+  if (directData && typeof directData === 'object' && !Array.isArray(directData)) {
+    const nested = directData as Record<string, unknown>;
+    const rows = Array.isArray(nested.data) ? (nested.data as T[]) : [];
+    const nextPageUrl = typeof nested.next_page_url === 'string' ? nested.next_page_url : null;
+    return { rows, nextPageUrl };
+  }
+
+  if (Array.isArray(directData)) {
+    return { rows: directData as T[], nextPageUrl: null };
+  }
+
+  if (Array.isArray(responseData)) {
+    return { rows: responseData as T[], nextPageUrl: null };
+  }
+
+  const rows = Array.isArray(root.data) ? (root.data as T[]) : [];
+  const nextPageUrl = typeof root.next_page_url === 'string' ? root.next_page_url : null;
+  return { rows, nextPageUrl };
 };
 
 export default function DistributionSalesReportPage() {
@@ -153,6 +198,8 @@ export default function DistributionSalesReportPage() {
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [viewScope, setViewScope] = useState<'all' | 'my' | 'team'>('all');
   const [salesRefFilter, setSalesRefFilter] = useState('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -171,27 +218,184 @@ export default function DistributionSalesReportPage() {
     const rows: T[] = [];
     let nextUrl: string | null = `${API_URL}/api/${endpoint}?per_page=200`;
     let pageCount = 0;
+    const visitedUrls = new Set<string>();
 
     while (nextUrl && pageCount < 50) {
-      const response: { data: { data?: PaginatedResponse<T> } } = await axios.get(nextUrl, {
+      if (visitedUrls.has(nextUrl)) {
+        console.warn(`Stopping pagination loop for ${endpoint}: repeated next_page_url`, nextUrl);
+        break;
+      }
+      visitedUrls.add(nextUrl);
+
+      const { data: responseData } = await axios.get<unknown>(nextUrl, {
         headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
       });
 
-      const payload = response.data?.data;
-      rows.push(...(Array.isArray(payload?.data) ? payload.data : []));
-      nextUrl = payload?.next_page_url || null;
+      const extracted: PaginatedExtractResult<T> = extractPaginatedRows<T>(responseData);
+      rows.push(...extracted.rows);
+      nextUrl = extracted.nextPageUrl;
       pageCount += 1;
     }
 
     return rows;
   }, [API_URL]);
 
-  const fetchRows = useCallback(async (authToken?: string) => {
+  const readSalesRowsCache = useCallback((): SalesRowsCache | null => {
+    try {
+      const raw = localStorage.getItem(SALES_ROWS_CACHE_KEY);
+      if (!raw) return null;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+
+      const data = parsed as Record<string, unknown>;
+      const cachedAt = data.cachedAt;
+      const invoices = data.invoices;
+      const payments = data.payments;
+      const loads = data.loads;
+
+      if (
+        typeof cachedAt !== 'number' ||
+        !Array.isArray(invoices) ||
+        !Array.isArray(payments) ||
+        !Array.isArray(loads)
+      ) {
+        return null;
+      }
+
+      return {
+        cachedAt,
+        invoices: invoices as InvoiceRow[],
+        payments: payments as PaymentRow[],
+        loads: loads as LoadRow[],
+      };
+    } catch (error) {
+      console.error('Error reading sales rows cache:', error);
+      return null;
+    }
+  }, []);
+
+  const writeSalesRowsCache = useCallback((rows: Omit<SalesRowsCache, 'cachedAt'>) => {
+    try {
+      const compactInvoices: InvoiceRow[] = rows.invoices.map((invoice) => ({
+        id: invoice.id,
+        invoice_number: invoice.invoice_number,
+        customer_id: invoice.customer_id,
+        customer: invoice.customer
+          ? {
+              id: invoice.customer.id,
+              shop_name: invoice.customer.shop_name,
+              customer_code: invoice.customer.customer_code,
+              route_id: invoice.customer.route_id,
+            }
+          : null,
+        invoice_date: invoice.invoice_date,
+        load_id: invoice.load_id,
+        total: invoice.total,
+        paid_amount: invoice.paid_amount,
+        status: invoice.status,
+      }));
+
+      const compactPayments: PaymentRow[] = rows.payments.map((payment) => ({
+        id: payment.id,
+        distribution_invoice_id: payment.distribution_invoice_id,
+        amount: payment.amount,
+        payment_date: payment.payment_date,
+        status: payment.status,
+      }));
+
+      const compactLoads: LoadRow[] = rows.loads.map((load) => ({
+        id: load.id,
+        load_number: load.load_number,
+        load_date: load.load_date,
+        delivery_date: load.delivery_date,
+        sales_ref_id: load.sales_ref_id,
+        sales_ref: load.sales_ref
+          ? {
+              id: load.sales_ref.id,
+              employee_code: load.sales_ref.employee_code,
+              first_name: load.sales_ref.first_name,
+              last_name: load.sales_ref.last_name,
+              name: load.sales_ref.name,
+            }
+          : null,
+        route: load.route
+          ? {
+              id: load.route.id,
+              name: load.route.name,
+              origin: load.route.origin,
+              destination: load.route.destination,
+            }
+          : null,
+        loadRoutes: Array.isArray(load.loadRoutes)
+          ? load.loadRoutes.map((entry) => ({
+              route_id: entry.route_id,
+              route: entry.route
+                ? {
+                    id: entry.route.id,
+                    name: entry.route.name,
+                    origin: entry.route.origin,
+                    destination: entry.route.destination,
+                  }
+                : null,
+            }))
+          : [],
+        load_routes: Array.isArray(load.load_routes)
+          ? load.load_routes.map((entry) => ({
+              route_id: entry.route_id,
+              route: entry.route
+                ? {
+                    id: entry.route.id,
+                    name: entry.route.name,
+                    origin: entry.route.origin,
+                    destination: entry.route.destination,
+                  }
+                : null,
+            }))
+          : [],
+      }));
+
+      const payload: SalesRowsCache = {
+        cachedAt: Date.now(),
+        invoices: compactInvoices,
+        payments: compactPayments,
+        loads: compactLoads,
+      };
+      let serialized = JSON.stringify(payload);
+
+      if (serialized.length > SALES_ROWS_CACHE_MAX_CHARS) {
+        const reducedPayload: SalesRowsCache = {
+          cachedAt: payload.cachedAt,
+          invoices: compactInvoices.slice(0, SALES_ROWS_CACHE_LIMITS.invoices),
+          payments: compactPayments.slice(0, SALES_ROWS_CACHE_LIMITS.payments),
+          loads: compactLoads.slice(0, SALES_ROWS_CACHE_LIMITS.loads),
+        };
+        serialized = JSON.stringify(reducedPayload);
+      }
+
+      if (serialized.length > SALES_ROWS_CACHE_MAX_CHARS) {
+        localStorage.removeItem(SALES_ROWS_CACHE_KEY);
+        console.warn('Sales rows cache skipped: payload exceeds localStorage quota budget.');
+        return;
+      }
+
+      localStorage.setItem(SALES_ROWS_CACHE_KEY, serialized);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes('quota')) {
+        localStorage.removeItem(SALES_ROWS_CACHE_KEY);
+        console.warn('Sales rows cache skipped: localStorage quota exceeded.');
+        return;
+      }
+      console.error('Error writing sales rows cache:', error);
+    }
+  }, []);
+
+  const fetchRows = useCallback(async (authToken?: string, options?: { skipLoading?: boolean }) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
 
     try {
-      setLoading(true);
+      if (!options?.skipLoading) setLoading(true);
       setErrorMessage('');
 
       const [invoiceRows, paymentRows, loadRows] = await Promise.all([
@@ -207,16 +411,18 @@ export default function DistributionSalesReportPage() {
       setInvoices(invoiceRows);
       setPayments(paymentRows);
       setLoads(loadRows);
+      writeSalesRowsCache({
+        invoices: invoiceRows,
+        payments: paymentRows,
+        loads: loadRows,
+      });
     } catch (error) {
       console.error('Error fetching sales report rows:', error);
-      setInvoices([]);
-      setPayments([]);
-      setLoads([]);
       setErrorMessage('Failed to load sales report data.');
     } finally {
-      setLoading(false);
+      if (!options?.skipLoading) setLoading(false);
     }
-  }, [API_URL, fetchPaginated, token]);
+  }, [API_URL, fetchPaginated, token, writeSalesRowsCache]);
 
   const buildTeamMemberIds = useCallback((employees: EmployeeLite[], managerId: number) => {
     const teamIds: number[] = [];
@@ -325,7 +531,23 @@ export default function DistributionSalesReportPage() {
           return;
         }
 
-        await fetchRows(token);
+        const cachedRows = readSalesRowsCache();
+        const cacheHasData = Boolean(
+          cachedRows &&
+          (cachedRows.invoices.length > 0 || cachedRows.payments.length > 0 || cachedRows.loads.length > 0)
+        );
+        const cacheIsFresh = cachedRows ? (Date.now() - cachedRows.cachedAt) < SALES_ROWS_CACHE_TTL_MS : false;
+        if (cachedRows) {
+          setInvoices(cachedRows.invoices);
+          setPayments(cachedRows.payments);
+          setLoads(cachedRows.loads);
+        }
+
+        setAccessReady(true);
+
+        if (!cacheIsFresh || !cacheHasData) {
+          await fetchRows(token, { skipLoading: Boolean(cachedRows) });
+        }
       } catch (error) {
         console.error('Error checking sales report access:', error);
         router.push('/dashboard');
@@ -335,7 +557,7 @@ export default function DistributionSalesReportPage() {
     };
 
     verifyAccess();
-  }, [token, router, fetchRows, buildTeamMemberIds]);
+  }, [token, router, fetchRows, buildTeamMemberIds, readSalesRowsCache]);
 
   const loadById = useMemo(() => {
     const map = new Map<number, LoadRow>();
@@ -347,7 +569,8 @@ export default function DistributionSalesReportPage() {
     const map = new Map<number, number>();
 
     payments.forEach((payment) => {
-      if (String(payment.status || '').toLowerCase() === 'bounced') return;
+      const paymentStatus = String(payment.status || '').trim().toLowerCase();
+      if (paymentStatus === 'bounced' || paymentStatus === 'pending') return;
       const invoiceId = Number(payment.distribution_invoice_id || 0);
       if (!invoiceId) return;
 
@@ -414,6 +637,8 @@ export default function DistributionSalesReportPage() {
   }, [loadFilter]);
 
   const salesRows = useMemo(() => {
+    const rowKeyOccurrences = new Map<string, number>();
+
     return invoices
       .filter((invoice) => String(invoice.status || '').toLowerCase() !== 'cancelled')
       .map<SalesViewRow>((invoice) => {
@@ -433,13 +658,19 @@ export default function DistributionSalesReportPage() {
 
         const routeId = matchedRoute?.routeId || (loadRoutes.length === 1 ? loadRoutes[0].routeId : null);
         const routeKey = routeId ? `${loadId}-${routeId}` : `${loadId}-unmapped`;
+        const baseRowKey = `${Number(invoice.id || 0)}-${loadId}-${routeKey}`;
+        const seenCount = (rowKeyOccurrences.get(baseRowKey) || 0) + 1;
+        rowKeyOccurrences.set(baseRowKey, seenCount);
+        const rowKey = seenCount === 1 ? baseRowKey : `${baseRowKey}-${seenCount}`;
 
         const salesAmount = Number(invoice.total || 0);
-        const collectedAmount = paymentsByInvoice.get(Number(invoice.id)) ?? Number(invoice.paid_amount || 0);
+        const rawCollectedAmount = paymentsByInvoice.get(Number(invoice.id)) ?? Number(invoice.paid_amount || 0);
+        const collectedAmount = Math.min(salesAmount, Math.max(0, rawCollectedAmount));
         const outstandingAmount = Math.max(0, salesAmount - collectedAmount);
 
         return {
           id: invoice.id,
+          rowKey,
           invoiceNumber: String(invoice.invoice_number || '-'),
           invoiceDate: String(invoice.invoice_date || ''),
           customerCode: String(invoice.customer?.customer_code || '-'),
@@ -531,6 +762,23 @@ export default function DistributionSalesReportPage() {
       return text.includes(term);
     });
   }, [salesRows, search, statusFilter, customerFilter, loadFilter, routeFilter, fromDate, toDate, loadById, viewScope, currentEmployeeId, teamMemberIds, salesRefFilter]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / rowsPerPage)), [filteredRows.length, rowsPerPage]);
+
+  const paginatedRows = useMemo(() => {
+    const startIndex = (currentPage - 1) * rowsPerPage;
+    return filteredRows.slice(startIndex, startIndex + rowsPerPage);
+  }, [filteredRows, currentPage, rowsPerPage]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, customerFilter, loadFilter, routeFilter, fromDate, toDate, viewScope, salesRefFilter, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const teamPerformanceRows = useMemo(() => {
     const map = new Map<number, { id: number; name: string; invoices: number; sales: number; collected: number; outstanding: number }>();
@@ -951,8 +1199,10 @@ export default function DistributionSalesReportPage() {
                     <td colSpan={9} className="px-4 py-10 text-center text-sm text-gray-500">No sales records found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
-                    <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                  paginatedRows.map((row, idx) => {
+                    const absoluteIndex = ((currentPage - 1) * rowsPerPage) + idx;
+                    return (
+                    <tr key={row.rowKey} className={absoluteIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.invoiceNumber}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.invoiceDate)}</td>
                       <td className="px-4 py-3 text-sm text-gray-900 font-medium">{row.customerCode} - {row.customerName}</td>
@@ -967,11 +1217,56 @@ export default function DistributionSalesReportPage() {
                       <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.collectedAmount)}</td>
                       <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.outstandingAmount)}</td>
                     </tr>
-                  ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
+          {filteredRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <div className="text-sm text-gray-600">
+                {(() => {
+                  const startRow = (currentPage - 1) * rowsPerPage + 1;
+                  const endRow = Math.min(filteredRows.length, currentPage * rowsPerPage);
+                  return `Showing ${startRow}-${endRow} of ${filteredRows.length}`;
+                })()}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-sm text-gray-600" htmlFor="sales-rows-per-page">Rows</label>
+                <select
+                  id="sales-rows-per-page"
+                  value={rowsPerPage}
+                  onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage <= 1}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-gray-700">
+                  Page {currentPage} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>

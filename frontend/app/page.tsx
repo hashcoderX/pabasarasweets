@@ -4,6 +4,11 @@ import { Suspense, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
 import { createApiClient } from '@/lib/apiClient';
+import {
+  canUseOfflineSession,
+  writeOfflineSession,
+} from '@/lib/offlineSession';
+import { isAxiosError } from '@/lib/http';
 
 function HomeContent() {
   const [email, setEmail] = useState('');
@@ -56,18 +61,31 @@ function HomeContent() {
 
         const isOutletUser = roleNames.some((role) => role.includes('outlet_user'));
         const nextPath = params.get('next');
+        const preferredPath = isOutletUser
+          ? (nextPath && nextPath.startsWith('/') ? nextPath : '/outlet-pos')
+          : (nextPath && nextPath.startsWith('/dashboard') ? nextPath : '/dashboard');
+
+        writeOfflineSession({
+          token: nextToken,
+          user: {
+            id: Number(userData?.id || userData?.user_id || 0) || undefined,
+            name: String(userData?.name || userData?.employee?.name || ''),
+            email: String(userData?.email || email || ''),
+            role: String(userData?.role || ''),
+            roles: roleNames,
+          },
+          isOutletUser,
+          preferredPath,
+          savedAt: Date.now(),
+        });
 
         if (isOutletUser) {
-          if (nextPath && nextPath.startsWith('/')) {
-            router.push(nextPath);
-          } else {
-            router.push('/outlet-pos');
-          }
+          router.push(preferredPath);
           return;
         }
 
         if (nextPath && nextPath.startsWith('/dashboard')) {
-          router.push(nextPath);
+          router.push(preferredPath);
           return;
         }
       } catch (profileError) {
@@ -75,10 +93,31 @@ function HomeContent() {
       }
 
       router.push('/dashboard');
-    } catch (error: any) {
+    } catch (error) {
+      if (isAxiosError(error) && !error.response) {
+        const offlineSession = canUseOfflineSession(email);
+        if (offlineSession) {
+          localStorage.setItem('token', offlineSession.token);
+          showNotice(
+            'Offline Login',
+            'Internet is not available. Signed in using your last verified session.',
+          );
+          router.push(offlineSession.preferredPath || '/dashboard');
+          return;
+        }
+      }
+
+      const axiosError = error as {
+        response?: {
+          data?: {
+            message?: string;
+            errors?: { email?: string[] };
+          };
+        };
+      } | null;
       const serverMessage =
-        error?.response?.data?.message ||
-        error?.response?.data?.errors?.email?.[0] ||
+        axiosError?.response?.data?.message ||
+        axiosError?.response?.data?.errors?.email?.[0] ||
         'Login failed. Please check your credentials.';
       showNotice('Login Failed', serverMessage);
     } finally {

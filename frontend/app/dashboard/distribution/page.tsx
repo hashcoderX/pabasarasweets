@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { isAxiosError } from '@/lib/http';
 import { createApiClient } from '../../../lib/apiClient';
 import { DISTRIBUTION_OFFLINE_KEYS, readOfflineQueue } from '@/lib/distributionOffline';
+import { syncDistributionOfflineQueues } from '@/lib/distributionSync';
 
 interface RouteCustomer {
   id: number;
@@ -91,7 +92,7 @@ interface LoadAvailabilityItem {
   load_id: number;
   product_code: string;
   name: string;
-  qty: number;
+  qty: number; // current available qty in vehicle
 }
 
 interface DistributionDashboardCache {
@@ -111,6 +112,7 @@ export default function DistributionPage() {
   const [assignedRouteIds, setAssignedRouteIds] = useState<number[]>([]);
   const [assignedRouteName, setAssignedRouteName] = useState('');
   const [assignedRouteNames, setAssignedRouteNames] = useState<string[]>([]);
+  const [isSuperAdminView, setIsSuperAdminView] = useState(false);
   const [customerCount, setCustomerCount] = useState(0);
   const [invoiceCount, setInvoiceCount] = useState(0);
   const [returnCount, setReturnCount] = useState(0);
@@ -139,6 +141,7 @@ export default function DistributionPage() {
     returns: 0,
   });
   const cacheHydratedRef = useRef(false);
+  const offlineSyncInFlightRef = useRef(false);
   const router = useRouter();
 
   const api = useMemo(() => createApiClient(token), [token]);
@@ -215,6 +218,35 @@ export default function DistributionPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!token || typeof window === 'undefined') return;
+
+    const syncWhenOnline = async () => {
+      if (!window.navigator.onLine || offlineSyncInFlightRef.current) return;
+      offlineSyncInFlightRef.current = true;
+      try {
+        const result = await syncDistributionOfflineQueues(token);
+        setPendingOfflineCounts({
+          invoices: result.pendingInvoices,
+          payments: result.pendingPayments,
+          returns: result.pendingReturns,
+        });
+      } catch (error) {
+        console.error('Failed to sync distribution offline queues:', error);
+      } finally {
+        offlineSyncInFlightRef.current = false;
+      }
+    };
+
+    void syncWhenOnline();
+    window.addEventListener('online', syncWhenOnline);
+    window.addEventListener('focus', syncWhenOnline);
+    return () => {
+      window.removeEventListener('online', syncWhenOnline);
+      window.removeEventListener('focus', syncWhenOnline);
+    };
+  }, [token]);
+
   const handleUnauthorized = (error: unknown) => {
     if (isAxiosError(error) && error.response?.status === 401) {
       localStorage.removeItem('token');
@@ -227,31 +259,8 @@ export default function DistributionPage() {
   };
 
   const resolveAssignedRoute = async () => {
-    try {
-      setRouteResolving(true);
-
-      const [userRes, loadsRes] = await Promise.all([
-        api.get('/user'),
-        api.get('/vehicle-loading/loads'),
-      ]);
-
-      const employeeId = Number(userRes.data?.employee_id || userRes.data?.employee?.id || 0);
-      if (!employeeId) {
-        setAssignedRouteId(null);
-        setAssignedRouteIds([]);
-        setAssignedRouteName('');
-        setAssignedRouteNames([]);
-        localStorage.removeItem('distribution_assigned_route_id');
-        localStorage.removeItem('distribution_assigned_route_name');
-        return;
-      }
-
-      const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
-      const inTransitAssignedLoads = loads
-        .filter((load: any) => Number(load.sales_ref_id) === employeeId && String(load.status) === 'in_transit')
-        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
-
-      const availabilityRows: SalesRefLoadAvailability[] = inTransitAssignedLoads.map((load: any) => {
+    const mapLoadsToAvailability = (rawLoads: any[]): SalesRefLoadAvailability[] => {
+      return rawLoads.map((load: any) => {
         const entryRoutes: AssignedLoadRoute[] = Array.isArray(load.load_routes)
           ? [...load.load_routes].sort((a, b) => Number(a.sequence_no || 0) - Number(b.sequence_no || 0))
           : [{ route_id: load.route_id, route: load.route }];
@@ -276,6 +285,78 @@ export default function DistributionPage() {
             .join(' ') || load.driver?.name || '-',
         };
       });
+    };
+
+    try {
+      setRouteResolving(true);
+
+      const [userRes, loadsRes] = await Promise.all([
+        api.get('/user'),
+        api.get('/vehicle-loading/loads'),
+      ]);
+
+      const userData = userRes.data || {};
+      const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
+      const roleNames = [
+        String(userData?.role || ''),
+        ...(Array.isArray(userData?.roles)
+          ? userData.roles.map((role: any) => String(role?.name || role || ''))
+          : []),
+      ]
+        .map((role) => role.trim().toLowerCase())
+        .filter(Boolean);
+      const roleBlob = roleNames.join(' ');
+      const adminUser =
+        !employeeId ||
+        roleBlob.includes('super admin') ||
+        roleBlob.includes('superadmin') ||
+        roleBlob.includes('administrator') ||
+        roleBlob.includes('admin');
+
+      if (!employeeId && !adminUser) {
+        setIsSuperAdminView(false);
+        setAssignedRouteId(null);
+        setAssignedRouteIds([]);
+        setAssignedRouteName('');
+        setAssignedRouteNames([]);
+        localStorage.removeItem('distribution_assigned_route_id');
+        localStorage.removeItem('distribution_assigned_route_name');
+        return;
+      }
+
+      const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
+      if (adminUser) {
+        setIsSuperAdminView(true);
+        const activeLoads = loads
+          .filter((load: any) => ['pending', 'in_transit'].includes(String(load.status || '').toLowerCase()))
+          .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
+
+        const availabilityRows = mapLoadsToAvailability(activeLoads);
+        setLoadAvailability(availabilityRows);
+        setLoadAvailabilityCount(availabilityRows.length);
+        setAssignedRouteId(null);
+        setAssignedRouteIds([]);
+        setAssignedRouteName('');
+        setAssignedRouteNames([]);
+        persistDashboardCache({
+          route: {
+            id: null,
+            ids: [],
+            name: '',
+            names: [],
+          },
+        });
+        localStorage.removeItem('distribution_assigned_route_id');
+        localStorage.removeItem('distribution_assigned_route_name');
+        return;
+      }
+
+      setIsSuperAdminView(false);
+      const inTransitAssignedLoads = loads
+        .filter((load: any) => Number(load.sales_ref_id) === employeeId && String(load.status) === 'in_transit')
+        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
+
+      const availabilityRows: SalesRefLoadAvailability[] = mapLoadsToAvailability(inTransitAssignedLoads);
 
       setLoadAvailability(availabilityRows);
       setLoadAvailabilityCount(availabilityRows.length);
@@ -326,6 +407,7 @@ export default function DistributionPage() {
     } catch (error) {
       if (handleUnauthorized(error)) return;
       console.error('Error resolving assigned route:', error);
+      setIsSuperAdminView(false);
       setLoadAvailability([]);
       setLoadAvailabilityCount(0);
       const cachedRouteId = localStorage.getItem('distribution_assigned_route_id');
@@ -342,33 +424,59 @@ export default function DistributionPage() {
   };
 
   const fetchStats = async () => {
+    const readTotal = (payload: unknown) => {
+      const data = payload as { data?: { total?: number | string } } | null;
+      return Number(data?.data?.total) || 0;
+    };
+
+    const isTimeoutError = (error: unknown) => {
+      if (!isAxiosError(error)) return false;
+      const code = String(error.code || '').toUpperCase();
+      const message = String(error.message || '').toLowerCase();
+      return code === 'ECONNABORTED' || message.includes('timeout');
+    };
+
     try {
-      const [customersRes, invoicesRes, returnsRes, paymentsRes] = await Promise.all([
-        api.get('/distribution/customers', { params: { per_page: 1 } }),
-        api.get('/distribution/invoices', { params: { per_page: 1 } }),
-        api.get('/distribution/returns', { params: { per_page: 1 } }),
-        api.get('/distribution/payments', { params: { per_page: 1 } }),
+      const [customersRes, invoicesRes, returnsRes, paymentsRes] = await Promise.allSettled([
+        api.get('/distribution/customers', { params: { per_page: 1 }, timeout: 30000 }),
+        api.get('/distribution/invoices', { params: { per_page: 1 }, timeout: 30000 }),
+        api.get('/distribution/returns', { params: { per_page: 1 }, timeout: 30000 }),
+        api.get('/distribution/payments', { params: { per_page: 1 }, timeout: 30000 }),
       ]);
 
-      setCustomerCount(Number(customersRes.data?.data?.total) || 0);
-      setInvoiceCount(Number(invoicesRes.data?.data?.total) || 0);
-      setReturnCount(Number(returnsRes.data?.data?.total) || 0);
-      setPaymentCount(Number(paymentsRes.data?.data?.total) || 0);
+      const customersTotal = customersRes.status === 'fulfilled' ? readTotal(customersRes.value.data) : customerCount;
+      const invoicesTotal = invoicesRes.status === 'fulfilled' ? readTotal(invoicesRes.value.data) : invoiceCount;
+      const returnsTotal = returnsRes.status === 'fulfilled' ? readTotal(returnsRes.value.data) : returnCount;
+      const paymentsTotal = paymentsRes.status === 'fulfilled' ? readTotal(paymentsRes.value.data) : paymentCount;
+
+      setCustomerCount(customersTotal);
+      setInvoiceCount(invoicesTotal);
+      setReturnCount(returnsTotal);
+      setPaymentCount(paymentsTotal);
       persistDashboardCache({
         stats: {
-          customers: Number(customersRes.data?.data?.total) || 0,
-          invoices: Number(invoicesRes.data?.data?.total) || 0,
-          returns: Number(returnsRes.data?.data?.total) || 0,
-          payments: Number(paymentsRes.data?.data?.total) || 0,
+          customers: customersTotal,
+          invoices: invoicesTotal,
+          returns: returnsTotal,
+          payments: paymentsTotal,
         },
       });
+
+      const failures = [customersRes, invoicesRes, returnsRes, paymentsRes].filter(
+        (result) => result.status === 'rejected',
+      ) as PromiseRejectedResult[];
+      if (failures.length > 0) {
+        const hasTimeout = failures.some((result) => isTimeoutError(result.reason));
+        console.error(
+          hasTimeout
+            ? 'Distribution stats: partial timeout; keeping cached/last known values for failed endpoints.'
+            : 'Distribution stats: partial failures; keeping cached/last known values for failed endpoints.',
+          failures.map((result) => result.reason),
+        );
+      }
     } catch (error) {
       if (handleUnauthorized(error)) return;
       console.error('Error fetching distribution stats:', error);
-      setCustomerCount(0);
-      setInvoiceCount(0);
-      setReturnCount(0);
-      setPaymentCount(0);
     } finally {
       setLoading(false);
     }
@@ -528,6 +636,7 @@ export default function DistributionPage() {
     { name: 'Invoices', icon: '🧾', path: '/dashboard/distribution/invoices', stat: invoiceCount, desc: 'Create and track invoices' },
     { name: 'Returns', icon: '↩️', path: '/dashboard/distribution/returns', stat: returnCount, desc: 'Manage customer returns' },
     { name: 'Payments', icon: '💳', path: '/dashboard/distribution/payments', stat: paymentCount, desc: 'Check, cash, and bank transfers' },
+    { name: 'Outstanding Payment', icon: '🧮', path: '/dashboard/distribution/payments?entry=outstanding', stat: paymentCount, desc: 'Collect outstanding without creating a new invoice' },
     { name: 'Live Locations', icon: '📍', path: '/dashboard/distribution/live-locations', stat: 0, desc: 'Track all ref locations on map' },
     { name: 'Reports', icon: '📊', path: '/dashboard/reports', stat: 2, desc: 'Sales and delivery balance reports' },
   ];
@@ -536,6 +645,9 @@ export default function DistributionPage() {
     if (path.startsWith('#')) return path;
     if (path === '/dashboard/reports') return path;
     if (!assignedRouteId) return path;
+    if (path.includes('?')) {
+      return `${path}&route_id=${assignedRouteId}`;
+    }
     return `${path}?route_id=${assignedRouteId}`;
   };
 
@@ -558,10 +670,10 @@ export default function DistributionPage() {
     const rows = selectedLoadItems.map((item) => {
       const key = String(item.product_code || item.name || '').trim().toLowerCase();
       const summary = summaryByCode.get(key);
-      const loadedQty = Number(item.qty || 0);
       const soldQty = Number(summary?.sold_qty || 0);
       const returnQty = Number(summary?.return_qty || 0);
-      const availableQty = loadedQty - soldQty + returnQty;
+      const availableQty = Math.max(0, Number(item.qty || 0));
+      const loadedQty = Math.max(0, availableQty + soldQty - returnQty);
 
       return {
         key: `${item.id}-${item.product_code}`,
@@ -584,10 +696,10 @@ export default function DistributionPage() {
         key: `summary-${key}`,
         code: summaryItem.item_code || '-',
         name: summaryItem.item_name || '-',
-        loadedQty: 0,
+        loadedQty: Math.max(0, Number(summaryItem.sold_qty || 0) - Number(summaryItem.return_qty || 0)),
         soldQty: Number(summaryItem.sold_qty || 0),
         returnQty: Number(summaryItem.return_qty || 0),
-        availableQty: Number(summaryItem.return_qty || 0) - Number(summaryItem.sold_qty || 0),
+        availableQty: 0,
         returnValue: Number(summaryItem.return_value || 0),
       });
     });
@@ -705,6 +817,10 @@ export default function DistributionPage() {
           <p className="text-sm sm:text-base md:text-lg text-gray-600 mt-2 px-2">Manage shops, invoices, returns, and payments.</p>
           {routeResolving ? (
             <p className="text-sm text-gray-500 mt-3">Detecting assigned route...</p>
+          ) : isSuperAdminView ? (
+            <p className="text-sm text-green-700 mt-3 font-medium">
+              Superadmin view: showing all active loads.
+            </p>
           ) : assignedRouteId ? (
             <p className="text-sm text-green-700 mt-3 font-medium">
               Auto route enabled: {assignedRouteNames.length > 0

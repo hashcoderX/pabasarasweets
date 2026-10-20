@@ -98,6 +98,7 @@ interface PaymentEntry {
   reference?: string | null;
   bank_name?: string | null;
   target_invoice_id?: number | null;
+  is_outstanding_settlement?: boolean;
 }
 
 interface DeliveryOrderRecord {
@@ -254,6 +255,7 @@ export default function DistributionInvoicesPage() {
   const [addPayment, setAddPayment] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'check' | 'bank_transfer' | 'bill_to_bill'>('cash');
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [outstandingPaymentAmount, setOutstandingPaymentAmount] = useState('');
   const [lastBillAmount, setLastBillAmount] = useState('');
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentChequeDate, setPaymentChequeDate] = useState(new Date().toISOString().split('T')[0]);
@@ -641,9 +643,7 @@ export default function DistributionInvoicesPage() {
             try {
               const paymentRows = offlinePayments.map((payment) => ({
                 payment_number: generatePaymentNumber(),
-                distribution_invoice_id: payment.method === 'bill_to_bill'
-                  ? Number(payment.target_invoice_id || 0)
-                  : Number(createdInvoice.id),
+                distribution_invoice_id: Number(payment.target_invoice_id || createdInvoice.id || 0),
                 load_id: createdInvoice.load_id ?? inv.load_id ?? (activeLoadId ? Number(activeLoadId) : (isAdmin && selectedLoadFilter ? Number(selectedLoadFilter) : null)),
                 customer_id: createdInvoice.customer_id ?? inv.customer_id,
                 payment_date: payment.date,
@@ -653,7 +653,9 @@ export default function DistributionInvoicesPage() {
                 reference_no: payment.reference || null,
                 bank_name: payment.bank_name || null,
                 status: 'received',
-                notes: `Auto payment from invoice ${createdInvoice.invoice_number} (offline sync)`,
+                notes: payment.is_outstanding_settlement
+                  ? `Outstanding settlement from invoice ${createdInvoice.invoice_number} (offline sync)`
+                  : `Auto payment from invoice ${createdInvoice.invoice_number} (offline sync)`,
               }));
               if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for offline payment sync.');
               await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
@@ -778,26 +780,45 @@ export default function DistributionInvoicesPage() {
   };
 
   const fetchData = async () => {
+    if (!token) return;
+
     try {
       setLoading(true);
       const [inventoryRes, invoicesRes] = await Promise.all([
-        axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
+        axios.get('/api/stock/inventory', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { per_page: 200 },
+          timeout: 30000,
+        }),
         axios.get('/api/distribution/invoices', {
           headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 1000, ...(activeLoadId ? { load_id: Number(activeLoadId) } : {}) },
+          params: { per_page: 200, ...(activeLoadId ? { load_id: Number(activeLoadId) } : {}) },
+          timeout: 30000,
         }),
       ]);
 
       setCustomers([]);
-      const inventory = inventoryRes.data?.data?.data || inventoryRes.data?.data || [];
-      setItems(inventory.filter((item: any) => item.status === 'active').map((item: any) => ({
-        id: item.id,
-        name: item.name,
-        code: item.code,
-        unit: item.unit,
-        sell_price: Number(item.sell_price) || 0,
-        current_stock: Number(item.current_stock) || 0,
-      })));
+
+      const inventoryPayload = inventoryRes.data?.data;
+      const inventoryRows = Array.isArray(inventoryPayload?.data)
+        ? inventoryPayload.data
+        : Array.isArray(inventoryPayload)
+          ? inventoryPayload
+          : [];
+
+      setItems(
+        inventoryRows
+          .filter((item: any) => item.status === 'active')
+          .map((item: any) => ({
+            id: item.id,
+            name: item.name,
+            code: item.code,
+            unit: item.unit,
+            sell_price: Number(item.sell_price) || 0,
+            current_stock: Number(item.current_stock) || 0,
+          })),
+      );
+
       const invoicePayload = invoicesRes.data?.data;
       const invoiceRows = Array.isArray(invoicePayload?.data)
         ? invoicePayload.data
@@ -805,9 +826,18 @@ export default function DistributionInvoicesPage() {
           ? invoicePayload
           : [];
       setInvoices(invoiceRows as InvoiceRecord[]);
-
       setInvoiceNumber(generateInvoiceNumber());
     } catch (error) {
+      const errorCode = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as Record<string, unknown>).code || '')
+        : '';
+      const errorMessage = error instanceof Error ? error.message : String(error || '');
+      if (errorCode === 'ECONNABORTED' || errorMessage.toLowerCase().includes('timeout')) {
+        setQtyWarningMessage('Data loading timed out. Try Refresh, or narrow by load to reduce fetch size.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
       console.error('Error loading invoices page data:', error);
       setCustomers([]);
       setItems([]);
@@ -1473,6 +1503,7 @@ export default function DistributionInvoicesPage() {
     setAddPayment(false);
     setPaymentMethod('cash');
     setPaymentAmount('');
+    setOutstandingPaymentAmount('');
     setLastBillAmount('');
     setPaymentDate(new Date().toISOString().split( 'T')[0]);
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
@@ -1690,6 +1721,25 @@ export default function DistributionInvoicesPage() {
     }
   }, [showModal, addPayment, paymentMethod, customerId, invoices, editingInvoiceId]);
 
+  const outstandingInvoiceCandidate = useMemo(() => {
+    if (!showModal || !addPayment || paymentMethod === 'bill_to_bill') return null;
+    const selectedCustomerId = Number(customerId || 0);
+    if (!selectedCustomerId) return null;
+    return getLastUnpaidInvoiceForCustomer(selectedCustomerId, editingInvoiceId);
+  }, [showModal, addPayment, paymentMethod, customerId, invoices, editingInvoiceId]);
+
+  const outstandingInvoiceDue = useMemo(
+    () => (outstandingInvoiceCandidate ? getInvoiceDueBalance(outstandingInvoiceCandidate) : 0),
+    [outstandingInvoiceCandidate]
+  );
+
+  useEffect(() => {
+    if (paymentMethod === 'bill_to_bill') return;
+    if (!outstandingInvoiceCandidate || outstandingInvoiceDue <= 0) {
+      setOutstandingPaymentAmount('');
+    }
+  }, [paymentMethod, outstandingInvoiceCandidate, outstandingInvoiceDue]);
+
   useEffect(() => {
     if (!showModal) return;
     if (!customerId) return;
@@ -1755,10 +1805,16 @@ export default function DistributionInvoicesPage() {
     const effectiveLoadId = selectedLoadId ? Number(selectedLoadId) : null;
     const billToBillAmount = Number(lastBillAmount || 0);
     const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillAmount > 0;
+    const outstandingSettlementAmount = Number(outstandingPaymentAmount || 0);
+    const hasOutstandingSettlement = addPayment && paymentMethod !== 'bill_to_bill' && outstandingSettlementAmount > 0;
     const chequeEntries = [
       { amount: paymentAmount, chequeDate: paymentChequeDate, reference: paymentReference, bankName: paymentBankName },
       ...paymentCheques,
     ];
+    const normalPaymentAmount = paymentMethod === 'check'
+      ? chequeEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0)
+      : Number(paymentAmount || 0);
+    const hasNormalPayment = addPayment && paymentMethod !== 'bill_to_bill' && normalPaymentAmount > 0;
     if (!customerId || lines.length === 0) {
       setQtyWarningMessage('Select customer and add at least one item line.');
       setQtyWarningOpen(true);
@@ -1784,13 +1840,20 @@ export default function DistributionInvoicesPage() {
       const amounts = paymentMethod === 'check'
         ? chequeEntries.map((entry) => Number(entry.amount))
         : [Number(paymentAmount)];
-      if (amounts.some((amount) => !amount || amount <= 0)) {
+
+      if (!hasNormalPayment && !hasOutstandingSettlement) {
+        setQtyWarningMessage('Enter payment amount or outstanding payment amount.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
+      if (hasNormalPayment && amounts.some((amount) => !amount || amount <= 0)) {
         setQtyWarningMessage('Enter a valid payment amount.');
         setQtyWarningOpen(true);
         return;
       }
 
-      if (paymentMethod === 'check' && chequeEntries.some((entry) => !entry.chequeDate)) {
+      if (paymentMethod === 'check' && hasNormalPayment && chequeEntries.some((entry) => !entry.chequeDate)) {
         setQtyWarningMessage('Select cheque date for cheque payments.');
         setQtyWarningOpen(true);
         return;
@@ -1820,6 +1883,31 @@ export default function DistributionInvoicesPage() {
 
       if (billToBillAmount > due + 1e-9) {
         setQtyWarningMessage(`Last bill due is ${due.toFixed(2)}. Enter an amount up to due balance.`);
+        setQtyWarningOpen(true);
+        return;
+      }
+    }
+
+    const outstandingTargetInvoice = hasOutstandingSettlement
+      ? getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId)
+      : null;
+
+    if (hasOutstandingSettlement) {
+      if (!outstandingTargetInvoice) {
+        setQtyWarningMessage('No outstanding invoice found for this customer.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
+      const due = getInvoiceDueBalance(outstandingTargetInvoice);
+      if (due <= 0) {
+        setQtyWarningMessage('Selected customer has no outstanding due to settle.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
+      if (outstandingSettlementAmount > due + 1e-9) {
+        setQtyWarningMessage(`Outstanding due is ${due.toFixed(2)}. Enter an amount up to due balance.`);
         setQtyWarningOpen(true);
         return;
       }
@@ -1911,6 +1999,16 @@ export default function DistributionInvoicesPage() {
                 parts.push(`Reference: ${paymentReference.trim()}`);
               }
             }
+
+            const outstandingAmount = Number(outstandingPaymentAmount || 0);
+            const targetOutstandingInvoice = outstandingAmount > 0
+              ? getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId)
+              : null;
+
+            if (outstandingAmount > 0 && targetOutstandingInvoice) {
+              parts.push(`Outstanding payment: ${outstandingAmount.toFixed(2)}`);
+              parts.push(`Outstanding settled invoice: ${targetOutstandingInvoice.invoice_number || `#${targetOutstandingInvoice.id}`}`);
+            }
           }
         }
 
@@ -1989,20 +2087,22 @@ export default function DistributionInvoicesPage() {
           reference: paymentReference || null,
           bank_name: paymentBankName || null,
           target_invoice_id: Number(targetLastInvoice?.id || 0),
+          is_outstanding_settlement: true,
         };
       }
 
       return {
-        amount: Number(paymentAmount),
+        amount: normalPaymentAmount,
         method: paymentMethod,
         date: paymentDate || invoiceDate,
         cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
         reference: paymentReference || null,
         bank_name: paymentBankName || null,
         target_invoice_id: null,
+        is_outstanding_settlement: false,
       };
     })();
-    const paymentPayloads: PaymentEntry[] = addPayment && paymentMethod === 'check'
+    const paymentPayloads: PaymentEntry[] = addPayment && paymentMethod === 'check' && hasNormalPayment
       ? chequeEntries.map((entry) => ({
           amount: Number(entry.amount),
           method: 'check' as const,
@@ -2011,10 +2111,25 @@ export default function DistributionInvoicesPage() {
           reference: entry.reference || null,
           bank_name: entry.bankName || null,
           target_invoice_id: null,
+          is_outstanding_settlement: false,
         }))
-      : paymentPayload
+      : paymentPayload && hasNormalPayment
         ? [paymentPayload]
         : [];
+
+    if (hasOutstandingSettlement && outstandingTargetInvoice) {
+      const outstandingMethod: 'cash' | 'check' | 'bank_transfer' = paymentMethod;
+      paymentPayloads.push({
+        amount: outstandingSettlementAmount,
+        method: outstandingMethod,
+        date: paymentDate || invoiceDate,
+        cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
+        reference: paymentReference || null,
+        bank_name: paymentBankName || null,
+        target_invoice_id: Number(outstandingTargetInvoice.id || 0),
+        is_outstanding_settlement: true,
+      });
+    }
 
     const queueOfflineAndFinish = () => {
       const hasReturns = returnLines.length > 0;
@@ -2080,8 +2195,12 @@ export default function DistributionInvoicesPage() {
           unit_price: it.unit_price,
           discount: Number(it.discount || 0),
         })),
-        paid_amount: paymentPayloads.reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
-        payments: paymentPayloads.map((payment, index) => ({
+        paid_amount: paymentPayloads
+          .filter((payment) => !payment.target_invoice_id)
+          .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
+        payments: paymentPayloads
+          .filter((payment) => !payment.target_invoice_id)
+          .map((payment, index) => ({
           id: -(index + 1),
           payment_date: payment.date,
           cheque_date: payment.cheque_date,
@@ -2147,9 +2266,7 @@ export default function DistributionInvoicesPage() {
         try {
           const paymentRows = paymentPayloads.map((payment) => ({
             payment_number: generatePaymentNumber(),
-            distribution_invoice_id: payment.method === 'bill_to_bill'
-              ? Number(payment.target_invoice_id || 0)
-              : Number(savedInvoice.id),
+            distribution_invoice_id: Number(payment.target_invoice_id || savedInvoice.id || 0),
             load_id: savedInvoice.load_id ?? effectiveLoadId,
             customer_id: savedInvoice.customer_id ?? Number(customerId),
             payment_date: payment.date,
@@ -2159,7 +2276,9 @@ export default function DistributionInvoicesPage() {
             reference_no: payment.reference || null,
             bank_name: payment.bank_name || null,
             status: 'received',
-            notes: `Auto payment from invoice ${savedInvoice.invoice_number}`,
+            notes: payment.is_outstanding_settlement
+              ? `Outstanding settlement from invoice ${savedInvoice.invoice_number}`
+              : `Auto payment from invoice ${savedInvoice.invoice_number}`,
           }));
           if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for payment.');
           await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
@@ -2203,12 +2322,13 @@ export default function DistributionInvoicesPage() {
       await fetchData();
 
       if (!isEditing && savedInvoice) {
-        const paidAmount = Number(savedInvoice.paid_amount || 0) + savedPaymentEntries.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+        const currentInvoicePayments = savedPaymentEntries.filter((payment) => !payment.target_invoice_id);
+        const paidAmount = Number(savedInvoice.paid_amount || 0) + currentInvoicePayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
         const receiptInvoice: InvoiceRecord = {
           ...savedInvoice,
           paid_amount: paidAmount,
           status: paidAmount >= Number(savedInvoice.total || 0) ? 'paid' : paidAmount > 0 ? 'partial' : savedInvoice.status,
-          payments: savedPaymentEntries.map((payment, index) => ({
+          payments: currentInvoicePayments.map((payment, index) => ({
             id: -(index + 1),
             payment_date: payment.date,
             cheque_date: payment.cheque_date,
@@ -3920,6 +4040,7 @@ export default function DistributionInvoicesPage() {
                           if (checked) {
                             if (paymentMethod !== 'bill_to_bill') {
                               setPaymentAmount(invoiceFinalTotal.toFixed(2));
+                              setOutstandingPaymentAmount('');
                             }
                             setPaymentDate(invoiceDate);
                             setPaymentChequeDate(invoiceDate);
@@ -3945,6 +4066,7 @@ export default function DistributionInvoicesPage() {
                               setPaymentMethod(nextMethod);
                               if (nextMethod === 'bill_to_bill') {
                                 setPaymentAmount('');
+                                setOutstandingPaymentAmount('');
                               } else if (addPayment) {
                                 setPaymentAmount(invoiceFinalTotal.toFixed(2));
                               }
@@ -4031,6 +4153,24 @@ export default function DistributionInvoicesPage() {
                           />
                         </div>
                       </div>
+
+                      {paymentMethod !== 'bill_to_bill' && outstandingInvoiceCandidate && outstandingInvoiceDue > 0 && (
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Outstanding Payment (optional)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={outstandingPaymentAmount}
+                            onChange={(e) => setOutstandingPaymentAmount(e.target.value)}
+                            className="w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                            placeholder="0.00"
+                          />
+                          <p className="mt-1 text-[11px] text-emerald-700">
+                            {`Settles outstanding invoice ${outstandingInvoiceCandidate.invoice_number || `#${outstandingInvoiceCandidate.id}`} (due ${outstandingInvoiceDue.toFixed(2)}).`}
+                          </p>
+                        </div>
+                      )}
 
                       <div>
                         <label className="block text-xs font-medium text-gray-700 mb-1">Bank Name (optional)</label>

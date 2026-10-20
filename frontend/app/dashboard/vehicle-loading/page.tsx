@@ -402,17 +402,18 @@ export default function VehicleLoading() {
                       <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item Name</th>
                       <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                       <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Loaded Qty</th>
+                      <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Sold Qty</th>
                       <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Available Qty In Vehicle</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {modalLoading ? (
                       <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">Loading item list...</td>
+                        <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500">Loading item list...</td>
                       </tr>
                     ) : selectedLoadItems.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">No items available for this vehicle load.</td>
+                        <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500">No items available for this vehicle load.</td>
                       </tr>
                     ) : (
                       selectedLoadItems.map((item) => {
@@ -427,6 +428,7 @@ export default function VehicleLoading() {
                             <td className="px-4 py-2 text-sm text-gray-700">{item.name}</td>
                             <td className="px-4 py-2 text-sm text-gray-700">{item.type.replace('_', ' ')}</td>
                             <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{loadedQtyBefore.toFixed(2)}</td>
+                            <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{soldQty.toFixed(2)}</td>
                             <td className="px-4 py-2 text-sm text-gray-700 text-right font-medium">{availableQty.toFixed(2)}</td>
                           </tr>
                         );
