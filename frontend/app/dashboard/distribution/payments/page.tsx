@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
@@ -26,7 +26,7 @@ type PendingOfflinePaymentPayload = {
   notes: string;
 };
 
-export default function DistributionPaymentsPage() {
+function DistributionPaymentsPageContent() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [assignedRouteId, setAssignedRouteId] = useState('');
@@ -1255,5 +1255,13 @@ export default function DistributionPaymentsPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function DistributionPaymentsPage() {
+  return (
+    <Suspense fallback={<div className="p-4 text-sm text-gray-600">Loading payments...</div>}>
+      <DistributionPaymentsPageContent />
+    </Suspense>
   );
 }

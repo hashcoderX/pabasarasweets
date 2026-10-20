@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
+import { enforceHttpsForSecurePage, resolveApiOrigin } from '@/lib/apiOrigin';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -202,7 +203,7 @@ export default function DistributionSalesReportPage() {
   const [rowsPerPage, setRowsPerPage] = useState(25);
 
   const router = useRouter();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const API_URL = resolveApiOrigin();
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -233,7 +234,7 @@ export default function DistributionSalesReportPage() {
 
       const extracted: PaginatedExtractResult<T> = extractPaginatedRows<T>(responseData);
       rows.push(...extracted.rows);
-      nextUrl = extracted.nextPageUrl;
+      nextUrl = extracted.nextPageUrl ? enforceHttpsForSecurePage(extracted.nextPageUrl) : null;
       pageCount += 1;
     }
 

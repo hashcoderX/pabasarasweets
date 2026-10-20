@@ -1,17 +1,20 @@
 import axios, { AxiosInstance } from 'axios';
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ||
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  'http://127.0.0.1:8000';
+import { enforceHttpsForSecurePage, resolveApiOrigin } from './apiOrigin';
 
 export function createApiClient(token?: string): AxiosInstance {
   const instance = axios.create({
-    baseURL: `${API_BASE_URL}/api`,
+    baseURL: `${resolveApiOrigin()}/api`,
     timeout: 15000,
   });
 
   instance.interceptors.request.use((config) => {
+    if (typeof config.baseURL === 'string') {
+      config.baseURL = enforceHttpsForSecurePage(config.baseURL);
+    }
+    if (typeof config.url === 'string') {
+      config.url = enforceHttpsForSecurePage(config.url);
+    }
+
     if (token) {
       config.headers = config.headers ?? {};
       if (!config.headers['Authorization']) {
