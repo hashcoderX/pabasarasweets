@@ -28,6 +28,7 @@ export default function BackupRestoreSettingsPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [downloadingBackupMode, setDownloadingBackupMode] = useState<'full' | 'no-cache' | null>(null);
   const [settings, setSettings] = useState<BackupSettings>(defaultSettings);
 
   const router = useRouter();
@@ -130,6 +131,35 @@ export default function BackupRestoreSettingsPage() {
 
   const toggle = (key: 'auto_backup_enabled' | 'include_uploaded_files' | 'encryption_enabled' | 'cloud_sync_enabled') => {
     setSettings((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const downloadDatabaseBackup = async (excludeCache: boolean) => {
+    try {
+      setDownloadingBackupMode(excludeCache ? 'no-cache' : 'full');
+
+      const res = await axios.get('/api/database-backup/download', {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { exclude_cache: excludeCache ? 1 : 0 },
+        responseType: 'blob',
+      });
+
+      const headerFileName = String(res.headers?.['x-backup-filename'] || '').trim();
+      const fileName = headerFileName || `database_backup_${excludeCache ? 'no_cache_' : ''}${Date.now()}.sql`;
+      const blob = new Blob([res.data], { type: 'application/sql' });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error downloading database backup:', error);
+      alert('Failed to download database backup.');
+    } finally {
+      setDownloadingBackupMode(null);
+    }
   };
 
   const readinessScore = [
@@ -333,6 +363,30 @@ export default function BackupRestoreSettingsPage() {
               className="px-5 py-2.5 bg-white border border-gray-300 rounded-md text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
               Refresh
+            </button>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-5 md:p-6">
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">Database Download</h3>
+          <p className="text-sm text-gray-600 mb-4">Export SQL backups on demand. Use the no-cache option for lighter operational snapshots.</p>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => downloadDatabaseBackup(false)}
+              disabled={downloadingBackupMode !== null}
+              className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-blue-700 hover:to-indigo-700 shadow-lg shadow-blue-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+            >
+              {downloadingBackupMode === 'full' ? 'Downloading Full Backup...' : 'Download Full Database'}
+            </button>
+            <button
+              type="button"
+              onClick={() => downloadDatabaseBackup(true)}
+              disabled={downloadingBackupMode !== null}
+              className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 shadow-lg shadow-emerald-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+            >
+              {downloadingBackupMode === 'no-cache' ? 'Downloading No-Cache Backup...' : 'Download Database (No Cache Table)'}
             </button>
           </div>
         </section>

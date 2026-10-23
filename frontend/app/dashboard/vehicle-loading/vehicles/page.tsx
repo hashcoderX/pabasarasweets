@@ -18,8 +18,17 @@ interface Vehicle {
   current_location: string;
   notes: string;
 }
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 const PAGE_SIZE = 10;
+const vehicleLoadingVehiclesWidgetItems = [
+  { id: 'vehicle-loading-vehicles-hero-card', name: 'Vehicle Loading Vehicles Hero Card' },
+  { id: 'vehicle-loading-vehicles-filters-card', name: 'Vehicle Loading Vehicles Filters Card' },
+  { id: 'vehicle-loading-vehicles-table-card', name: 'Vehicle Loading Vehicles Table Card' },
+  { id: 'vehicle-loading-vehicles-summary-cards', name: 'Vehicle Loading Vehicles Summary Cards' },
+  { id: 'vehicle-loading-vehicles-form-modal-pane', name: 'Vehicle Loading Vehicles Form Modal Pane' },
+];
 
 export default function VehiclesPage() {
   const [token, setToken] = useState('');
@@ -30,6 +39,17 @@ export default function VehiclesPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [showModal, setShowModal] = useState(false);
   const [editingVehicle, setEditingVehicle] = useState<Vehicle | null>(null);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     registration_number: '',
     type: 'truck' as Vehicle['type'],
@@ -44,6 +64,8 @@ export default function VehiclesPage() {
     notes: ''
   });
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = vehicleLoadingVehiclesWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -57,8 +79,126 @@ export default function VehiclesPage() {
   useEffect(() => {
     if (token) {
       fetchVehicles();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = vehicleLoadingVehiclesWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = vehicleLoadingVehiclesWidgetItems[0]?.id || 'vehicle-loading-vehicles-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const fetchVehicles = async () => {
     try {
@@ -247,7 +387,21 @@ export default function VehiclesPage() {
     <div className="relative space-y-6">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]" />
 
-      <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
+      <section className="sticky top-3 z-40 rounded-xl border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-white/80">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+          </div>
+        </div>
+      </section>
+
+      {isWidgetVisible('vehicle-loading-vehicles-hero-card') && <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">Vehicles Management</h1>
@@ -264,9 +418,10 @@ export default function VehiclesPage() {
             Add New Vehicle
           </button>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-vehicles-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-vehicles-filters-card') && <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_220px]">
           <div>
             <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Search Vehicles</label>
@@ -292,9 +447,10 @@ export default function VehiclesPage() {
             </select>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-vehicles-filters-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-vehicles-table-card') && <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 px-5 py-4">
           <h2 className="text-lg font-semibold text-slate-900">Vehicles List</h2>
           <div className="text-sm text-slate-600">Showing {rowStart} to {rowEnd} of {filteredVehicles.length}</div>
@@ -446,9 +602,10 @@ export default function VehiclesPage() {
             </button>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="px-5 pb-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-vehicles-table-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {isWidgetVisible('vehicle-loading-vehicles-summary-cards') && <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-white/70 bg-white/90 p-5 shadow-sm">
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Active Vehicles</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{activeCount}</p>
@@ -468,10 +625,11 @@ export default function VehiclesPage() {
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Total Capacity</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{totalCapacity.toLocaleString()} kg</p>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="md:col-span-2 xl:col-span-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-vehicles-summary-cards', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
       {/* Modal */}
-      {showModal && (
+      {isWidgetVisible('vehicle-loading-vehicles-form-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
           <div className="mx-auto w-full max-w-5xl">
             <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_30px_120px_-50px_rgba(16,185,129,0.55)] backdrop-blur-xl">
@@ -672,6 +830,7 @@ export default function VehiclesPage() {
           </div>
         </div>
       )}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{vehicleLoadingVehiclesWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

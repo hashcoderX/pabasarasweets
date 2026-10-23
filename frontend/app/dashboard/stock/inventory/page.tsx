@@ -58,6 +58,37 @@ interface InventoryItem {
   updated_at: string;
 }
 
+interface SupplierOption {
+  id: number;
+  name: string;
+}
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const stockInventoryWidgetItems = [
+  { id: 'stock-inventory-hero-card', name: 'Stock Inventory Hero Card' },
+  { id: 'stock-inventory-add-button', name: 'Stock Inventory Add Button' },
+  { id: 'stock-inventory-tabs-card', name: 'Stock Inventory Tabs Card' },
+  { id: 'stock-inventory-tab-raw-button', name: 'Stock Inventory Raw Tab Button' },
+  { id: 'stock-inventory-tab-finished-button', name: 'Stock Inventory Finished Tab Button' },
+  { id: 'stock-inventory-filter-reset-button', name: 'Stock Inventory Filter Reset Button' },
+  { id: 'stock-inventory-empty-add-button', name: 'Stock Inventory Empty Add Button' },
+  { id: 'stock-inventory-pagination-previous-button', name: 'Stock Inventory Pagination Previous Button' },
+  { id: 'stock-inventory-pagination-next-button', name: 'Stock Inventory Pagination Next Button' },
+  { id: 'stock-inventory-row-edit-button', name: 'Stock Inventory Row Edit Button' },
+  { id: 'stock-inventory-row-delete-button', name: 'Stock Inventory Row Delete Button' },
+  { id: 'stock-inventory-table-headings', name: 'Stock Inventory Table Headings' },
+  { id: 'stock-inventory-column-item', name: 'Stock Inventory Item Column' },
+  { id: 'stock-inventory-column-stock', name: 'Stock Inventory Stock Column' },
+  { id: 'stock-inventory-column-batch', name: 'Stock Inventory Batch Column' },
+  { id: 'stock-inventory-column-price', name: 'Stock Inventory Price Column' },
+  { id: 'stock-inventory-column-status', name: 'Stock Inventory Status Column' },
+  { id: 'stock-inventory-column-actions', name: 'Stock Inventory Actions Column' },
+  { id: 'stock-inventory-item-details-modal-pane', name: 'Stock Inventory Item Details Modal Pane' },
+  { id: 'stock-inventory-form-modal-pane', name: 'Stock Inventory Form Modal Pane' },
+];
+
 export default function Inventory() {
   const [token, setToken] = useState('');
   const [activeTab, setActiveTab] = useState<'raw_material' | 'finished_good'>('raw_material');
@@ -65,7 +96,7 @@ export default function Inventory() {
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
-  const [suppliers, setSuppliers] = useState<any[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierOption[]>([]);
   const [formData, setFormData] = useState({
     name: '',
     code: '',
@@ -93,9 +124,24 @@ export default function Inventory() {
   const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_stock'>('all');
   const [recordStatusFilter, setRecordStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [rawQualityFilter, setRawQualityFilter] = useState<'all' | 'pending' | 'accepted' | 'rejected' | 'partial'>('all');
+  const [tablePage, setTablePage] = useState(1);
+  const [tablePageSize, setTablePageSize] = useState(10);
   const [dbCategorySuggestions, setDbCategorySuggestions] = useState<string[]>([]);
   const [savingCategory, setSavingCategory] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = stockInventoryWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   const toSafeNumber = (value: unknown): number => {
     const parsed = Number(value);
@@ -139,6 +185,7 @@ export default function Inventory() {
       fetchSuppliers();
       fetchItems();
       fetchCategorySuggestions();
+      fetchWidgetVisibility(token);
     }
   }, [token, activeTab]);
 
@@ -147,6 +194,7 @@ export default function Inventory() {
     setStockFilter('all');
     setRecordStatusFilter('all');
     setRawQualityFilter('all');
+    setTablePage(1);
   }, [activeTab]);
 
   const fetchSuppliers = async () => {
@@ -174,7 +222,7 @@ export default function Inventory() {
 
       if (response.data.success) {
         const itemsData = response.data.data.data || [];
-        const formattedItems = itemsData.map((item: any) => ({
+        const formattedItems = itemsData.map((item: Record<string, unknown>) => ({
           ...item,
           current_stock: toSafeNumber(item.current_stock),
           minimum_stock: toSafeNumber(item.minimum_stock),
@@ -320,12 +368,131 @@ export default function Inventory() {
         return [...prev, savedName];
       });
       alert('Category saved successfully.');
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error saving category:', error);
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      alert(firstError?.[0] || error?.response?.data?.message || error?.message || 'Failed to save category.');
+      const apiError = error as { response?: { data?: { errors?: Record<string, string[]>; message?: string } }; message?: string };
+      const firstError = Object.values(apiError.response?.data?.errors || {})?.[0] as string[] | undefined;
+      alert(firstError?.[0] || apiError.response?.data?.message || apiError.message || 'Failed to save category.');
     } finally {
       setSavingCategory(false);
+    }
+  };
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = stockInventoryWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = stockInventoryWidgetItems[0]?.id || 'stock-inventory-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
     }
   };
 
@@ -390,9 +557,10 @@ export default function Inventory() {
       setShowModal(false);
       setEditingItem(null);
       resetForm();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error saving item:', error);
-      alert(error.response?.data?.message || error.message || 'Failed to save item');
+      const apiError = error as { response?: { data?: { message?: string } }; message?: string };
+      alert(apiError.response?.data?.message || apiError.message || 'Failed to save item');
     } finally {
       setSaving(false);
     }
@@ -438,9 +606,10 @@ export default function Inventory() {
       } else {
         throw new Error(response.data.message || 'Failed to delete item');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error deleting item:', error);
-      alert(error.response?.data?.message || error.message || 'Failed to delete item');
+      const apiError = error as { response?: { data?: { message?: string } }; message?: string };
+      alert(apiError.response?.data?.message || apiError.message || 'Failed to delete item');
     }
   };
 
@@ -515,7 +684,7 @@ export default function Inventory() {
     return { status: 'In Stock', color: 'bg-green-100 text-green-800' };
   };
 
-  const resolveAdditionalInfo = (item: InventoryItem): Record<string, any> => {
+  const resolveAdditionalInfo = (item: InventoryItem): Record<string, unknown> => {
     const info = item.additional_info;
     if (!info) return {};
 
@@ -527,7 +696,7 @@ export default function Inventory() {
       }
     }
 
-    return info as Record<string, any>;
+    return info as Record<string, unknown>;
   };
 
   const modalLabelClass = 'block text-xs font-semibold uppercase tracking-wide text-gray-600';
@@ -574,9 +743,27 @@ export default function Inventory() {
       return true;
     });
   }, [visibleItems, itemFilterQuery, recordStatusFilter, stockFilter, activeTab, rawQualityFilter]);
+  const totalTablePages = Math.max(1, Math.ceil(filteredVisibleItems.length / tablePageSize));
+  const safeTablePage = Math.min(tablePage, totalTablePages);
+  const tableStartIndex = (safeTablePage - 1) * tablePageSize;
+  const tableEndIndex = Math.min(tableStartIndex + tablePageSize, filteredVisibleItems.length);
+  const paginatedVisibleItems = useMemo(
+    () => filteredVisibleItems.slice(tableStartIndex, tableEndIndex),
+    [filteredVisibleItems, tableStartIndex, tableEndIndex]
+  );
   const totalStockValue = items.reduce((sum, item) => sum + (item.current_stock * resolveItemPrice(item)), 0);
   const lowStockItems = uniqueStockItems.filter(item => item.current_stock <= item.minimum_stock).length;
   const inStockItems = uniqueStockItems.filter(item => item.current_stock > item.minimum_stock).length;
+
+  useEffect(() => {
+    setTablePage(1);
+  }, [itemFilterQuery, stockFilter, recordStatusFilter, rawQualityFilter]);
+
+  useEffect(() => {
+    if (tablePage > totalTablePages) {
+      setTablePage(totalTablePages);
+    }
+  }, [tablePage, totalTablePages]);
 
   if (!token) {
     return (
@@ -588,8 +775,22 @@ export default function Inventory() {
 
   return (
     <div className="min-h-screen space-y-6 bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.14),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)] p-4 sm:p-6 lg:p-8">
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+          </div>
+        </div>
+      </section>
+
       {/* Header */}
-      <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/75 shadow-[0_26px_90px_-45px_rgba(194,65,12,0.5)] backdrop-blur-xl">
+      {isWidgetVisible('stock-inventory-hero-card') && <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/75 shadow-[0_26px_90px_-45px_rgba(194,65,12,0.5)] backdrop-blur-xl">
         <div className="grid gap-8 px-5 py-6 sm:px-6 lg:grid-cols-[1.3fr_1fr] lg:px-8">
           <div className="space-y-4">
             <div className="inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-50 px-4 py-1.5 text-sm font-semibold text-orange-700">
@@ -604,7 +805,7 @@ export default function Inventory() {
                 Manage raw materials and finished goods with richer visibility, cleaner records, and faster item-level decisions.
               </p>
             </div>
-            <button
+            {isWidgetVisible('stock-inventory-add-button') && <button
               onClick={openAddModal}
               className="inline-flex items-center rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-orange-300/50 transition hover:scale-[1.02] hover:from-orange-600 hover:to-yellow-500"
             >
@@ -612,7 +813,8 @@ export default function Inventory() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
               Add Item
-            </button>
+            </button>}
+            {!widgetControlsLocked && isWidgetVisible('stock-inventory-add-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-add-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
@@ -633,32 +835,39 @@ export default function Inventory() {
             </div>
           </div>
         </div>
-      </div>
+        {!widgetControlsLocked && <div className="px-5 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </div>}
 
       {/* Store Tabs */}
-      <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
+      {isWidgetVisible('stock-inventory-tabs-card') && <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
         <div className="border-b border-orange-100 bg-gradient-to-r from-white via-orange-50/70 to-amber-50/70">
           <nav className="-mb-px flex space-x-8 px-6" aria-label="Tabs">
-            <button
-              onClick={() => setActiveTab('raw_material')}
-              className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'raw_material'
-                  ? 'border-orange-500 text-orange-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-orange-200'
-              }`}
-            >
-              Raw Material Store
-            </button>
-            <button
-              onClick={() => setActiveTab('finished_good')}
-              className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'finished_good'
-                  ? 'border-orange-500 text-orange-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-orange-200'
-              }`}
-            >
-              Finished Goods Store
-            </button>
+            {isWidgetVisible('stock-inventory-tab-raw-button') && <>
+              <button
+                onClick={() => setActiveTab('raw_material')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'raw_material'
+                    ? 'border-orange-500 text-orange-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-orange-200'
+                }`}
+              >
+                Raw Material Store
+              </button>
+              {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-tab-raw-button', false)} className="my-3 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+            </>}
+            {isWidgetVisible('stock-inventory-tab-finished-button') && <>
+              <button
+                onClick={() => setActiveTab('finished_good')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'finished_good'
+                    ? 'border-orange-500 text-orange-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-orange-200'
+                }`}
+              >
+                Finished Goods Store
+              </button>
+              {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-tab-finished-button', false)} className="my-3 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+            </>}
           </nav>
         </div>
 
@@ -761,7 +970,7 @@ export default function Inventory() {
           <div className="mb-4 rounded-2xl border border-orange-100 bg-white p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-xs font-semibold uppercase tracking-[0.15em] text-orange-600">Filter Items</p>
-              <button
+              {isWidgetVisible('stock-inventory-filter-reset-button') && <button
                 type="button"
                 onClick={() => {
                   setItemFilterQuery('');
@@ -772,7 +981,8 @@ export default function Inventory() {
                 className="text-xs font-semibold text-slate-600 underline hover:text-slate-800"
               >
                 Reset Filters
-              </button>
+              </button>}
+              {!widgetControlsLocked && isWidgetVisible('stock-inventory-filter-reset-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-filter-reset-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
             <div className={`grid grid-cols-1 gap-3 ${activeTab === 'raw_material' ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
               <div>
@@ -831,7 +1041,7 @@ export default function Inventory() {
               )}
             </div>
             <p className="mt-3 text-xs text-slate-500">
-              Showing {filteredVisibleItems.length} of {visibleItems.length} item(s)
+              Showing {filteredVisibleItems.length === 0 ? 0 : tableStartIndex + 1} to {tableEndIndex} of {filteredVisibleItems.length} filtered item(s) • {visibleItems.length} total visible item(s)
             </p>
           </div>
 
@@ -843,12 +1053,13 @@ export default function Inventory() {
           ) : filteredVisibleItems.length === 0 ? (
             <div className="text-center py-8">
               <div className="text-gray-400 text-sm">No items found in this store</div>
-              <button
+              {isWidgetVisible('stock-inventory-empty-add-button') && <button
                 onClick={openAddModal}
                 className="mt-4 bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200"
               >
                 Add First Item
-              </button>
+              </button>}
+              {!widgetControlsLocked && isWidgetVisible('stock-inventory-empty-add-button') && <div className="mt-2"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-empty-add-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
             </div>
           ) : (
             <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_16px_55px_-35px_rgba(194,65,12,0.45)]">
@@ -859,38 +1070,65 @@ export default function Inventory() {
               </div>
               <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200">
-                <thead className="bg-slate-100/80">
+                {isWidgetVisible('stock-inventory-table-headings') && <thead className="bg-slate-100/80">
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Item
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      {activeTab === 'raw_material' ? 'Batch Qty' : 'Stock Info'}
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Batch
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Price
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
-                      Actions
-                    </th>
+                    {isWidgetVisible('stock-inventory-column-item') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>Item</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-item', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                      </div>
+                    </th>}
+                    {isWidgetVisible('stock-inventory-column-stock') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>{activeTab === 'raw_material' ? 'Batch Qty' : 'Stock Info'}</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-stock', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                      </div>
+                    </th>}
+                    {isWidgetVisible('stock-inventory-column-batch') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>Batch</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-batch', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                      </div>
+                    </th>}
+                    {isWidgetVisible('stock-inventory-column-price') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>Price</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-price', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                      </div>
+                    </th>}
+                    {isWidgetVisible('stock-inventory-column-status') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>Status</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-status', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                      </div>
+                    </th>}
+                    {isWidgetVisible('stock-inventory-column-actions') && <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
+                      <div className="flex items-center gap-2">
+                        <span>Actions</span>
+                        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-column-actions', false)} className="rounded border border-slate-300 bg-white px-1 py-0 text-[10px] font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                        {!widgetControlsLocked && isWidgetVisible('stock-inventory-row-edit-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-row-edit-button', false)} className="rounded border border-indigo-300 bg-white px-1 py-0 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-50">✕</button>}
+                        {!widgetControlsLocked && isWidgetVisible('stock-inventory-row-delete-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-row-delete-button', false)} className="rounded border border-red-300 bg-white px-1 py-0 text-[10px] font-semibold text-red-700 hover:bg-red-50">✕</button>}
+                      </div>
+                    </th>}
                   </tr>
-                </thead>
+                </thead>}
                 <tbody className="bg-white divide-y divide-slate-200">
-                  {filteredVisibleItems.map((item) => {
+                  {paginatedVisibleItems.map((item) => {
                     const stockStatus = getStockStatus(item);
                     const resolvedPrice = resolveItemPrice(item);
                     const info = resolveAdditionalInfo(item);
-                    const batchNo = item.batch_no || info.last_batch_no || info.lastBatchNo || '';
-                    const labelCode = info.last_label_code || info.lastLabelCode || '';
-                    const storeTag = info.store_tag || info.storeTag || '';
-                    const stockSource = info.stock_source || info.stockSource || '';
-                    const packagingBatchId = info.last_packaging_batch_id || info.lastPackagingBatchId;
+                    const batchNoRaw = info.last_batch_no ?? info.lastBatchNo;
+                    const batchNo = typeof batchNoRaw === 'string' ? batchNoRaw : item.batch_no || '';
+                    const labelCodeRaw = info.last_label_code ?? info.lastLabelCode;
+                    const labelCode = typeof labelCodeRaw === 'string' ? labelCodeRaw : '';
+                    const storeTagRaw = info.store_tag ?? info.storeTag;
+                    const storeTag = typeof storeTagRaw === 'string' ? storeTagRaw : '';
+                    const stockSourceRaw = info.stock_source ?? info.stockSource;
+                    const stockSource = typeof stockSourceRaw === 'string' ? stockSourceRaw : '';
+                    const packagingBatchIdRaw = info.last_packaging_batch_id ?? info.lastPackagingBatchId;
+                    const packagingBatchId = typeof packagingBatchIdRaw === 'number' || typeof packagingBatchIdRaw === 'string'
+                      ? packagingBatchIdRaw
+                      : null;
                     const baseItemId = item.inventory_item_id || item.id;
                     const displayPrice = activeTab === 'raw_material'
                       ? toSafeNumber(item.batch_purchase_price ?? item.purchase_price ?? item.unit_price)
@@ -901,7 +1139,7 @@ export default function Inventory() {
                         onClick={() => openItemDetails(item)}
                         className="cursor-pointer transition hover:bg-orange-50/45"
                       >
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        {isWidgetVisible('stock-inventory-column-item') && <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center">
                             <div className="flex-shrink-0 h-10 w-10">
                               <div className="h-10 w-10 rounded-full bg-orange-100 flex items-center justify-center">
@@ -919,8 +1157,8 @@ export default function Inventory() {
                               </div>
                             </div>
                           </div>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        </td>}
+                        {isWidgetVisible('stock-inventory-column-stock') && <td className="px-6 py-4 whitespace-nowrap">
                           {activeTab === 'raw_material' ? (
                             <>
                               <div className="text-sm font-semibold text-gray-900">
@@ -948,8 +1186,8 @@ export default function Inventory() {
                               {item.location}
                             </div>
                           )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        </td>}
+                        {isWidgetVisible('stock-inventory-column-batch') && <td className="px-6 py-4 whitespace-nowrap">
                           <div className="text-sm text-gray-900">
                             {batchNo || labelCode || (packagingBatchId ? `Batch #${packagingBatchId}` : '-')}
                           </div>
@@ -988,17 +1226,17 @@ export default function Inventory() {
                           {activeTab === 'finished_good' && !labelCode && !packagingBatchId && (
                             <div className="text-xs text-amber-600 mt-1">Not synced from packaging yet</div>
                           )}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-800">
+                        </td>}
+                        {isWidgetVisible('stock-inventory-column-price') && <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-slate-800">
                           LKR {displayPrice.toFixed(2)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        </td>}
+                        {isWidgetVisible('stock-inventory-column-status') && <td className="px-6 py-4 whitespace-nowrap">
                           <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${stockStatus.color}`}>
                             {stockStatus.status}
                           </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                          <button
+                        </td>}
+                        {isWidgetVisible('stock-inventory-column-actions') && <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                          {isWidgetVisible('stock-inventory-row-edit-button') && <button
                             onClick={(e) => {
                               e.stopPropagation();
                               handleEdit({ ...item, id: baseItemId });
@@ -1006,8 +1244,8 @@ export default function Inventory() {
                             className="mr-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
                           >
                             Edit
-                          </button>
-                          <button
+                          </button>}
+                          {isWidgetVisible('stock-inventory-row-delete-button') && <button
                             onClick={(e) => {
                               e.stopPropagation();
                               setDeleteConfirm(baseItemId);
@@ -1015,21 +1253,61 @@ export default function Inventory() {
                             className="rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100"
                           >
                             Delete
-                          </button>
-                        </td>
+                          </button>}
+                        </td>}
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+            <div className="flex flex-col gap-3 border-t border-orange-100 bg-orange-50/40 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Rows</label>
+                <select
+                  value={tablePageSize}
+                  onChange={(e) => {
+                    setTablePageSize(Number(e.target.value));
+                    setTablePage(1);
+                  }}
+                  className="rounded-lg border border-orange-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                {isWidgetVisible('stock-inventory-pagination-previous-button') && <button
+                  onClick={() => setTablePage((prev) => Math.max(1, prev - 1))}
+                  disabled={safeTablePage <= 1}
+                  className="rounded-full border border-orange-200 bg-white px-3.5 py-1.5 text-sm font-semibold text-orange-700 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>}
+                {!widgetControlsLocked && isWidgetVisible('stock-inventory-pagination-previous-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-pagination-previous-button', false)} className="rounded border border-slate-300 bg-white px-1.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+                <span className="text-sm font-semibold text-slate-700">
+                  Page {safeTablePage} of {totalTablePages}
+                </span>
+                {isWidgetVisible('stock-inventory-pagination-next-button') && <button
+                  onClick={() => setTablePage((prev) => Math.min(totalTablePages, prev + 1))}
+                  disabled={safeTablePage >= totalTablePages}
+                  className="rounded-full border border-orange-200 bg-white px-3.5 py-1.5 text-sm font-semibold text-orange-700 transition hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>}
+                {!widgetControlsLocked && isWidgetVisible('stock-inventory-pagination-next-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-pagination-next-button', false)} className="rounded border border-slate-300 bg-white px-1.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+              </div>
+            </div>
             </div>
           )}
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-tabs-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
         </div>
-      </div>
+      </div>}
 
       {/* Item Details Modal */}
-      {showItemDetailsModal && selectedItemDetails && (
+      {isWidgetVisible('stock-inventory-item-details-modal-pane') && showItemDetailsModal && selectedItemDetails && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-md">
           <div className="relative w-full max-w-5xl overflow-hidden rounded-[30px] border border-white/20 bg-white shadow-[0_34px_120px_-40px_rgba(194,65,12,0.58)]">
             <div className="absolute inset-x-0 top-0 h-40 bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.36),_transparent_45%),linear-gradient(125deg,_rgba(154,52,18,0.95)_0%,_rgba(234,88,12,0.94)_45%,_rgba(249,115,22,0.9)_100%)]"></div>
@@ -1118,7 +1396,7 @@ export default function Inventory() {
       )}
 
       {/* Add/Edit Modal */}
-      {showModal && (
+      {isWidgetVisible('stock-inventory-form-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-md">
           <div className="relative w-full max-w-5xl overflow-hidden rounded-[30px] border border-white/20 bg-white shadow-[0_34px_120px_-40px_rgba(234,88,12,0.55)]">
             <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(circle_at_top_left,_rgba(251,191,36,0.36),_transparent_45%),linear-gradient(125deg,_rgba(194,65,12,0.95)_0%,_rgba(234,88,12,0.94)_45%,_rgba(249,115,22,0.9)_100%)]"></div>
@@ -1427,6 +1705,8 @@ export default function Inventory() {
           </div>
         </div>
       )}
+
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{stockInventoryWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

@@ -35,12 +35,20 @@ type DashboardAccessCache = {
   isAdminUser: boolean;
   isSalesRefUser: boolean;
   widgetVisibility: Record<string, boolean>;
+  widgetControlsLocked: boolean;
 };
 
 type SalesTargetCache = {
   savedAt: number;
   rows: SalesTargetPreview[];
 };
+
+type WidgetVisibilityChange = {
+  widget_key: string;
+  is_visible: boolean;
+};
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
 
 export default function Dashboard() {
   const [token, setToken] = useState('');
@@ -49,13 +57,16 @@ export default function Dashboard() {
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [accessReady, setAccessReady] = useState(false);
-  const [showWidgetPermissionModal, setShowWidgetPermissionModal] = useState(false);
-  const [widgetUsers, setWidgetUsers] = useState<any[]>([]);
-  const [selectedWidgetUserId, setSelectedWidgetUserId] = useState('');
-  const [widgetPermissionForm, setWidgetPermissionForm] = useState<Record<string, boolean>>({});
-  const [widgetPermissionLoading, setWidgetPermissionLoading] = useState(false);
-  const [widgetPermissionSaving, setWidgetPermissionSaving] = useState(false);
-  const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [salesTargets, setSalesTargets] = useState<SalesTargetPreview[]>([]);
   const [targetsLoading, setTargetsLoading] = useState(false);
@@ -99,6 +110,7 @@ export default function Dashboard() {
         setIsAdminUser(Boolean(cached.isAdminUser));
         setIsSalesRefUser(Boolean(cached.isSalesRefUser));
         setWidgetVisibility(cached.widgetVisibility || {});
+        setWidgetControlsLocked(Boolean(cached.widgetControlsLocked));
         return true;
       } catch {
         return false;
@@ -159,7 +171,9 @@ export default function Dashboard() {
             headers: { Authorization: `Bearer ${token}` },
           });
           const widgetMap = widgetRes.data?.data?.widgets || {};
+          const controlsLocked = Boolean(widgetRes.data?.data?.widget_controls_locked);
           setWidgetVisibility(widgetMap);
+          setWidgetControlsLocked(controlsLocked);
           localStorage.setItem(
             getAccessCacheKey(token),
             JSON.stringify({
@@ -169,11 +183,13 @@ export default function Dashboard() {
               isAdminUser: adminUser,
               isSalesRefUser: salesRefUser,
               widgetVisibility: widgetMap,
+              widgetControlsLocked: controlsLocked,
             } satisfies DashboardAccessCache),
           );
         } catch (widgetError) {
           console.error('Error fetching widget visibility:', widgetError);
           setWidgetVisibility({});
+          setWidgetControlsLocked(false);
           localStorage.setItem(
             getAccessCacheKey(token),
             JSON.stringify({
@@ -183,6 +199,7 @@ export default function Dashboard() {
               isAdminUser: adminUser,
               isSalesRefUser: salesRefUser,
               widgetVisibility: {},
+              widgetControlsLocked: false,
             } satisfies DashboardAccessCache),
           );
         }
@@ -451,6 +468,17 @@ export default function Dashboard() {
   ];
 
   const allWidgetCards = [...modules, ...adminSettingCards];
+  const dashboardSectionWidgets = [
+    { id: 'sales-target-preview', name: 'Sales Target Preview' },
+    { id: 'sales-target-actions', name: 'Sales Target Actions' },
+    { id: 'sales-target-amount-card', name: 'Sales Target Amount Progress' },
+    { id: 'sales-target-quantity-card', name: 'Sales Target Quantity Progress' },
+    { id: 'sales-target-vs-achieved-card', name: 'Sales Target vs Achieved' },
+    { id: 'settings-configuration', name: 'Settings & System Configuration' },
+    { id: 'settings-configuration-note', name: 'Settings Configuration Help Note' },
+  ];
+  const allWidgetItems = [...allWidgetCards, ...dashboardSectionWidgets];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
 
   const visibleModules = modules.filter((module) => {
     if (module.adminOnly) return isAdminUser;
@@ -466,118 +494,120 @@ export default function Dashboard() {
   });
 
   const visibleAdminSettingCards = adminSettingCards.filter((card) => widgetVisibility[card.id] !== false);
+  const isSalesTargetWidgetVisible = isWidgetVisible('sales-target-preview');
+  const isSalesTargetActionsVisible = isWidgetVisible('sales-target-actions');
+  const isSalesTargetAmountCardVisible = isWidgetVisible('sales-target-amount-card');
+  const isSalesTargetQuantityCardVisible = isWidgetVisible('sales-target-quantity-card');
+  const isSalesTargetVsAchievedCardVisible = isWidgetVisible('sales-target-vs-achieved-card');
+  const isSettingsConfigurationVisible = isWidgetVisible('settings-configuration');
+  const isSettingsConfigurationNoteVisible = isWidgetVisible('settings-configuration-note');
 
-  const fetchWidgetUsers = async () => {
-    const usersRes = await apiClient.get('/dashboard/widgets/users', {
-      headers: { Authorization: `Bearer ${token}` },
+  const openSuperAdminConfirmation = (
+    changes: WidgetVisibilityChange[] = [],
+    mode: SuperAdminModalMode = 'apply'
+  ) => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setPendingWidgetChanges(changes);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const queueWidgetVisibilityChange = (change: WidgetVisibilityChange) => {
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== change.widget_key);
+      return [...remaining, change];
     });
+  };
 
-    const users = Array.isArray(usersRes.data?.data) ? usersRes.data.data : [];
-    setWidgetUsers(users);
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) {
+      setWidgetVisibility(widgetVisibilitySnapshot);
+    }
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
 
-    if (users.length > 0) {
-      const firstUserId = String(users[0].id);
-      setSelectedWidgetUserId(firstUserId);
-      await fetchWidgetPermissionsForUser(firstUserId);
+  const lockWidgetControls = () => {
+    setWidgetControlsLocked(true);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setSuperAdminModalMode('apply');
+    try {
+      if (!token) return;
+      const raw = localStorage.getItem(getAccessCacheKey(token));
+      const cached = raw ? (JSON.parse(raw) as DashboardAccessCache) : null;
+      if (cached) {
+        localStorage.setItem(
+          getAccessCacheKey(token),
+          JSON.stringify({
+            ...cached,
+            widgetControlsLocked: true,
+          } satisfies DashboardAccessCache),
+        );
+      }
+    } catch (cacheError) {
+      console.error('Error caching widget control lock state:', cacheError);
     }
   };
 
-  const fetchWidgetPermissionsForUser = async (userId: string) => {
-    if (!userId) return;
-    const permissionRes = await apiClient.get(`/dashboard/widgets/users/${userId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const widgets = permissionRes.data?.data?.widgets || {};
-    setWidgetPermissionForm(widgets);
-  };
-
-  const openWidgetPermissionManager = async () => {
-    if (!isAdminUser) return;
+  const unlockWidgetControlsInState = () => {
+    setWidgetControlsLocked(false);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
     try {
-      setWidgetPermissionLoading(true);
-      setShowWidgetPermissionModal(true);
-      await fetchWidgetUsers();
-    } catch (error) {
-      console.error('Error loading widget permission manager:', error);
-      alert('Failed to load widget permission manager.');
-      setShowWidgetPermissionModal(false);
-    } finally {
-      setWidgetPermissionLoading(false);
+      if (!token) return;
+      const raw = localStorage.getItem(getAccessCacheKey(token));
+      const cached = raw ? (JSON.parse(raw) as DashboardAccessCache) : null;
+      if (cached) {
+        localStorage.setItem(
+          getAccessCacheKey(token),
+          JSON.stringify({
+            ...cached,
+            widgetControlsLocked: false,
+          } satisfies DashboardAccessCache),
+        );
+      }
+    } catch (cacheError) {
+      console.error('Error caching widget control unlock state:', cacheError);
     }
   };
 
-  const handleWidgetUserChange = async (userId: string) => {
-    setSelectedWidgetUserId(userId);
-    if (!userId) return;
-    try {
-      setWidgetPermissionLoading(true);
-      await fetchWidgetPermissionsForUser(userId);
-    } catch (error) {
-      console.error('Error loading user widget permissions:', error);
-      alert('Failed to load selected user widget permissions.');
-    } finally {
-      setWidgetPermissionLoading(false);
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply') return;
+    if (!pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
     }
-  };
-
-  const saveWidgetPermissions = async () => {
-    if (!selectedWidgetUserId) return;
-    try {
-      setWidgetPermissionSaving(true);
-      await apiClient.put(
-        `/dashboard/widgets/users/${selectedWidgetUserId}`,
-        { widgets: widgetPermissionForm },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      alert('Widget permissions updated successfully.');
-    } catch (error) {
-      console.error('Error saving widget permissions:', error);
-      alert('Failed to save widget permissions.');
-    } finally {
-      setWidgetPermissionSaving(false);
-    }
-  };
-
-  const setMyWidgetVisibility = async (widgetKey: string, isVisible: boolean) => {
-    try {
-      setWidgetToggleLoadingKey(widgetKey);
-      await apiClient.put(
-        '/dashboard/widgets/me',
-        {
-          widget_key: widgetKey,
-          is_visible: isVisible,
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-
-      setWidgetVisibility((prev) => ({
-        ...prev,
-        [widgetKey]: isVisible,
-      }));
-    } catch (error) {
-      console.error('Error updating own widget visibility:', error);
-      alert('Failed to update widget visibility.');
-    } finally {
-      setWidgetToggleLoadingKey('');
-    }
-  };
-
-  const restoreAllHiddenWidgets = async () => {
-    const hiddenKeys = allWidgetCards
-      .map((card) => card.id)
-      .filter((cardId) => widgetVisibility[cardId] === false);
-
-    if (hiddenKeys.length === 0) return;
 
     try {
-      for (const key of hiddenKeys) {
+      setSuperAdminConfirmLoading(true);
+
+      for (const change of pendingWidgetChanges) {
         await apiClient.put(
           '/dashboard/widgets/me',
           {
-            widget_key: key,
-            is_visible: true,
+            widget_key: change.widget_key,
+            is_visible: change.is_visible,
+            super_admin_email: superAdminEmail.trim(),
+            super_admin_password: superAdminPassword,
+            lock_widget_controls: true,
           },
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -587,18 +617,157 @@ export default function Dashboard() {
 
       setWidgetVisibility((prev) => {
         const next = { ...prev };
-        hiddenKeys.forEach((key) => {
-          next[key] = true;
+        pendingWidgetChanges.forEach((change) => {
+          next[change.widget_key] = change.is_visible;
         });
         return next;
       });
+
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+      lockWidgetControls();
     } catch (error) {
-      console.error('Error restoring hidden widgets:', error);
-      alert('Failed to restore widgets.');
+      console.error('Error applying widget visibility changes:', error);
+      alert('Super Admin confirmation failed or widget update failed.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
     }
   };
 
-  const hiddenWidgetCount = allWidgetCards.filter((card) => widgetVisibility[card.id] === false).length;
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const unlockWidgetControls = async () => {
+    if (superAdminModalMode !== 'unlock') return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+
+    const fallbackWidgetKey = allWidgetItems[0]?.id ?? 'hrm';
+    const fallbackVisibility = widgetVisibility[fallbackWidgetKey] !== false;
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: false,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      unlockWidgetControlsInState();
+    } catch (error) {
+      console.error('Error unlocking widget controls:', error);
+      alert('Failed to unlock widget controls. Please verify Super Admin credentials and try again.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: true,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      setWidgetVisibility((prev) => ({
+        ...prev,
+        [widgetKey]: true,
+      }));
+      setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
+    } catch (error) {
+      console.error('Error restoring widget:', error);
+      alert('Failed to restore widget. Please verify Super Admin credentials and try again.');
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const setMyWidgetVisibility = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({
+      ...prev,
+      [widgetKey]: isVisible,
+    }));
+    queueWidgetVisibilityChange({ widget_key: widgetKey, is_visible: isVisible });
+  };
+
+  const restoreAllHiddenWidgets = () => {
+    if (widgetControlsLocked) return;
+    const hiddenKeys = allWidgetItems
+      .map((card) => card.id)
+      .filter((cardId) => widgetVisibility[cardId] === false);
+
+    if (hiddenKeys.length === 0) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => {
+      const next = { ...prev };
+      hiddenKeys.forEach((key) => {
+        next[key] = true;
+      });
+      return next;
+    });
+    hiddenKeys.forEach((key) => {
+      queueWidgetVisibilityChange({ widget_key: key, is_visible: true });
+    });
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = allWidgetItems
+      .map((card) => card.id)
+      .filter((cardId) => widgetVisibility[cardId] === false);
+
+    if (hiddenKeys.length === 0) {
+      alert('All widgets are already visible.');
+      return;
+    }
+
+    openSuperAdminConfirmation(
+      hiddenKeys.map((key) => ({
+        widget_key: key,
+        is_visible: true,
+      })),
+      'restore'
+    );
+  };
+
+  const openUnlockWidgetsAfterFix = () => {
+    openSuperAdminConfirmation([], 'unlock');
+  };
+
+  const hiddenWidgetCount = allWidgetItems.filter((card) => widgetVisibility[card.id] === false).length;
 
   const handleModuleClick = (module: DashboardModule) => {
     if (module.path) {
@@ -683,42 +852,116 @@ export default function Dashboard() {
               <span>Real-time Updates</span>
             </div>
           </div>
-          {hiddenWidgetCount > 0 && (
-            <button
-              type="button"
-              onClick={restoreAllHiddenWidgets}
-              className="mt-4 rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
-            >
-              Restore Hidden Widgets ({hiddenWidgetCount})
-            </button>
-          )}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {!widgetControlsLocked && hiddenWidgetCount > 0 && (
+              <button
+                type="button"
+                onClick={restoreAllHiddenWidgets}
+                className="rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+              >
+                Restore Hidden Widgets ({hiddenWidgetCount})
+              </button>
+            )}
+            {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges)}
+                  className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+                >
+                  Fix Widget ({pendingWidgetChanges.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={rollbackPendingWidgetChanges}
+                  className="rounded-full border border-gray-300 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+                >
+                  Cancel Widget Changes
+                </button>
+              </>
+            )}
+            {widgetControlsLocked && (
+              <>
+                <div className="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
+                  Widget controls locked after Super Admin confirmation.
+                </div>
+                {hiddenWidgetCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={restoreHiddenWidgetsAfterFix}
+                    className="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                  >
+                    Restore Widgets ({hiddenWidgetCount})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={openUnlockWidgetsAfterFix}
+                  className="rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                >
+                  Unlock Widgets
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Module Cards */}
-        <section className="mb-10 rounded-2xl border border-white/30 bg-white/80 p-5 shadow-xl backdrop-blur-sm">
+        {isSalesTargetWidgetVisible && (
+          <section className="relative mb-10 rounded-2xl border border-white/30 bg-white/80 p-5 shadow-xl backdrop-blur-sm">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMyWidgetVisibility('sales-target-preview', false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Sales Target Preview"
+              >
+                ×
+              </button>
+            )}
           <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h3 className="text-xl font-bold text-gray-900">Sales Target Preview</h3>
               <p className="text-sm text-gray-600">Quick view of total targets vs achieved values after login.</p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => router.push('/dashboard/reports/distribution/sales')}
-                className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
-              >
-                View Team Performance
-              </button>
-              {!isSalesRefUser && (
+            {isSalesTargetActionsVisible && (
+              <div className="relative flex flex-wrap items-center gap-2 pr-10">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setMyWidgetVisibility('sales-target-actions', false);
+                    }}
+                    className="absolute right-0 top-0 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Sales Target Actions"
+                  >
+                    ×
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => router.push('/dashboard/hrm/sales-targets')}
-                  className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                  onClick={() => router.push('/dashboard/reports/distribution/sales')}
+                  className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
                 >
-                  Open Sales Targets
+                  View Team Performance
                 </button>
-              )}
-            </div>
+                {!isSalesRefUser && (
+                  <button
+                    type="button"
+                    onClick={() => router.push('/dashboard/hrm/sales-targets')}
+                    className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                  >
+                    Open Sales Targets
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {targetsLoading ? (
@@ -732,7 +975,22 @@ export default function Dashboard() {
           ) : (
             <div className="space-y-5">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="rounded-xl border border-red-100 bg-gradient-to-br from-red-50 to-white p-4">
+                {isSalesTargetAmountCardVisible && (
+                  <div className="relative rounded-xl border border-red-100 bg-gradient-to-br from-red-50 to-white p-4">
+                    {!widgetControlsLocked && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setMyWidgetVisibility('sales-target-amount-card', false);
+                        }}
+                        className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                        title="Disable this widget"
+                        aria-label="Disable Sales Target Amount Progress"
+                      >
+                        ×
+                      </button>
+                    )}
                   <p className="text-xs font-semibold uppercase tracking-[0.12em] text-red-500">Amount Progress</p>
                   <div className="mt-2 flex items-end justify-between">
                     <p className="text-2xl font-bold text-gray-900">{targetsSummary.amountProgress.toFixed(1)}%</p>
@@ -742,9 +1000,25 @@ export default function Dashboard() {
                     <div className="h-3 rounded-full bg-gradient-to-r from-red-500 to-pink-500 transition-all" style={{ width: `${targetsSummary.amountProgress}%` }} />
                   </div>
                   <p className="mt-2 text-xs text-gray-700">Achieved {targetsSummary.totalAchievedAmount.toFixed(2)}</p>
-                </div>
+                  </div>
+                )}
 
-                <div className="rounded-xl border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4">
+                {isSalesTargetQuantityCardVisible && (
+                  <div className="relative rounded-xl border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4">
+                    {!widgetControlsLocked && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setMyWidgetVisibility('sales-target-quantity-card', false);
+                        }}
+                        className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                        title="Disable this widget"
+                        aria-label="Disable Sales Target Quantity Progress"
+                      >
+                        ×
+                      </button>
+                    )}
                   <p className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-600">Quantity Progress</p>
                   <div className="mt-2 flex items-end justify-between">
                     <p className="text-2xl font-bold text-gray-900">{targetsSummary.qtyProgress.toFixed(1)}%</p>
@@ -754,10 +1028,26 @@ export default function Dashboard() {
                     <div className="h-3 rounded-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all" style={{ width: `${targetsSummary.qtyProgress}%` }} />
                   </div>
                   <p className="mt-2 text-xs text-gray-700">Achieved {targetsSummary.totalAchievedQty.toFixed(2)}</p>
-                </div>
+                  </div>
+                )}
               </div>
 
-              <div className="rounded-xl border border-gray-200 bg-white p-4">
+              {isSalesTargetVsAchievedCardVisible && (
+                <div className="relative rounded-xl border border-gray-200 bg-white p-4">
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setMyWidgetVisibility('sales-target-vs-achieved-card', false);
+                      }}
+                      className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label="Disable Sales Target vs Achieved"
+                    >
+                      ×
+                    </button>
+                  )}
                 <p className="mb-3 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Target vs Achieved</p>
                 <div className="space-y-3">
                   <div>
@@ -780,10 +1070,12 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
-              </div>
+                </div>
+              )}
             </div>
           )}
-        </section>
+          </section>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 mb-16">
           {visibleModules.map((module, index) => (
@@ -794,19 +1086,20 @@ export default function Dashboard() {
                 module.name === 'HRM (Human Resource Management)' ? 'ring-2 ring-red-500/50' : ''
               }`}
             >
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (widgetToggleLoadingKey) return;
-                  setMyWidgetVisibility(module.id, false);
-                }}
-                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
-                title="Disable this widget"
-                aria-label={`Disable ${module.name}`}
-              >
-                {widgetToggleLoadingKey === module.id ? '...' : '×'}
-              </button>
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setMyWidgetVisibility(module.id, false);
+                  }}
+                  className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label={`Disable ${module.name}`}
+                >
+                  ×
+                </button>
+              )}
 
               {/* Gradient Background */}
               <div className={`absolute inset-0 bg-gradient-to-br ${module.bgColor} opacity-0 group-hover:opacity-100 transition-opacity duration-500`}></div>
@@ -868,8 +1161,22 @@ export default function Dashboard() {
         )}
 
         {/* Settings & Configuration Section */}
-        {isAdminUser && (
-          <div className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
+        {isAdminUser && isSettingsConfigurationVisible && (
+          <div className="relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMyWidgetVisibility('settings-configuration', false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Settings & System Configuration"
+              >
+                ×
+              </button>
+            )}
             <div className="bg-gradient-to-r from-red-500 to-pink-500 p-6">
               <div className="flex items-center space-x-3">
                 <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
@@ -897,19 +1204,20 @@ export default function Dashboard() {
                     }}
                     className="group relative bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105"
                   >
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (widgetToggleLoadingKey) return;
-                        setMyWidgetVisibility(setting.id, false);
-                      }}
-                      className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
-                      title="Disable this widget"
-                      aria-label={`Disable ${setting.name}`}
-                    >
-                      {widgetToggleLoadingKey === setting.id ? '...' : '×'}
-                    </button>
+                    {!widgetControlsLocked && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setMyWidgetVisibility(setting.id, false);
+                        }}
+                        className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                        title="Disable this widget"
+                        aria-label={`Disable ${setting.name}`}
+                      >
+                        ×
+                      </button>
+                    )}
 
                     <div className="flex items-center space-x-3">
                       <div className={`w-12 h-12 bg-gradient-to-r ${setting.color} rounded-lg flex items-center justify-center text-xl shadow-lg group-hover:scale-110 transition-transform duration-300`}>
@@ -933,27 +1241,40 @@ export default function Dashboard() {
                 ))}
               </div>
 
-              <div className="mt-4 border-t border-red-100 pt-4">
-                <button
-                  type="button"
-                  onClick={openWidgetPermissionManager}
-                  className="inline-flex items-center rounded-xl bg-gradient-to-r from-fuchsia-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-fuchsia-200/70 transition hover:from-fuchsia-700 hover:to-pink-700"
-                >
-                  Manage Employee Widget Access
-                </button>
-              </div>
+              {isSettingsConfigurationNoteVisible && (
+                <div className="relative mt-4 rounded-xl border border-cyan-100 bg-cyan-50/70 p-3 pr-12 text-xs text-cyan-800">
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setMyWidgetVisibility('settings-configuration-note', false);
+                      }}
+                      className="absolute right-3 top-2 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label="Disable Settings Configuration Help Note"
+                    >
+                      ×
+                    </button>
+                  )}
+                  Widget hide/restore actions require Super Admin email and password confirmation.
+                </div>
+              )}
             </div>
           </div>
         )}
 
-        {showWidgetPermissionModal && (
+        {showSuperAdminConfirmModal && (
           <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
-            <div className="w-full max-w-2xl rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+            <div className="w-full max-w-md rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
               <div className="flex items-center justify-between border-b border-gray-200 pb-3">
-                <h3 className="text-lg font-semibold text-gray-900">Employee Widget Access Control</h3>
+                <h3 className="text-lg font-semibold text-gray-900">Super Admin Confirmation</h3>
                 <button
                   type="button"
-                  onClick={() => setShowWidgetPermissionModal(false)}
+                  onClick={() => {
+                    if (superAdminConfirmLoading) return;
+                    rollbackPendingWidgetChanges();
+                  }}
                   className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
                 >
                   Close
@@ -962,40 +1283,71 @@ export default function Dashboard() {
 
               <div className="mt-4 space-y-4">
                 <div>
-                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Employee/User</label>
-                  <select
-                    value={selectedWidgetUserId}
-                    onChange={(e) => handleWidgetUserChange(e.target.value)}
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Email</label>
+                  <input
+                    type="email"
+                    value={superAdminEmail}
+                    onChange={(e) => setSuperAdminEmail(e.target.value)}
                     className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
-                  >
-                    {widgetUsers.map((user) => (
-                      <option key={user.id} value={user.id}>
-                        {user.employee_code ? `${user.employee_code} - ` : ''}
-                        {user.employee_name || user.name || user.email}
-                      </option>
-                    ))}
-                  </select>
+                    placeholder="superadmin@company.com"
+                    autoComplete="username"
+                  />
                 </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Password</label>
+                  <input
+                    type="password"
+                    value={superAdminPassword}
+                    onChange={(e) => setSuperAdminPassword(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                    placeholder="Enter password"
+                    autoComplete="current-password"
+                  />
+                </div>
+                {superAdminModalMode !== 'unlock' && !restoreWidgetListVisible && (
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                    Pending widget updates: <strong>{pendingWidgetChanges.length}</strong>
+                  </div>
+                )}
+                {superAdminModalMode === 'unlock' && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    Confirm Super Admin credentials to unlock widget controls and show close buttons again.
+                  </div>
+                )}
 
-                {widgetPermissionLoading ? (
-                  <div className="text-sm text-gray-500">Loading widget permissions...</div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {allWidgetCards.map((module) => (
-                      <label key={module.id} className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2">
-                        <span className="text-sm font-medium text-gray-800">{module.name}</span>
-                        <input
-                          type="checkbox"
-                          checked={widgetPermissionForm[module.id] !== false}
-                          onChange={(e) =>
-                            setWidgetPermissionForm((prev) => ({
-                              ...prev,
-                              [module.id]: e.target.checked,
-                            }))
-                          }
-                        />
-                      </label>
-                    ))}
+                {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                  <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 px-3 py-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-indigo-700">
+                      Hidden widgets
+                    </p>
+                    {pendingWidgetChanges.length === 0 ? (
+                      <p className="text-sm text-indigo-800">All hidden widgets are restored.</p>
+                    ) : (
+                      <div className="max-h-56 space-y-2 overflow-y-auto">
+                        {pendingWidgetChanges.map((change) => {
+                          const widgetName =
+                            allWidgetItems.find((card) => card.id === change.widget_key)?.name ?? change.widget_key;
+                          const isRestoring = restoreWidgetLoadingKey === change.widget_key;
+
+                          return (
+                            <div
+                              key={change.widget_key}
+                              className="flex items-center justify-between rounded-lg border border-indigo-100 bg-white px-3 py-2"
+                            >
+                              <span className="text-sm font-medium text-gray-800">{widgetName}</span>
+                              <button
+                                type="button"
+                                disabled={Boolean(restoreWidgetLoadingKey)}
+                                onClick={() => restoreHiddenWidgetOneByOne(change.widget_key)}
+                                className="rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+                              >
+                                {isRestoring ? 'Restoring...' : 'Restore'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1003,19 +1355,42 @@ export default function Dashboard() {
               <div className="mt-5 flex justify-end gap-2 border-t border-gray-200 pt-3">
                 <button
                   type="button"
-                  onClick={() => setShowWidgetPermissionModal(false)}
+                  onClick={() => {
+                    if (superAdminConfirmLoading) return;
+                    rollbackPendingWidgetChanges();
+                  }}
                   className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
                 >
                   Cancel
                 </button>
-                <button
-                  type="button"
-                  disabled={widgetPermissionSaving || !selectedWidgetUserId}
-                  onClick={saveWidgetPermissions}
-                  className="rounded-xl bg-gradient-to-r from-red-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white hover:from-red-700 hover:to-pink-700 disabled:opacity-60"
-                >
-                  {widgetPermissionSaving ? 'Saving...' : 'Save Widget Access'}
-                </button>
+                {superAdminModalMode === 'apply' ? (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading}
+                    onClick={applyWidgetVisibilityChanges}
+                    className="rounded-xl bg-gradient-to-r from-red-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white hover:from-red-700 hover:to-pink-700 disabled:opacity-60"
+                  >
+                    {superAdminConfirmLoading ? 'Confirming...' : 'Confirm & Apply'}
+                  </button>
+                ) : superAdminModalMode === 'restore' ? (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading || restoreWidgetListVisible}
+                    onClick={showRestoreWidgetList}
+                    className="rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white hover:from-indigo-700 hover:to-blue-700 disabled:opacity-60"
+                  >
+                    Show Hidden Widgets
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading}
+                    onClick={unlockWidgetControls}
+                    className="rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-sm font-semibold text-white hover:from-amber-600 hover:to-orange-600 disabled:opacity-60"
+                  >
+                    {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
+                  </button>
+                )}
               </div>
             </div>
           </div>

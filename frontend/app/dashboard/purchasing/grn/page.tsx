@@ -108,6 +108,23 @@ interface CompanyBankAccountOption {
   current_balance: number;
 }
 
+interface CompanyBankAccountApi {
+  id?: number | string;
+  bank_name?: string;
+  account_no?: string;
+  current_balance?: number | string;
+}
+
+interface CompanyApiResponseItem {
+  id?: number | string;
+  name?: string;
+  current_cash_balance?: number | string;
+  current_bank_balance?: number | string;
+  current_cheque_balance?: number | string;
+  bank_accounts?: CompanyBankAccountApi[];
+  bankAccounts?: CompanyBankAccountApi[];
+}
+
 interface OnTimePaymentLine {
   payment_type: 'cash' | 'bank_transfer' | 'cheque' | 'card';
   amount: number;
@@ -115,6 +132,19 @@ interface OnTimePaymentLine {
   bank_account_id?: number | null;
   reference?: string | null;
 }
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+type GrnPayload = Record<string, unknown>;
+
+const purchasingGrnWidgetItems = [
+  { id: 'purchasing-grn-hero-card', name: 'Purchasing GRN Hero Card' },
+  { id: 'purchasing-grn-tab-navigation', name: 'Purchasing GRN Tab Navigation' },
+  { id: 'purchasing-grn-po-view-card', name: 'Purchasing GRN Purchase Orders View Card' },
+  { id: 'purchasing-grn-records-view-card', name: 'Purchasing GRN Records View Card' },
+  { id: 'purchasing-grn-form-modal-pane', name: 'Purchasing GRN Form Modal Pane' },
+  { id: 'purchasing-grn-po-edit-modal-pane', name: 'Purchasing GRN PO Edit Modal Pane' },
+];
 
 export default function GRNPage() {
   type NoticeTone = 'success' | 'error' | 'info';
@@ -173,6 +203,29 @@ export default function GRNPage() {
   const [paymentLines, setPaymentLines] = useState<OnTimePaymentLine[]>([
     { payment_type: 'cash', amount: 0, company_id: null, bank_account_id: null, reference: '' }
   ]);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = purchasingGrnWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+  const getApiErrorMessage = (error: unknown, fallbackMessage: string) => {
+    if (axios.isAxiosError(error)) {
+      const message = error.response?.data?.message;
+      if (typeof message === 'string' && message.trim().length > 0) {
+        return message;
+      }
+    }
+    return fallbackMessage;
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -188,8 +241,135 @@ export default function GRNPage() {
       fetchPurchaseOrders();
       fetchGRNs();
       fetchCompanyAccounts();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
+
+  async function fetchWidgetVisibility(authToken: string) {
+    if (!authToken) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  }
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = purchasingGrnWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = purchasingGrnWidgetItems[0]?.id || 'purchasing-grn-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const showNotice = (title: string, message: string, tone: NoticeTone = 'info') => {
     setNoticeModal({ title, message, tone });
@@ -244,7 +424,7 @@ export default function GRNPage() {
         ? response.data
         : (response.data?.data || []);
 
-      const normalized = (Array.isArray(companyData) ? companyData : []).map((company: any) => ({
+      const normalized = (Array.isArray(companyData) ? companyData : []).map((company: CompanyApiResponseItem) => ({
         id: Number(company.id),
         name: String(company.name || 'Company'),
         current_cash_balance: Number(company.current_cash_balance || 0),
@@ -252,20 +432,20 @@ export default function GRNPage() {
         current_cheque_balance: Number(company.current_cheque_balance || 0),
       }));
 
-      const normalizedBankAccounts = (Array.isArray(companyData) ? companyData : []).flatMap((company: any) => {
+      const normalizedBankAccounts = (Array.isArray(companyData) ? companyData : []).flatMap((company: CompanyApiResponseItem) => {
         const companyId = Number(company.id || 0);
         const companyName = String(company.name || 'Company');
-        const accounts = Array.isArray(company?.bank_accounts)
+        const accounts = Array.isArray(company.bank_accounts)
           ? company.bank_accounts
-          : (Array.isArray(company?.bankAccounts) ? company.bankAccounts : []);
+          : (Array.isArray(company.bankAccounts) ? company.bankAccounts : []);
 
-        return accounts.map((account: any) => ({
-          id: Number(account?.id || 0),
+        return accounts.map((account: CompanyBankAccountApi) => ({
+          id: Number(account.id || 0),
           company_id: companyId,
           company_name: companyName,
-          bank_name: String(account?.bank_name || ''),
-          account_no: String(account?.account_no || ''),
-          current_balance: Number(account?.current_balance || 0),
+          bank_name: String(account.bank_name || ''),
+          account_no: String(account.account_no || ''),
+          current_balance: Number(account.current_balance || 0),
         }));
       }).filter((account: CompanyBankAccountOption) => account.id > 0);
 
@@ -389,9 +569,9 @@ export default function GRNPage() {
       setEditingPurchaseOrder(null);
       fetchPurchaseOrders();
       fetchGRNs();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error updating purchase order:', error);
-      showNotice('Update Failed', error?.response?.data?.message || 'Failed to update purchase order.', 'error');
+      showNotice('Update Failed', getApiErrorMessage(error, 'Failed to update purchase order.'), 'error');
     } finally {
       setPoSaving(false);
     }
@@ -411,9 +591,9 @@ export default function GRNPage() {
         fetchPurchaseOrders();
         fetchGRNs();
         showNotice('Deleted', 'Purchase order deleted successfully.', 'success');
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('Error deleting purchase order:', error);
-        showNotice('Delete Failed', error?.response?.data?.message || 'Failed to delete purchase order.', 'error');
+        showNotice('Delete Failed', getApiErrorMessage(error, 'Failed to delete purchase order.'), 'error');
       }
     });
   };
@@ -448,7 +628,7 @@ export default function GRNPage() {
     });
     setPaymentCompanyId(grn.payment_company_id ? String(grn.payment_company_id) : '');
     if (Array.isArray(grn.payment_breakdown) && grn.payment_breakdown.length > 0) {
-      const normalizedLines: OnTimePaymentLine[] = grn.payment_breakdown.map((line: any) => ({
+      const normalizedLines: OnTimePaymentLine[] = grn.payment_breakdown.map((line: OnTimePaymentLine) => ({
         payment_type: ['cash', 'bank_transfer', 'cheque', 'card'].includes(String(line?.payment_type || ''))
           ? line.payment_type
           : 'cash',
@@ -476,7 +656,7 @@ export default function GRNPage() {
     setShowGrnForm(true);
   };
 
-  const submitGRN = async (grnData: any) => {
+  const submitGRN = async (grnData: GrnPayload) => {
     try {
       const response = await axios.post('/api/purchasing/grn', grnData, {
         headers: { Authorization: `Bearer ${token}` }
@@ -491,15 +671,24 @@ export default function GRNPage() {
       fetchPurchaseOrders();
       fetchGRNs();
       return response.data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error creating GRN:', error);
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      showNotice('Create Failed', firstError?.[0] || error?.response?.data?.message || 'Failed to create GRN. Please try again.', 'error');
+      let firstErrorMessage = '';
+      if (axios.isAxiosError(error)) {
+        const errorsObject = error.response?.data?.errors;
+        if (errorsObject && typeof errorsObject === 'object' && !Array.isArray(errorsObject)) {
+          const firstError = Object.values(errorsObject)[0];
+          if (Array.isArray(firstError) && typeof firstError[0] === 'string') {
+            firstErrorMessage = firstError[0];
+          }
+        }
+      }
+      showNotice('Create Failed', firstErrorMessage || getApiErrorMessage(error, 'Failed to create GRN. Please try again.'), 'error');
       throw error;
     }
   };
 
-  const updateGRN = async (grnData: any) => {
+  const updateGRN = async (grnData: GrnPayload) => {
     try {
       const response = await axios.put(`/api/purchasing/grn/${selectedGrn?.id}`, grnData, {
         headers: { Authorization: `Bearer ${token}` }
@@ -515,10 +704,19 @@ export default function GRNPage() {
       fetchPurchaseOrders();
       fetchGRNs();
       return response.data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error updating GRN:', error);
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      showNotice('Update Failed', firstError?.[0] || error?.response?.data?.message || 'Failed to update GRN. Please try again.', 'error');
+      let firstErrorMessage = '';
+      if (axios.isAxiosError(error)) {
+        const errorsObject = error.response?.data?.errors;
+        if (errorsObject && typeof errorsObject === 'object' && !Array.isArray(errorsObject)) {
+          const firstError = Object.values(errorsObject)[0];
+          if (Array.isArray(firstError) && typeof firstError[0] === 'string') {
+            firstErrorMessage = firstError[0];
+          }
+        }
+      }
+      showNotice('Update Failed', firstErrorMessage || getApiErrorMessage(error, 'Failed to update GRN. Please try again.'), 'error');
       throw error;
     }
   };
@@ -544,7 +742,7 @@ export default function GRNPage() {
       }
     );
   };
-  const updateGrnItem = (index: number, field: keyof GrnItemForm, value: any) => {
+  const updateGrnItem = (index: number, field: keyof GrnItemForm, value: GrnItemForm[keyof GrnItemForm]) => {
     const updatedItems = [...grnFormData.items];
     updatedItems[index] = { ...updatedItems[index], [field]: value };
     setGrnFormData({ ...grnFormData, items: updatedItems });
@@ -927,7 +1125,21 @@ export default function GRNPage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        <div className="mb-8">
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('purchasing-grn-hero-card') && <div className="mb-8">
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-3xl font-bold text-gray-900">Goods Received Notes (GRN)</h1>
@@ -942,10 +1154,11 @@ export default function GRNPage() {
               Back to Purchasing
             </button>
           </div>
-        </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('purchasing-grn-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </div>}
 
         {/* Tab Navigation */}
-        <div className="mb-6">
+        {isWidgetVisible('purchasing-grn-tab-navigation') && <div className="mb-6">
           <div className="border-b border-gray-200">
             <nav className="-mb-px flex space-x-8">
               <button
@@ -970,10 +1183,12 @@ export default function GRNPage() {
               </button>
             </nav>
           </div>
-        </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('purchasing-grn-tab-navigation', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </div>}
 
         {/* Purchase Orders View */}
-        {currentView === 'po' && (
+        {isWidgetVisible('purchasing-grn-po-view-card') && currentView === 'po' && (
+          <>
           <div className="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-[0_18px_60px_-30px_rgba(30,64,175,0.35)]">
             <div className="border-b border-blue-100 bg-gradient-to-r from-slate-900 via-blue-900 to-cyan-900 px-6 py-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1262,10 +1477,13 @@ export default function GRNPage() {
               </>
             )}
           </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('purchasing-grn-po-view-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+          </>
         )}
 
         {/* GRN Records View */}
-        {currentView === 'grn' && (
+        {isWidgetVisible('purchasing-grn-records-view-card') && currentView === 'grn' && (
+          <>
           <div className="overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-[0_18px_60px_-30px_rgba(30,64,175,0.35)]">
             <div className="border-b border-blue-100 bg-gradient-to-r from-slate-900 via-blue-900 to-cyan-900 px-6 py-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1560,11 +1778,13 @@ export default function GRNPage() {
               </>
             )}
           </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('purchasing-grn-records-view-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+          </>
         )}
       </div>
 
       {/* Purchase Order Edit Modal */}
-      {showPoEditModal && editingPurchaseOrder && (
+      {isWidgetVisible('purchasing-grn-po-edit-modal-pane') && showPoEditModal && editingPurchaseOrder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
           <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-2xl">
             <div className="border-b border-blue-100 bg-gradient-to-r from-blue-50 to-cyan-50 px-6 py-4">
@@ -1727,8 +1947,10 @@ export default function GRNPage() {
         </div>
       )}
 
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{purchasingGrnWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
+
       {/* GRN Form Modal */}
-      {showGrnForm && selectedOrder && (
+      {isWidgetVisible('purchasing-grn-form-modal-pane') && showGrnForm && selectedOrder && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-md">
           <div className="relative w-full max-w-[1180px] overflow-hidden rounded-[30px] border border-white/20 bg-white shadow-[0_36px_120px_-45px_rgba(29,78,216,0.55)]">
             <div className="absolute inset-x-0 top-0 h-44 bg-[radial-gradient(circle_at_top_left,_rgba(56,189,248,0.3),_transparent_45%),linear-gradient(125deg,_rgba(15,23,42,0.95)_0%,_rgba(30,64,175,0.94)_45%,_rgba(14,116,144,0.9)_100%)]"></div>

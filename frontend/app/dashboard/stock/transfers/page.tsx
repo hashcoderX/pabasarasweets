@@ -61,6 +61,18 @@ interface TransferDetails {
   lines: StockTransfer[];
 }
 
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const stockTransfersWidgetItems = [
+  { id: 'stock-transfers-main-content', name: 'Stock Transfers Main Content' },
+  { id: 'stock-transfers-back-button', name: 'Stock Transfers Back Button' },
+  { id: 'stock-transfers-form-card', name: 'Stock Transfers Form Card' },
+  { id: 'stock-transfers-history-card', name: 'Stock Transfers History Card' },
+  { id: 'stock-transfers-table-headings', name: 'Stock Transfers Table Headings' },
+  { id: 'stock-transfers-details-modal-pane', name: 'Stock Transfers Details Modal Pane' },
+];
+
 export default function StockTransfersPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
@@ -83,6 +95,17 @@ export default function StockTransfersPage() {
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [selectedTransferDetails, setSelectedTransferDetails] = useState<TransferDetails | null>(null);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const [outletId, setOutletId] = useState('');
   const [notes, setNotes] = useState('');
@@ -97,6 +120,126 @@ export default function StockTransfersPage() {
     'w-full rounded-xl border border-orange-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-800 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
 
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = stockTransfersWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = stockTransfersWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = stockTransfersWidgetItems[0]?.id || 'stock-transfers-main-content';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -110,6 +253,7 @@ export default function StockTransfersPage() {
   useEffect(() => {
     if (token) {
       fetchData(currentPage);
+      fetchWidgetVisibility(token);
     }
   }, [token, currentPage]);
 
@@ -133,8 +277,8 @@ export default function StockTransfersPage() {
       ]);
 
       const inventoryItems = itemsRes.data?.success ? (itemsRes.data?.data?.data || itemsRes.data?.data || []) : [];
-      const activeItems = inventoryItems.filter((item: any) => item.status === 'active');
-      const mappedItems: InventoryItem[] = activeItems.map((item: any) => ({
+      const activeItems = inventoryItems.filter((item: Record<string, unknown>) => String(item.status || '') === 'active');
+      const mappedItems: InventoryItem[] = activeItems.map((item: Record<string, unknown>) => ({
         id: item.id,
         name: item.name,
         code: item.code,
@@ -146,8 +290,8 @@ export default function StockTransfersPage() {
 
       const outletList = outletsRes.data?.success ? (outletsRes.data?.data?.data || outletsRes.data?.data || []) : [];
       const activeOutlets: Outlet[] = outletList
-        .filter((outlet: any) => outlet.status === 'active')
-        .map((outlet: any) => ({ id: outlet.id, name: outlet.name, code: outlet.code }));
+        .filter((outlet: Record<string, unknown>) => String(outlet.status || '') === 'active')
+        .map((outlet: Record<string, unknown>) => ({ id: Number(outlet.id), name: String(outlet.name || ''), code: String(outlet.code || '') }));
 
       const transferList = transfersRes.data?.success ? (transfersRes.data?.data?.data || transfersRes.data?.data || []) : [];
       const reportData = transfersRes.data?.report || {};
@@ -307,12 +451,13 @@ export default function StockTransfersPage() {
       setLineQuantity('');
       setCurrentPage(1);
       fetchData(1);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error transferring stock:', error);
-      const apiMessage = error?.response?.data?.message;
-      const errorsObject = (error?.response?.data?.errors || {}) as Record<string, string[]>;
+      const apiError = error as { response?: { data?: { message?: string; errors?: Record<string, string[]> } } };
+      const apiMessage = apiError?.response?.data?.message;
+      const errorsObject = (apiError?.response?.data?.errors || {}) as Record<string, string[]>;
       const firstErrorGroup = Object.values(errorsObject)[0] || [];
-      const quantityError = error?.response?.data?.errors?.quantity?.[0] || firstErrorGroup[0];
+      const quantityError = apiError?.response?.data?.errors?.quantity?.[0] || firstErrorGroup[0];
       alert(quantityError || apiMessage || 'Failed to transfer stock');
     } finally {
       setSaving(false);
@@ -339,9 +484,10 @@ export default function StockTransfersPage() {
 
       const details = response.data?.success ? response.data?.data : null;
       setSelectedTransferDetails(details);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error loading transfer details:', error);
-      alert(error?.response?.data?.message || 'Failed to load transfer details');
+      const apiError = error as { response?: { data?: { message?: string } } };
+      alert(apiError?.response?.data?.message || 'Failed to load transfer details');
       setShowDetailsModal(false);
     } finally {
       setDetailsLoading(false);
@@ -466,6 +612,21 @@ export default function StockTransfersPage() {
       </div>
 
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('stock-transfers-main-content') && <>
         <div className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-xl shadow-xl">
           <div className="px-5 py-6 sm:px-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
@@ -477,12 +638,13 @@ export default function StockTransfersPage() {
                 Build transfer invoices with quick item search and move inventory from central stock to active outlets.
               </p>
             </div>
-            <button
+            {isWidgetVisible('stock-transfers-back-button') && <button
               onClick={() => router.push('/dashboard/stock')}
               className="px-4 py-2 rounded-lg text-sm font-medium text-orange-700 border border-orange-200 bg-orange-50 hover:bg-orange-100"
             >
               Back to Stock
-            </button>
+            </button>}
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-transfers-main-content', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
         </div>
 
@@ -511,7 +673,7 @@ export default function StockTransfersPage() {
           </div>
         </div>
 
-        <div className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-xl">
+        {isWidgetVisible('stock-transfers-form-card') && <div className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-xl">
           <div className="px-5 py-6 sm:px-6">
             <h4 className="text-lg font-semibold text-gray-900 mb-4">New Transfer Invoice</h4>
             <form onSubmit={handleTransfer} className="space-y-5">
@@ -645,7 +807,7 @@ export default function StockTransfersPage() {
 
             <div className="overflow-x-auto border border-gray-200 rounded-xl bg-white">
               <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
+                {isWidgetVisible('stock-transfers-table-headings') && <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
                   <tr>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
                     <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Code</th>
@@ -654,7 +816,7 @@ export default function StockTransfersPage() {
                     <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Sub Amount</th>
                     <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
                   </tr>
-                </thead>
+                </thead>}
                 <tbody className="bg-white divide-y divide-gray-100">
                   {transferLines.length === 0 ? (
                     <tr>
@@ -702,17 +864,19 @@ export default function StockTransfersPage() {
             </div>
           </form>
           </div>
-        </div>
+          {!widgetControlsLocked && <div className="px-5 pb-4 sm:px-6"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-transfers-form-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </div>}
 
-        <div className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-xl">
+        {isWidgetVisible('stock-transfers-history-card') && <div className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-xl shadow-xl">
           <div className="px-5 py-6 sm:px-6">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-lg font-semibold text-gray-900">Recent Transfers</h4>
             <p className="text-sm text-gray-500">Total Records: {totalTransfers}</p>
+            {!widgetControlsLocked && <div className="px-5 pb-4 sm:px-6"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-transfers-history-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
           </div>
           <div className="overflow-x-auto rounded-xl border border-gray-200">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
+              {isWidgetVisible('stock-transfers-table-headings') && <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
                 <tr>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Ref</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
@@ -722,7 +886,7 @@ export default function StockTransfersPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">By</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                 </tr>
-              </thead>
+              </thead>}
               <tbody className="bg-white divide-y divide-gray-100">
                 {transfers.length === 0 ? (
                   <tr>
@@ -773,9 +937,11 @@ export default function StockTransfersPage() {
             </button>
           </div>
           </div>
-        </div>
+        </div>}
 
-        {showDetailsModal && (
+        </>}
+
+        {isWidgetVisible('stock-transfers-details-modal-pane') && showDetailsModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
             <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-y-auto border border-white/60">
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-orange-50 to-amber-50">
@@ -838,14 +1004,14 @@ export default function StockTransfersPage() {
 
                   <div className="overflow-x-auto border border-gray-200 rounded-xl">
                     <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
+                      {isWidgetVisible('stock-transfers-table-headings') && <thead className="bg-gradient-to-r from-orange-50 to-amber-50">
                         <tr>
                           <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Code</th>
                           <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Unit</th>
                           <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
                         </tr>
-                      </thead>
+                      </thead>}
                       <tbody className="bg-white divide-y divide-gray-200">
                         {selectedTransferDetails.lines.map((line) => (
                           <tr key={line.id}>
@@ -881,6 +1047,8 @@ export default function StockTransfersPage() {
           </div>
           </div>
         )}
+
+        {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{stockTransfersWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
       </div>
     </div>
   );

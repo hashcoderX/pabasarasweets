@@ -67,6 +67,8 @@ interface InvoiceRecord {
   discount?: number;
   total: number;
   paid_amount?: number;
+  due_amount?: number;
+  balance_amount?: number;
   status: string;
   items: InvoiceItem[];
   payments?: Array<{
@@ -196,6 +198,34 @@ interface LoadOption {
   status?: string;
 }
 
+interface LoadRouteEntry {
+  route_id?: number | string | null;
+}
+
+interface LoadApiRecord {
+  id?: number | string | null;
+  load_number?: string | null;
+  load_date?: string | null;
+  created_at?: string | null;
+  status?: string | null;
+  route_id?: number | string | null;
+  sales_ref_id?: number | string | null;
+  load_routes?: LoadRouteEntry[] | null;
+  loadRoutes?: LoadRouteEntry[] | null;
+}
+
+interface ApiErrorLike {
+  code?: string;
+  response?: {
+    status?: number;
+    data?: {
+      message?: string;
+    };
+  };
+}
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
 const OFFLINE_INVOICE_STORAGE_KEY = 'distribution_offline_invoices';
 export default function DistributionInvoicesPage() {
   const [token, setToken] = useState('');
@@ -290,6 +320,17 @@ export default function DistributionInvoicesPage() {
 
   const [pendingOfflineInvoices, setPendingOfflineInvoices] = useState<PendingOfflineInvoice[]>([]);
   const [syncingOfflineInvoices, setSyncingOfflineInvoices] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const [viewInvoice, setViewInvoice] = useState<InvoiceRecord | null>(null);
   const [receiptPreviewInvoice, setReceiptPreviewInvoice] = useState<InvoiceRecord | null>(null);
@@ -302,8 +343,160 @@ export default function DistributionInvoicesPage() {
 
   const router = useRouter();
   const createLineId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const invoiceWidgetItems = [
+    { id: 'distribution-invoices-nav-back-button', name: 'Invoices Back Button' },
+    { id: 'distribution-invoices-hero-card', name: 'Invoices Hero Card' },
+    { id: 'distribution-invoices-hero-action-buttons', name: 'Invoices Hero Action Buttons' },
+    { id: 'distribution-invoices-filters-card', name: 'Invoices Filters Card' },
+    { id: 'distribution-invoices-delivery-orders-card', name: 'Invoices Delivery Orders Card' },
+    { id: 'distribution-invoices-records-card', name: 'Invoices Records Card' },
+    { id: 'distribution-invoices-records-table-headings', name: 'Invoices Records Table Headings' },
+    { id: 'distribution-invoices-row-action-buttons', name: 'Invoices Row Action Buttons' },
+    { id: 'distribution-invoices-create-modal-pane', name: 'Invoices Create Modal Pane' },
+    { id: 'distribution-invoices-create-modal-heading', name: 'Invoices Create Modal Heading' },
+    { id: 'distribution-invoices-create-modal-action-buttons', name: 'Invoices Create Modal Action Buttons' },
+    { id: 'distribution-invoices-delete-modal-pane', name: 'Invoices Delete Modal Pane' },
+    { id: 'distribution-invoices-delete-modal-heading', name: 'Invoices Delete Modal Heading' },
+    { id: 'distribution-invoices-delete-modal-action-buttons', name: 'Invoices Delete Modal Action Buttons' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = invoiceWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
-  const getRouteIdsFromLoad = (load: any): string[] => {
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = invoiceWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const toApiErrorLike = (error: unknown): ApiErrorLike => {
+    if (typeof error === 'object' && error !== null) {
+      return error as ApiErrorLike;
+    }
+    return {};
+  };
+
+  const getApiErrorMessage = (error: unknown): string | undefined => {
+    const apiError = toApiErrorLike(error);
+    return apiError.response?.data?.message;
+  };
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = invoiceWidgetItems[0]?.id || 'distribution-invoices-nav-back-button';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const getRouteIdsFromLoad = (load: LoadApiRecord | null | undefined): string[] => {
     const ids: string[] = [];
 
     if (load?.route_id) {
@@ -311,7 +504,7 @@ export default function DistributionInvoicesPage() {
     }
 
     if (Array.isArray(load?.load_routes)) {
-      load.load_routes.forEach((entry: any) => {
+      load.load_routes.forEach((entry: LoadRouteEntry) => {
         const routeId = String(entry?.route_id || '').trim();
         if (routeId) {
           ids.push(routeId);
@@ -320,7 +513,7 @@ export default function DistributionInvoicesPage() {
     }
 
     if (Array.isArray(load?.loadRoutes)) {
-      load.loadRoutes.forEach((entry: any) => {
+      load.loadRoutes.forEach((entry: LoadRouteEntry) => {
         const routeId = String(entry?.route_id || '').trim();
         if (routeId) {
           ids.push(routeId);
@@ -341,6 +534,7 @@ export default function DistributionInvoicesPage() {
     if (token) {
       resolveAssignedRoute();
       fetchData();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
 
@@ -421,7 +615,12 @@ export default function DistributionInvoicesPage() {
       const userData = userRes.data || {};
       const roleNames = [
         String(userData?.role || ''),
-        ...(Array.isArray(userData?.roles) ? userData.roles.map((r: any) => String(r?.name || r || '')) : []),
+        ...(Array.isArray(userData?.roles) ? userData.roles.map((r: unknown) => {
+          if (typeof r === 'object' && r !== null && 'name' in r) {
+            return String((r as { name?: unknown }).name || '');
+          }
+          return String(r || '');
+        }) : []),
       ].join(' ').toLowerCase();
       const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
       setIsAdmin(adminUser);
@@ -430,8 +629,10 @@ export default function DistributionInvoicesPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
 
-      const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
-      const mappedLoads: LoadOption[] = loads.map((load: any) => ({
+      const loads: LoadApiRecord[] = Array.isArray(loadsRes.data)
+        ? (loadsRes.data as LoadApiRecord[])
+        : (Array.isArray(loadsRes.data?.data) ? (loadsRes.data.data as LoadApiRecord[]) : []);
+      const mappedLoads: LoadOption[] = loads.map((load) => ({
         id: Number(load.id),
         load_number: String(load.load_number || ''),
         load_date: String(load.load_date || ''),
@@ -452,7 +653,7 @@ export default function DistributionInvoicesPage() {
       }
 
       if (loadFromQuery) {
-        const matchedLoad = loads.find((load: any) => String(load?.id || '') === String(loadFromQuery));
+        const matchedLoad = loads.find((load) => String(load?.id || '') === String(loadFromQuery));
         const routeIds = matchedLoad ? getRouteIdsFromLoad(matchedLoad) : [];
 
         setActiveLoadId(String(loadFromQuery));
@@ -477,8 +678,8 @@ export default function DistributionInvoicesPage() {
       if (!employeeId) return;
 
       const activeAssignedLoads = loads
-        .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit', 'delivered'].includes(String(load.status || '')))
-        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
+        .filter((load) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit', 'delivered'].includes(String(load.status || '')))
+        .sort((a, b) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
 
       const assignedLoad = activeAssignedLoads[0];
 
@@ -582,7 +783,7 @@ export default function DistributionInvoicesPage() {
     );
   };
 
-  const getInvoiceDueBalance = (invoice: any): number => {
+  const getInvoiceDueBalance = (invoice: InvoiceRecord): number => {
     const explicitDue = Number(invoice?.due_amount ?? invoice?.balance_amount ?? 0);
     if (explicitDue > 0) return explicitDue;
 
@@ -636,7 +837,7 @@ export default function DistributionInvoicesPage() {
             items: inv.items,
           }, { headers: { Authorization: `Bearer ${token}` } });
 
-          const createdInvoice: any = invoiceRes.data?.data;
+          const createdInvoice: InvoiceRecord | undefined = invoiceRes.data?.data as InvoiceRecord | undefined;
 
           const offlinePayments = inv.payments || (inv.payment ? [inv.payment] : []);
           if (offlinePayments.length > 0 && createdInvoice?.id) {
@@ -689,7 +890,7 @@ export default function DistributionInvoicesPage() {
           }
 
           anySynced = true;
-        } catch (error: any) {
+        } catch (error: unknown) {
           console.error('Failed to sync offline invoice entry, keeping in queue:', error);
           stillPending.push(entry);
         }
@@ -712,7 +913,7 @@ export default function DistributionInvoicesPage() {
         params: { load_id: loadId },
       });
       const raw = Array.isArray(response.data) ? response.data : (response.data?.data || []);
-      const mapped: LoadItemInfo[] = raw.map((li: any) => ({
+      const mapped: LoadItemInfo[] = raw.map((li: { id?: unknown; load_id?: unknown; product_code?: unknown; name?: unknown; loaded_qty?: unknown; qty?: unknown; sell_price?: unknown }) => ({
         id: Number(li.id),
         load_id: Number(li.load_id),
         product_code: String(li.product_code),
@@ -808,8 +1009,8 @@ export default function DistributionInvoicesPage() {
 
       setItems(
         inventoryRows
-          .filter((item: any) => item.status === 'active')
-          .map((item: any) => ({
+          .filter((item: { status?: unknown }) => item.status === 'active')
+          .map((item: { id?: unknown; name?: unknown; code?: unknown; unit?: unknown; sell_price?: unknown; current_stock?: unknown }) => ({
             id: item.id,
             name: item.name,
             code: item.code,
@@ -873,7 +1074,19 @@ export default function DistributionInvoicesPage() {
 
           if (requestId !== deliveryOrderRequestRef.current) return;
 
-      const mapped: DeliveryOrderRecord[] = rows.map((row: any) => ({
+      const mapped: DeliveryOrderRecord[] = rows.map((row: {
+        id?: unknown;
+        sale_number?: unknown;
+        do_number?: unknown;
+        load_id?: unknown;
+        assigned_load?: { id?: unknown } | null;
+        assignedLoad?: { id?: unknown } | null;
+        sale_date?: unknown;
+        customer_name?: unknown;
+        total_amount?: unknown;
+        status?: unknown;
+        outlet?: { name?: string; code?: string } | null;
+      }) => ({
         id: Number(row.id),
         sale_number: String(row.sale_number || ''),
         do_number: row.do_number || null,
@@ -888,9 +1101,9 @@ export default function DistributionInvoicesPage() {
       }));
 
       setDeliveryOrders(mapped.filter((row) => !!row.do_number));
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (requestId !== deliveryOrderRequestRef.current) return;
-      const status = error?.response?.status;
+      const status = toApiErrorLike(error).response?.status;
       if (status !== 401 && status !== 403) {
         console.error('Error loading delivery orders for invoices page:', error);
       }
@@ -1579,7 +1792,7 @@ export default function DistributionInvoicesPage() {
     const rawInvoiceDate = invoice.invoice_date || '';
     setInvoiceDate(rawInvoiceDate.length >= 10 ? rawInvoiceDate.substring(0, 10) : rawInvoiceDate);
 
-    const rawDueDate = (invoice as any).due_date || '';
+    const rawDueDate = invoice.due_date || '';
     setDueDate(rawDueDate && rawDueDate.length >= 10 ? rawDueDate.substring(0, 10) : '');
 
     setNotes(invoice.notes || '');
@@ -1607,32 +1820,32 @@ export default function DistributionInvoicesPage() {
     setPaymentBankName('');
     setPaymentCheques([]);
 
-    const refLat = Number((invoice as any).ref_latitude);
-    const refLng = Number((invoice as any).ref_longitude);
+    const refLat = Number(invoice.ref_latitude);
+    const refLng = Number(invoice.ref_longitude);
     setRefGpsSnapshot(
       Number.isFinite(refLat) && Number.isFinite(refLng)
         ? {
             latitude: refLat,
             longitude: refLng,
-            accuracy: Number.isFinite(Number((invoice as any).ref_gps_accuracy))
-              ? Number((invoice as any).ref_gps_accuracy)
+            accuracy: Number.isFinite(Number(invoice.ref_gps_accuracy))
+              ? Number(invoice.ref_gps_accuracy)
               : null,
-            captured_at: (invoice as any).ref_gps_captured_at || new Date().toISOString(),
+            captured_at: invoice.ref_gps_captured_at || new Date().toISOString(),
           }
         : null
     );
 
-    const billingLat = Number((invoice as any).billing_latitude);
-    const billingLng = Number((invoice as any).billing_longitude);
+    const billingLat = Number(invoice.billing_latitude);
+    const billingLng = Number(invoice.billing_longitude);
     setBillingGpsSnapshot(
       Number.isFinite(billingLat) && Number.isFinite(billingLng)
         ? {
             latitude: billingLat,
             longitude: billingLng,
-            accuracy: Number.isFinite(Number((invoice as any).billing_gps_accuracy))
-              ? Number((invoice as any).billing_gps_accuracy)
+            accuracy: Number.isFinite(Number(invoice.billing_gps_accuracy))
+              ? Number(invoice.billing_gps_accuracy)
               : null,
-            captured_at: (invoice as any).billing_gps_captured_at || new Date().toISOString(),
+            captured_at: invoice.billing_gps_captured_at || new Date().toISOString(),
           }
         : null
     );
@@ -1683,8 +1896,8 @@ export default function DistributionInvoicesPage() {
 
       setDeleteConfirmInvoice(null);
       await fetchData();
-    } catch (error: any) {
-      setQtyWarningMessage(error?.response?.data?.message || 'Failed to delete invoice');
+    } catch (error: unknown) {
+      setQtyWarningMessage(getApiErrorMessage(error) || 'Failed to delete invoice');
       setQtyWarningOpen(true);
     }
   };
@@ -2029,7 +2242,15 @@ export default function DistributionInvoicesPage() {
           unit: line.unit,
         };
 
-        const result: any[] = [];
+        const result: Array<{
+          inventory_item_id: number | null;
+          item_code: string;
+          item_name: string;
+          unit: string;
+          quantity: number;
+          unit_price: number;
+          discount: number;
+        }> = [];
 
         if (paidQty > 0) {
           result.push({
@@ -2229,7 +2450,7 @@ export default function DistributionInvoicesPage() {
     try {
       setSaving(true);
 
-      let savedInvoice: any = null;
+      let savedInvoice: InvoiceRecord | null = null;
       let savedPaymentEntries: PaymentEntry[] = [];
 
       if (isEditing) {
@@ -2283,9 +2504,9 @@ export default function DistributionInvoicesPage() {
           if (paymentRows.some((payment) => !payment.distribution_invoice_id)) throw new Error('Missing target invoice for payment.');
           await axios.post('/api/distribution/payments/bulk', { payments: paymentRows }, { headers: { Authorization: `Bearer ${token}` } });
           savedPaymentEntries = paymentPayloads;
-        } catch (paymentError: any) {
+        } catch (paymentError: unknown) {
           console.error('Failed to record payment for invoice:', paymentError);
-          setQtyWarningMessage(paymentError?.response?.data?.message || 'Invoice saved, but payment could not be recorded.');
+          setQtyWarningMessage(getApiErrorMessage(paymentError) || 'Invoice saved, but payment could not be recorded.');
           setQtyWarningOpen(true);
         }
       }
@@ -2310,7 +2531,7 @@ export default function DistributionInvoicesPage() {
             status: 'approved',
             notes: composedNotes,
           }, { headers: { Authorization: `Bearer ${token}` } });
-        } catch (returnError: any) {
+        } catch (returnError: unknown) {
           console.error('Failed to record inline return for invoice:', returnError);
         }
       }
@@ -2341,12 +2562,12 @@ export default function DistributionInvoicesPage() {
         } as InvoiceRecord;
         openReceiptPreview(receiptInvoice);
       }
-    } catch (error: any) {
-      if (!isEditing && !error?.response) {
+    } catch (error: unknown) {
+      if (!isEditing && !toApiErrorLike(error).response) {
         // Network / connectivity issue on create -> queue for offline sync
         queueOfflineAndFinish();
       } else {
-        setQtyWarningMessage(error?.response?.data?.message || (isEditing ? 'Failed to update invoice' : 'Failed to create invoice'));
+        setQtyWarningMessage(getApiErrorMessage(error) || (isEditing ? 'Failed to update invoice' : 'Failed to create invoice'));
         setQtyWarningOpen(true);
       }
     } finally {
@@ -2498,8 +2719,8 @@ export default function DistributionInvoicesPage() {
       setShowReturnModal(false);
       setReturnInvoice(null);
       fetchData();
-    } catch (error: any) {
-      setQtyWarningMessage(error?.response?.data?.message || 'Failed to process return');
+    } catch (error: unknown) {
+      setQtyWarningMessage(getApiErrorMessage(error) || 'Failed to process return');
       setQtyWarningOpen(true);
     } finally {
       setReturnSaving(false);
@@ -2536,20 +2757,35 @@ export default function DistributionInvoicesPage() {
                 </div>
               </div>
             </div>
-            <div className="flex justify-start sm:justify-end">
-              <button
+            <div className="flex justify-start sm:justify-end gap-2">
+              {isWidgetVisible('distribution-invoices-nav-back-button') && <button
                 onClick={() => router.push('/dashboard')}
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
               >
                 Back to Dashboard
-              </button>
+              </button>}
+              {!widgetControlsLocked && isWidgetVisible('distribution-invoices-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-nav-back-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
           </div>
         </div>
       </nav>
 
       <div className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('distribution-invoices-hero-card') && <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
             <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">
               Invoices <span className="bg-gradient-to-r from-emerald-600 to-cyan-600 bg-clip-text text-transparent">Control Hub</span>
@@ -2561,7 +2797,7 @@ export default function DistributionInvoicesPage() {
               <p className="mt-1 text-sm text-green-700 font-medium">Auto route filter enabled from allocated load.</p>
             )}
           </div>
-          <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
+          {isWidgetVisible('distribution-invoices-hero-action-buttons') && <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto">
             <button
               onClick={() => router.back()}
               className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 w-full sm:w-auto transition-colors"
@@ -2580,13 +2816,15 @@ export default function DistributionInvoicesPage() {
             >
               Add Invoice
             </button>
-          </div>
-        </div>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-hero-action-buttons', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+          </div>}
+          {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-hero-card', false)} className="w-fit rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+        </div>}
 
-        <div className="mb-4 rounded-xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-lg p-3 sm:p-4">
+        {isWidgetVisible('distribution-invoices-filters-card') && <div className="mb-4 rounded-xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-lg p-3 sm:p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold text-gray-800">Advanced Search</h3>
-            <button
+            <div className="flex items-center gap-2"><button
               type="button"
               onClick={() => {
                 setInvoiceSearch('');
@@ -2597,7 +2835,7 @@ export default function DistributionInvoicesPage() {
               className="text-xs text-gray-600 hover:text-gray-800 underline"
             >
               Clear Filters
-            </button>
+            </button>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-filters-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
           </div>
 
           <div className={`grid grid-cols-1 gap-3 sm:gap-4 items-end ${isAdmin ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
@@ -2655,12 +2893,15 @@ export default function DistributionInvoicesPage() {
           <div className="mt-2 text-xs text-gray-500">
             Showing {filteredInvoices.length} invoice(s)
           </div>
-        </div>
+        </div>}
 
-        <div className="mb-4 rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-emerald-50">
-            <h3 className="text-sm font-semibold text-gray-800">Delivery Orders By Load</h3>
-            <p className="text-xs text-gray-500 mt-0.5">DO records created from Outlet POS orders with assigned loads.</p>
+        {isWidgetVisible('distribution-invoices-delivery-orders-card') && <div className="mb-4 rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-emerald-50 flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800">Delivery Orders By Load</h3>
+              <p className="text-xs text-gray-500 mt-0.5">DO records created from Outlet POS orders with assigned loads.</p>
+            </div>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-delivery-orders-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           <div className="overflow-x-auto">
@@ -2706,12 +2947,12 @@ export default function DistributionInvoicesPage() {
           <div className="px-4 py-2 border-t border-gray-100 text-xs text-gray-500">
             Showing {filteredDeliveryOrders.length} DO record(s)
           </div>
-        </div>
+        </div>}
 
-        <div className="rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
+        {isWidgetVisible('distribution-invoices-records-card') && <div className="rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gradient-to-r from-emerald-50 to-cyan-50">
+              {isWidgetVisible('distribution-invoices-records-table-headings') && <thead className="bg-gradient-to-r from-emerald-50 to-cyan-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
@@ -2721,7 +2962,7 @@ export default function DistributionInvoicesPage() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
-              </thead>
+              </thead>}
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredInvoices.length === 0 ? (
                   <tr>
@@ -2737,6 +2978,7 @@ export default function DistributionInvoicesPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-right text-amber-700">{getInvoiceDueBalance(invoice).toFixed(2)}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{invoice.status}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
+                        {isWidgetVisible('distribution-invoices-row-action-buttons') && (
                         <div className="flex justify-end gap-2">
                           <button
                             onClick={() => startEditInvoice(invoice)}
@@ -2763,6 +3005,7 @@ export default function DistributionInvoicesPage() {
                             Delete
                           </button>
                         </div>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -2784,6 +3027,7 @@ export default function DistributionInvoicesPage() {
                 <p className="text-xs text-gray-500">{new Date(invoice.invoice_date).toLocaleDateString()}</p>
                 <p className="text-sm font-medium text-gray-900">Total: {Number(invoice.total).toFixed(2)}</p>
                 <p className="text-sm font-semibold text-amber-700">Outstanding: {getInvoiceDueBalance(invoice).toFixed(2)}</p>
+                {isWidgetVisible('distribution-invoices-row-action-buttons') && (
                 <div className="pt-1 flex flex-col sm:flex-row gap-2">
                   <button
                     onClick={() => startEditInvoice(invoice)}
@@ -2810,6 +3054,7 @@ export default function DistributionInvoicesPage() {
                     Delete
                   </button>
                 </div>
+                )}
               </div>
             ))}
           </div>
@@ -2846,17 +3091,17 @@ export default function DistributionInvoicesPage() {
               </div>
             </div>
           )}
-        </div>
+        </div>}
       </div>
 
-      {showModal && (
+      {isWidgetVisible('distribution-invoices-create-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 px-2 py-3 backdrop-blur-sm md:items-center md:px-4">
           <div className="relative mx-auto flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white/92 shadow-[0_35px_120px_-45px_rgba(16,185,129,0.6)] md:h-auto md:max-h-[92vh]">
             <div className="flex items-start justify-between border-b border-slate-200/80 bg-gradient-to-r from-emerald-50/80 via-white to-cyan-50/70 px-4 pb-3 pt-4 backdrop-blur-sm md:px-6">
-              <div>
+              {isWidgetVisible('distribution-invoices-create-modal-heading') && <div>
                 <h3 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg md:text-xl">Create Invoice</h3>
                 <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">Select shop, add items, and optionally record payment in one flow.</p>
-              </div>
+              </div>}
               <button
                 type="button"
                 onClick={() => {
@@ -4334,14 +4579,14 @@ export default function DistributionInvoicesPage() {
         </div>
       )}
 
-      {deleteConfirmInvoice && (
+      {isWidgetVisible('distribution-invoices-delete-modal-pane') && deleteConfirmInvoice && (
         <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/40 px-3">
           <div className="w-full max-w-md rounded-2xl border border-rose-100 bg-white p-5 shadow-2xl">
-            <h4 className="text-base font-semibold text-slate-900">Confirm Delete</h4>
+            {isWidgetVisible('distribution-invoices-delete-modal-heading') && <><h4 className="text-base font-semibold text-slate-900">Confirm Delete</h4>
             <p className="mt-2 text-sm text-slate-600">
               Delete invoice {deleteConfirmInvoice.invoice_number}? This action cannot be undone.
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
+            </p></>}
+            {isWidgetVisible('distribution-invoices-delete-modal-action-buttons') && <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setDeleteConfirmInvoice(null)}
@@ -4356,7 +4601,7 @@ export default function DistributionInvoicesPage() {
               >
                 Delete Invoice
               </button>
-            </div>
+            </div>}
           </div>
         </div>
       )}
@@ -4840,6 +5085,8 @@ export default function DistributionInvoicesPage() {
           </div>
         );
       })()}
+
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{invoiceWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
 
       <style jsx global>{`
         .pos-receipt {

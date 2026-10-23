@@ -99,6 +99,13 @@ type EmployeeFull = Employee & {
   experiences?: EmployeeExperience[];
 };
 
+type WidgetVisibilityChange = {
+  widget_key: string;
+  is_visible: boolean;
+};
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+
 interface Department {
   id: number;
   name: string;
@@ -395,6 +402,17 @@ export default function Employees() {
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeMessage, setNoticeMessage] = useState('');
   const [noticeType, setNoticeType] = useState<'success' | 'error' | 'info'>('info');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const showNotice = (title: string, message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNoticeTitle(title);
     setNoticeMessage(message);
@@ -405,6 +423,248 @@ export default function Employees() {
     setNoticeOpen(false);
     setNoticeTitle('');
     setNoticeMessage('');
+  };
+
+  const employeeWidgetItems = [
+    { id: 'hrm-employees-nav-back-button', name: 'Employees Back Button' },
+    { id: 'hrm-employees-nav-logout-button', name: 'Employees Logout Button' },
+    { id: 'hrm-employees-hero-card', name: 'Employees Hero Card' },
+    { id: 'hrm-employees-hero-title', name: 'Employees Hero Title' },
+    { id: 'hrm-employees-hero-subtitle', name: 'Employees Hero Subtitle' },
+    { id: 'hrm-employees-hero-stats', name: 'Employees Hero Stats' },
+    { id: 'hrm-employees-hero-add-button', name: 'Employees Add Button' },
+    { id: 'hrm-employees-list-card', name: 'Employees List Card' },
+    { id: 'hrm-employees-list-heading', name: 'Employees List Heading' },
+    { id: 'hrm-employees-list-filter-controls', name: 'Employees List Filters' },
+    { id: 'hrm-employees-list-table-headings', name: 'Employees Table Headings' },
+    { id: 'hrm-employees-row-action-buttons', name: 'Employees Row Action Buttons' },
+    { id: 'hrm-employees-pagination-controls', name: 'Employees Pagination Controls' },
+    { id: 'hrm-employees-form-pane', name: 'Employees Form Pane' },
+    { id: 'hrm-employees-form-heading', name: 'Employees Form Heading' },
+    { id: 'hrm-employees-form-action-buttons', name: 'Employees Form Action Buttons' },
+    { id: 'hrm-employees-profile-pane', name: 'Employees Profile Pane' },
+    { id: 'hrm-employees-profile-heading', name: 'Employees Profile Heading' },
+    { id: 'hrm-employees-documents-pane', name: 'Employees Documents Pane' },
+    { id: 'hrm-employees-documents-heading', name: 'Employees Documents Heading' },
+    { id: 'hrm-employees-education-pane', name: 'Employees Education Pane' },
+    { id: 'hrm-employees-education-heading', name: 'Employees Education Heading' },
+    { id: 'hrm-employees-experience-pane', name: 'Employees Experience Pane' },
+    { id: 'hrm-employees-experience-heading', name: 'Employees Experience Heading' },
+    { id: 'hrm-employees-allowances-pane', name: 'Employees Allowances Pane' },
+    { id: 'hrm-employees-allowances-heading', name: 'Employees Allowances Heading' },
+    { id: 'hrm-employees-leave-pane', name: 'Employees Leave Pane' },
+    { id: 'hrm-employees-leave-heading', name: 'Employees Leave Heading' },
+    { id: 'hrm-employees-leave-action-buttons', name: 'Employees Leave Action Buttons' },
+    { id: 'hrm-employees-confirm-pane', name: 'Employees Confirm Pane' },
+    { id: 'hrm-employees-confirm-heading', name: 'Employees Confirm Heading' },
+    { id: 'hrm-employees-confirm-action-buttons', name: 'Employees Confirm Action Buttons' },
+    { id: 'hrm-employees-reset-password-pane', name: 'Employees Reset Password Pane' },
+    { id: 'hrm-employees-reset-password-heading', name: 'Employees Reset Password Heading' },
+    { id: 'hrm-employees-reset-password-action-buttons', name: 'Employees Reset Password Action Buttons' },
+    { id: 'hrm-employees-notice-pane', name: 'Employees Notice Pane' },
+    { id: 'hrm-employees-notice-heading', name: 'Employees Notice Heading' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      const widgetMap = response.data?.data?.widgets || {};
+      const controlsLocked = Boolean(response.data?.data?.widget_controls_locked);
+      setWidgetVisibility(widgetMap);
+      setWidgetControlsLocked(controlsLocked);
+    } catch (error) {
+      const err: any = error;
+      console.error('Error fetching employee widget visibility:', err?.response?.status, err?.response?.data || err?.message);
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (
+    changes: WidgetVisibilityChange[] = [],
+    mode: SuperAdminModalMode = 'apply'
+  ) => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply') return;
+    if (!pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showNotice('Widget Update Failed', 'Please enter Super Admin email and password.', 'error');
+      return;
+    }
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put(
+          '/api/dashboard/widgets/me',
+          {
+            widget_key: change.widget_key,
+            is_visible: change.is_visible,
+            super_admin_email: superAdminEmail.trim(),
+            super_admin_password: superAdminPassword,
+            lock_widget_controls: true,
+          },
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+        );
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+    } catch (error) {
+      const err: any = error;
+      console.error('Error applying employee widget changes:', err?.response?.status, err?.response?.data || err?.message);
+      showNotice('Widget Update Failed', 'Super Admin confirmation failed or widget update failed.', 'error');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreAllHiddenWidgetsStaged = () => {
+    if (widgetControlsLocked) return;
+    const hiddenKeys = employeeWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => {
+      const next = { ...prev };
+      hiddenKeys.forEach((key) => { next[key] = true; });
+      return next;
+    });
+    setPendingWidgetChanges((prev) => {
+      const next = [...prev];
+      hiddenKeys.forEach((key) => {
+        const remaining = next.filter((entry) => entry.widget_key !== key);
+        remaining.push({ widget_key: key, is_visible: true });
+        next.splice(0, next.length, ...remaining);
+      });
+      return next;
+    });
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = employeeWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) {
+      showNotice('Nothing to Restore', 'All widgets are already visible.', 'success');
+      return;
+    }
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showNotice('Super Admin Required', 'Please enter Super Admin email and password.', 'error');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showNotice('Super Admin Required', 'Please enter Super Admin email and password.', 'error');
+      return;
+    }
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put(
+        '/api/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: true,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        },
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+      );
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+      setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
+    } catch (error) {
+      const err: any = error;
+      console.error('Error restoring employee widget:', err?.response?.status, err?.response?.data || err?.message);
+      showNotice('Restore Failed', 'Failed to restore widget.', 'error');
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (superAdminModalMode !== 'unlock') return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showNotice('Super Admin Required', 'Please enter Super Admin email and password.', 'error');
+      return;
+    }
+    const fallbackWidgetKey = employeeWidgetItems[0]?.id ?? 'hrm-employees-hero-card';
+    const fallbackVisibility = isWidgetVisible(fallbackWidgetKey);
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put(
+        '/api/dashboard/widgets/me',
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: false,
+        },
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+      );
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setSuperAdminModalMode('apply');
+      setRestoreWidgetListVisible(false);
+      setRestoreWidgetLoadingKey(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      const err: any = error;
+      console.error('Error unlocking employee widgets:', err?.response?.status, err?.response?.data || err?.message);
+      showNotice('Unlock Failed', 'Failed to unlock widget controls.', 'error');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -418,6 +678,7 @@ export default function Employees() {
       fetchDesignations(storedToken);
       fetchBranches(storedToken);
       fetchLeaveTypes(storedToken);
+      fetchWidgetVisibility(storedToken);
     }
   }, [router]);
 
@@ -1159,15 +1420,17 @@ export default function Employees() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
-              <button
-                onClick={() => router.push('/dashboard/hrm')}
-                className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-                <span className="font-medium text-sm sm:text-base">Back to HRM</span>
-              </button>
+              {isWidgetVisible('hrm-employees-nav-back-button') && (
+                <button
+                  onClick={() => router.push('/dashboard/hrm')}
+                  className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                  <span className="font-medium text-sm sm:text-base">Back to HRM</span>
+                </button>
+              )}
             </div>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4">
               <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
@@ -1180,12 +1443,14 @@ export default function Employees() {
                 </div>
                 <span className="font-medium text-gray-900">Employee Management</span>
               </div>
-              <button
-                onClick={handleLogout}
-                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-              >
-                Logout
-              </button>
+              {isWidgetVisible('hrm-employees-nav-logout-button') && (
+                <button
+                  onClick={handleLogout}
+                  className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
+                >
+                  Logout
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1193,62 +1458,152 @@ export default function Employees() {
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
         {/* Hero Section */}
-        <div className="mb-8 flex flex-col md:flex-row md:items-start md:justify-between gap-6 md:gap-8">
-          <div>
-            <div className="flex items-center space-x-3 mb-4">
-              <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-xl flex items-center justify-center text-2xl shadow-lg">
-                👥
-              </div>
+        {isWidgetVisible('hrm-employees-hero-card') && (
+          <div className="mb-8 rounded-2xl border border-gray-200 bg-white/90 shadow-sm p-6 relative">
+            {!widgetControlsLocked && (
+              <button
+                onClick={() => stageWidgetVisibilityChange('hrm-employees-hero-card', false)}
+                className="absolute top-3 right-3 w-8 h-8 rounded-full bg-red-500 text-white hover:bg-red-600 flex items-center justify-center text-sm"
+                title="Hide this widget"
+              >
+                ×
+              </button>
+            )}
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-6 md:gap-8">
               <div>
-                <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">Employee Management</h2>
-                <p className="text-sm sm:text-base md:text-lg text-gray-600">Manage your workforce efficiently with comprehensive employee tools</p>
+                <div className="flex items-center space-x-3 mb-4">
+                  <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-xl flex items-center justify-center text-2xl shadow-lg">
+                    👥
+                  </div>
+                  <div>
+                    {isWidgetVisible('hrm-employees-hero-title') && (
+                      <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">Employee Management</h2>
+                    )}
+                    {isWidgetVisible('hrm-employees-hero-subtitle') && (
+                      <p className="text-sm sm:text-base md:text-lg text-gray-600">Manage your workforce efficiently with comprehensive employee tools</p>
+                    )}
+                  </div>
+                </div>
+                {isWidgetVisible('hrm-employees-hero-stats') && (
+                  <div className="flex flex-col sm:flex-row gap-4 sm:space-x-6 sm:gap-0 mt-2 sm:mt-4">
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-blue-600">{employees.length}</div>
+                      <div className="text-sm text-gray-500">Total Employees</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-green-600">{employees.filter(e => e.status === 'active').length}</div>
+                      <div className="text-sm text-gray-500">Active Employees</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-purple-600">{departments.length}</div>
+                      <div className="text-sm text-gray-500">Departments</div>
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-4 sm:space-x-6 sm:gap-0 mt-2 sm:mt-4">
-              <div className="text-center">
-                <div className="text-xl sm:text-2xl font-bold text-blue-600">{employees.length}</div>
-                <div className="text-sm text-gray-500">Total Employees</div>
-              </div>
-              <div className="text-center">
-                <div className="text-xl sm:text-2xl font-bold text-green-600">{employees.filter(e => e.status === 'active').length}</div>
-                <div className="text-sm text-gray-500">Active Employees</div>
-              </div>
-              <div className="text-center">
-                <div className="text-xl sm:text-2xl font-bold text-purple-600">{departments.length}</div>
-                <div className="text-sm text-gray-500">Departments</div>
-              </div>
+              {isWidgetVisible('hrm-employees-hero-add-button') && (
+                <div className="md:flex-shrink-0">
+                  <button
+                    onClick={() => {
+                      resetForm();
+                      setShowForm(true);
+                    }}
+                    className="w-full md:w-auto bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white px-6 py-3 rounded-xl text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl flex items-center justify-center space-x-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                    </svg>
+                    <span>Add Employee</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
-          <div className="md:flex-shrink-0">
-            <button
-              onClick={() => {
-                resetForm();
-                setShowForm(true);
-              }}
-              className="w-full md:w-auto bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white px-6 py-3 rounded-xl text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl flex items-center justify-center space-x-2"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              <span>Add Employee</span>
-            </button>
+        )}
+
+        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-blue-900">
+                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
+              </p>
+              <p className="text-xs text-blue-700">
+                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {!widgetControlsLocked && (
+                <button
+                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
+                  disabled={!pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Fix Widget
+                </button>
+              )}
+              {!widgetControlsLocked && (
+                <button
+                  onClick={restoreAllHiddenWidgetsStaged}
+                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
+                >
+                  Stage Restore All
+                </button>
+              )}
+              {!widgetControlsLocked && (
+                <button
+                  onClick={rollbackPendingWidgetChanges}
+                  disabled={!pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Rollback
+                </button>
+              )}
+              <button
+                onClick={restoreHiddenWidgetsAfterFix}
+                disabled={!hiddenWidgetCount}
+                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Restore Widgets
+              </button>
+              {widgetControlsLocked && (
+                <button
+                  onClick={openUnlockWidgetsAfterFix}
+                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
+                >
+                  Unlock Widgets
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Employee List */}
+        {isWidgetVisible('hrm-employees-list-card') && (
         <div className="bg-white/70 backdrop-blur-sm shadow-xl rounded-2xl border border-white/20 overflow-visible relative z-0 min-h-[700px] flex flex-col">
-          <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
-            <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
-                📋
-              </div>
-              <div>
-                <h3 className="text-xl font-bold text-white">Employee Directory</h3>
-                <p className="text-white/80">View and manage all employee records</p>
+          {!widgetControlsLocked && (
+            <button
+              onClick={() => stageWidgetVisibilityChange('hrm-employees-list-card', false)}
+              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-red-500 text-white hover:bg-red-600 flex items-center justify-center text-sm z-10"
+              title="Hide this widget"
+            >
+              ×
+            </button>
+          )}
+          {isWidgetVisible('hrm-employees-list-heading') && (
+            <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
+              <div className="flex items-center space-x-3">
+                <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
+                  📋
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold text-white">Employee Directory</h3>
+                  <p className="text-white/80">View and manage all employee records</p>
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
+          {isWidgetVisible('hrm-employees-list-filter-controls') && (
           <div className="px-6 py-4 border-b border-gray-200 bg-white/70">
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3">
               <input
@@ -1320,9 +1675,11 @@ export default function Employees() {
               </div>
             </div>
           </div>
+          )}
 
           <div className="overflow-x-auto overflow-y-visible flex-1">
             <table className="min-w-full divide-y divide-gray-200">
+              {isWidgetVisible('hrm-employees-list-table-headings') && (
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
@@ -1351,6 +1708,7 @@ export default function Employees() {
                   </th>
                 </tr>
               </thead>
+              )}
               <tbody className="bg-white divide-y divide-gray-200">
                 {paginatedEmployees.map((employee) => (
                   <tr key={employee.id} className="hover:bg-gray-50 transition-colors duration-200">
@@ -1382,6 +1740,7 @@ export default function Employees() {
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium relative z-20">
+                      {isWidgetVisible('hrm-employees-row-action-buttons') && (
                       <div className="relative" ref={openMenuFor === employee.id ? menuRef : undefined}>
                         <button
                           aria-haspopup="menu"
@@ -1474,6 +1833,7 @@ export default function Employees() {
                           </div>
                         )}
                       </div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1481,6 +1841,7 @@ export default function Employees() {
             </table>
           </div>
 
+          {isWidgetVisible('hrm-employees-pagination-controls') && (
           <div className="px-6 py-4 border-t border-gray-200 bg-white/80 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <p className="text-sm text-gray-600">
               Showing {filteredEmployees.length === 0 ? 0 : startIndex + 1} to {endIndex} of {filteredEmployees.length} employees
@@ -1511,11 +1872,117 @@ export default function Employees() {
               </button>
             </div>
           </div>
+          )}
         </div>
+        )}
       </main>
 
+      {showSuperAdminConfirmModal && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => {
+              if (!superAdminConfirmLoading) rollbackPendingWidgetChanges();
+            }}
+          />
+          <div className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">
+                {superAdminModalMode === 'apply' && 'Super Admin Confirmation'}
+                {superAdminModalMode === 'restore' && 'Restore Hidden Widgets'}
+                {superAdminModalMode === 'unlock' && 'Unlock Widget Controls'}
+              </h3>
+              <p className="mt-1 text-sm text-gray-600">
+                {superAdminModalMode === 'apply' && 'Confirm credentials to apply and lock widget controls.'}
+                {superAdminModalMode === 'restore' && 'Confirm credentials to list and restore hidden widgets.'}
+                {superAdminModalMode === 'unlock' && 'Confirm credentials to unlock widget controls.'}
+              </p>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Super Admin Email</label>
+                <input
+                  type="email"
+                  value={superAdminEmail}
+                  onChange={(e) => setSuperAdminEmail(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="superadmin@company.com"
+                  disabled={superAdminConfirmLoading}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Super Admin Password</label>
+                <input
+                  type="password"
+                  value={superAdminPassword}
+                  onChange={(e) => setSuperAdminPassword(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="Enter password"
+                  disabled={superAdminConfirmLoading}
+                />
+              </div>
+              {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                <div className="max-h-56 overflow-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+                  {employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => (
+                    <div key={item.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                      <div className="text-sm text-gray-800">{item.name}</div>
+                      <button
+                        onClick={() => restoreHiddenWidgetOneByOne(item.id)}
+                        disabled={restoreWidgetLoadingKey === item.id}
+                        className="px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}
+                      </button>
+                    </div>
+                  ))}
+                  {employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false).length === 0 && (
+                    <div className="px-3 py-3 text-sm text-gray-500">All widgets are visible.</div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+              <button
+                onClick={rollbackPendingWidgetChanges}
+                disabled={superAdminConfirmLoading}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              {superAdminModalMode === 'apply' && (
+                <button
+                  onClick={applyWidgetVisibilityChanges}
+                  disabled={superAdminConfirmLoading || !pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {superAdminConfirmLoading ? 'Applying...' : 'Confirm & Lock'}
+                </button>
+              )}
+              {superAdminModalMode === 'restore' && !restoreWidgetListVisible && (
+                <button
+                  onClick={showRestoreWidgetList}
+                  disabled={superAdminConfirmLoading}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  Show Hidden Widgets
+                </button>
+              )}
+              {superAdminModalMode === 'unlock' && (
+                <button
+                  onClick={unlockWidgetControls}
+                  disabled={superAdminConfirmLoading}
+                  className="px-4 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50"
+                >
+                  {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Employee Form Modal */}
-      {showForm && (
+      {showForm && isWidgetVisible('hrm-employees-form-pane') && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl max-w-7xl w-full max-h-[90vh] overflow-y-auto">
             <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
@@ -1524,14 +1991,16 @@ export default function Employees() {
                   <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
                     👤
                   </div>
-                  <div>
-                    <h3 className="text-xl font-bold text-white">
-                      {editingEmployee ? 'Edit Employee' : 'Add New Employee'}
-                    </h3>
-                    <p className="text-white/80">
-                      {editingEmployee ? 'Update employee information' : 'Create a new employee record'}
-                    </p>
-                  </div>
+                  {isWidgetVisible('hrm-employees-form-heading') && (
+                    <div>
+                      <h3 className="text-xl font-bold text-white">
+                        {editingEmployee ? 'Edit Employee' : 'Add New Employee'}
+                      </h3>
+                      <p className="text-white/80">
+                        {editingEmployee ? 'Update employee information' : 'Create a new employee record'}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => setShowForm(false)}
@@ -2155,45 +2624,49 @@ export default function Employees() {
                 )}
               </div>
 
-              <div className="flex items-center justify-end space-x-4 pt-6 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => setShowForm(false)}
-                  className="bg-gradient-to-r from-gray-500 to-gray-600 hover:from-gray-600 hover:to-gray-700 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                >
-                  {loading ? (
-                    <div className="flex items-center space-x-2">
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      <span>Saving...</span>
-                    </div>
-                  ) : (
-                    <span>{editingEmployee ? 'Update Employee' : 'Create Employee'}</span>
-                  )}
-                </button>
-              </div>
+              {isWidgetVisible('hrm-employees-form-action-buttons') && (
+                <div className="flex items-center justify-end space-x-4 pt-6 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setShowForm(false)}
+                    className="bg-gradient-to-r from-gray-500 to-gray-600 hover:from-gray-600 hover:to-gray-700 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white px-6 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                  >
+                    {loading ? (
+                      <div className="flex items-center space-x-2">
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <span>Saving...</span>
+                      </div>
+                    ) : (
+                      <span>{editingEmployee ? 'Update Employee' : 'Create Employee'}</span>
+                    )}
+                  </button>
+                </div>
+              )}
             </form>
           </div>
         </div>
       )}
 
       {/* Employee Profile Modal */}
-      {showProfileModal && (
+      {showProfileModal && isWidgetVisible('hrm-employees-profile-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowProfileModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-6 max-h-[90vh] overflow-y-auto text-black">
             <div className="flex items-start justify-between mb-6">
               <div>
-                <h3 className="text-2xl font-bold text-gray-900 flex items-center gap-3">
-                  {profileEmployee?.first_name} {profileEmployee?.last_name}
-                  <span className="text-sm font-normal text-gray-500">({profileEmployee?.employee_code})</span>
-                </h3>
+                {isWidgetVisible('hrm-employees-profile-heading') && (
+                  <h3 className="text-2xl font-bold text-gray-900 flex items-center gap-3">
+                    {profileEmployee?.first_name} {profileEmployee?.last_name}
+                    <span className="text-sm font-normal text-gray-500">({profileEmployee?.employee_code})</span>
+                  </h3>
+                )}
                 <p className="text-black">{profileEmployee?.designation.name} at {profileEmployee?.department.name}</p>
               </div>
               <button onClick={() => setShowProfileModal(false)} className="absolute top-4 right-4 bg-gradient-to-r from-red-500 to-red-600 text-white p-2 rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all duration-200 hover:from-red-600 hover:to-red-700">✕</button>
@@ -2323,12 +2796,14 @@ export default function Employees() {
       )}
 
       {/* Documents Modal */}
-      {showDocsModal && activeEmployee && (
+      {showDocsModal && activeEmployee && isWidgetVisible('hrm-employees-documents-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowDocsModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-bold text-gray-900">Documents - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              {isWidgetVisible('hrm-employees-documents-heading') && (
+                <h3 className="text-xl font-bold text-gray-900">Documents - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              )}
               <button onClick={() => setShowDocsModal(false)} className="absolute top-4 right-4 bg-gradient-to-r from-red-500 to-red-600 text-white p-2 rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all duration-200 hover:from-red-600 hover:to-red-700">✕</button>
             </div>
 
@@ -2412,12 +2887,14 @@ export default function Employees() {
       )}
 
       {/* Education Modal */}
-      {showEduModal && activeEmployee && (
+      {showEduModal && activeEmployee && isWidgetVisible('hrm-employees-education-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowEduModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-bold text-gray-900">Education - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              {isWidgetVisible('hrm-employees-education-heading') && (
+                <h3 className="text-xl font-bold text-gray-900">Education - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              )}
               <button onClick={() => setShowEduModal(false)} className="absolute top-4 right-4 bg-gradient-to-r from-red-500 to-red-600 text-white p-2 rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all duration-200 hover:from-red-600 hover:to-red-700">✕</button>
             </div>
 
@@ -2534,12 +3011,14 @@ export default function Employees() {
       )}
 
       {/* Experience Modal */}
-      {showExpModal && activeEmployee && (
+      {showExpModal && activeEmployee && isWidgetVisible('hrm-employees-experience-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowExpModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-bold text-gray-900">Experience - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              {isWidgetVisible('hrm-employees-experience-heading') && (
+                <h3 className="text-xl font-bold text-gray-900">Experience - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              )}
               <button onClick={() => setShowExpModal(false)} className="absolute top-4 right-4 bg-gradient-to-r from-red-500 to-red-600 text-white p-2 rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all duration-200 hover:from-red-600 hover:to-red-700">✕</button>
             </div>
 
@@ -2657,12 +3136,14 @@ export default function Employees() {
       )}
 
       {/* Allowances and Deductions Modal */}
-      {showAllowancesModal && activeEmployee && (
+      {showAllowancesModal && activeEmployee && isWidgetVisible('hrm-employees-allowances-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowAllowancesModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h3 className="text-xl font-bold text-gray-900">Allowances & Deductions - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              {isWidgetVisible('hrm-employees-allowances-heading') && (
+                <h3 className="text-xl font-bold text-gray-900">Allowances & Deductions - {activeEmployee.first_name} {activeEmployee.last_name}</h3>
+              )}
               <button onClick={() => setShowAllowancesModal(false)} className="absolute top-4 right-4 bg-gradient-to-r from-red-500 to-red-600 text-white p-2 rounded-full shadow-lg hover:shadow-xl transform hover:scale-110 transition-all duration-200 hover:from-red-600 hover:to-red-700">✕</button>
             </div>
 
@@ -2809,7 +3290,7 @@ export default function Employees() {
       )}
 
       {/* Leave Management Modal */}
-      {showLeaveModal && activeEmployee && (
+      {showLeaveModal && activeEmployee && isWidgetVisible('hrm-employees-leave-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowLeaveModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl p-6 max-h-[90vh] overflow-y-auto">
@@ -2819,7 +3300,9 @@ export default function Employees() {
                   📅
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold text-gray-900">Leave Management</h3>
+                  {isWidgetVisible('hrm-employees-leave-heading') && (
+                    <h3 className="text-xl font-bold text-gray-900">Leave Management</h3>
+                  )}
                   <p className="text-sm text-gray-600">{activeEmployee.first_name} {activeEmployee.last_name} ({activeEmployee.employee_code})</p>
                 </div>
               </div>
@@ -2949,61 +3432,69 @@ export default function Employees() {
               )}
 
               {/* Action Buttons */}
-              <div className="flex justify-end space-x-4 pt-4 border-t border-gray-200">
-                <button
-                  type="button"
-                  onClick={() => setShowLeaveModal(false)}
-                  className="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors duration-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  className="bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white px-6 py-2 rounded-lg font-medium transition-all duration-300 transform hover:scale-105"
-                >
-                  Save Leave Balances
-                </button>
-              </div>
+              {isWidgetVisible('hrm-employees-leave-action-buttons') && (
+                <div className="flex justify-end space-x-4 pt-4 border-t border-gray-200">
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaveModal(false)}
+                    className="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors duration-300"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white px-6 py-2 rounded-lg font-medium transition-all duration-300 transform hover:scale-105"
+                  >
+                    Save Leave Balances
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
       )}
 
       {/* Confirm Modal */}
-      {confirmOpen && (
+      {confirmOpen && isWidgetVisible('hrm-employees-confirm-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeConfirm} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900">{confirmTitle || 'Confirm'}</h3>
+              {isWidgetVisible('hrm-employees-confirm-heading') && (
+                <h3 className="text-lg font-bold text-gray-900">{confirmTitle || 'Confirm'}</h3>
+              )}
               <button onClick={closeConfirm} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
             <div className="text-gray-700 mb-6">{confirmMessage || 'Are you sure?'}</div>
-            <div className="flex justify-end space-x-3">
-              <button
-                onClick={closeConfirm}
-                className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={async () => { if (confirmAction) await confirmAction(); }}
-                className="px-5 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700 transition"
-              >
-                Confirm
-              </button>
-            </div>
+            {isWidgetVisible('hrm-employees-confirm-action-buttons') && (
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={closeConfirm}
+                  className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => { if (confirmAction) await confirmAction(); }}
+                  className="px-5 py-2 rounded-xl bg-red-600 text-white hover:bg-red-700 transition"
+                >
+                  Confirm
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* Reset Password Modal */}
-      {showResetPasswordModal && resetPasswordEmployee && (
+      {showResetPasswordModal && resetPasswordEmployee && isWidgetVisible('hrm-employees-reset-password-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeResetPassword} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-start justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900">Reset Employee Password</h3>
+              {isWidgetVisible('hrm-employees-reset-password-heading') && (
+                <h3 className="text-lg font-bold text-gray-900">Reset Employee Password</h3>
+              )}
               <button onClick={closeResetPassword} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
 
@@ -3045,29 +3536,31 @@ export default function Employees() {
                 Show password
               </label>
 
-              <div className="flex justify-end space-x-3 pt-2">
-                <button
-                  type="button"
-                  onClick={closeResetPassword}
-                  className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={resetPasswordSaving}
-                  className="px-5 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60"
-                >
-                  {resetPasswordSaving ? 'Resetting...' : 'Reset Password'}
-                </button>
-              </div>
+              {isWidgetVisible('hrm-employees-reset-password-action-buttons') && (
+                <div className="flex justify-end space-x-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={closeResetPassword}
+                    className="px-5 py-2 rounded-xl bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={resetPasswordSaving}
+                    className="px-5 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60"
+                  >
+                    {resetPasswordSaving ? 'Resetting...' : 'Reset Password'}
+                  </button>
+                </div>
+              )}
             </form>
           </div>
         </div>
       )}
 
       {/* Notification Modal */}
-      {noticeOpen && (
+      {noticeOpen && isWidgetVisible('hrm-employees-notice-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeNotice} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 max-h-[90vh] overflow-y-auto">
@@ -3076,7 +3569,9 @@ export default function Employees() {
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-white ${noticeType === 'success' ? 'bg-green-500' : noticeType === 'error' ? 'bg-red-500' : 'bg-blue-500'}`}>
                   {noticeType === 'success' ? '✔' : noticeType === 'error' ? '⚠' : 'ℹ'}
                 </div>
-                <h3 className="text-lg font-bold text-gray-900">{noticeTitle || (noticeType === 'success' ? 'Success' : noticeType === 'error' ? 'Error' : 'Notice')}</h3>
+                {isWidgetVisible('hrm-employees-notice-heading') && (
+                  <h3 className="text-lg font-bold text-gray-900">{noticeTitle || (noticeType === 'success' ? 'Success' : noticeType === 'error' ? 'Error' : 'Notice')}</h3>
+                )}
               </div>
               <button onClick={closeNotice} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>

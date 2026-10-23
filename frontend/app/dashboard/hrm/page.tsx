@@ -24,6 +24,13 @@ type HrmQuickActionCard = {
   desc: string;
 };
 
+type WidgetVisibilityChange = {
+  widget_key: string;
+  is_visible: boolean;
+};
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+
 export default function HRM() {
   const [token, setToken] = useState('');
   const [userRoles, setUserRoles] = useState<string[]>([]);
@@ -31,7 +38,17 @@ export default function HRM() {
   const [isAdminUser, setIsAdminUser] = useState(false);
   const [accessReady, setAccessReady] = useState(false);
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
-  const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
+  const [, setWidgetToggleLoadingKey] = useState('');
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const [activeEmployees, setActiveEmployees] = useState(0);
   const [attendanceRate, setAttendanceRate] = useState(0);
   const [departmentsCount, setDepartmentsCount] = useState(0);
@@ -107,10 +124,13 @@ export default function HRM() {
           headers: { Authorization: `Bearer ${token}` },
         });
         const widgetMap = widgetRes.data?.data?.widgets || {};
+        const controlsLocked = Boolean(widgetRes.data?.data?.widget_controls_locked);
         setWidgetVisibility(widgetMap);
+        setWidgetControlsLocked(controlsLocked);
       } catch (widgetError) {
         console.error('Error fetching HRM widget visibility:', widgetError);
         setWidgetVisibility({});
+        setWidgetControlsLocked(false);
       }
     } catch (error) {
       console.error('Error fetching HRM access profile:', error);
@@ -118,6 +138,7 @@ export default function HRM() {
       setUserPermissions([]);
       setIsAdminUser(false);
       setWidgetVisibility({});
+      setWidgetControlsLocked(false);
     } finally {
       setAccessReady(true);
     }
@@ -315,6 +336,20 @@ export default function HRM() {
     { id: 'hrm-quick-process-payroll', icon: '💰', title: 'Process Payroll', desc: 'Monthly run' },
   ];
 
+  const hrmExtraWidgets = [
+    { id: 'hrm-hero-active-employees', name: 'HRM Hero Active Employees' },
+    { id: 'hrm-hero-attendance-rate', name: 'HRM Hero Attendance Rate' },
+    { id: 'hrm-hero-departments', name: 'HRM Hero Departments' },
+    { id: 'hrm-modules-section', name: 'HRM Modules Section' },
+    { id: 'hrm-quick-actions-section', name: 'HRM Quick Actions Section' },
+  ];
+  const allHrmWidgetItems = [
+    ...hrmModules.map((module) => ({ id: module.id, name: module.name })),
+    ...hrmQuickActions.map((action) => ({ id: action.id, name: action.title })),
+    ...hrmExtraWidgets,
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+
   const isSalesRefOnly =
     !isAdminUser && userRoles.length > 0 && userRoles.every((role) => role === 'sales ref');
 
@@ -331,7 +366,12 @@ export default function HRM() {
     return hasAnyPermission(module.accessKeywords);
   });
 
-  const visibleQuickActions = hrmQuickActions.filter((action) => widgetVisibility[action.id] !== false);
+  const visibleQuickActions = hrmQuickActions.filter((action) => isWidgetVisible(action.id));
+  const isModulesSectionVisible = isWidgetVisible('hrm-modules-section');
+  const isQuickActionsSectionVisible = isWidgetVisible('hrm-quick-actions-section');
+  const isHeroActiveEmployeesVisible = isWidgetVisible('hrm-hero-active-employees');
+  const isHeroAttendanceRateVisible = isWidgetVisible('hrm-hero-attendance-rate');
+  const isHeroDepartmentsVisible = isWidgetVisible('hrm-hero-departments');
 
   const setMyWidgetVisibility = async (widgetKey: string, isVisible: boolean) => {
     try {
@@ -388,6 +428,210 @@ export default function HRM() {
       });
     } catch (error) {
       console.error('Error restoring HRM widgets:', error);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({
+      ...prev,
+      [widgetKey]: isVisible,
+    }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) {
+      setWidgetVisibility(widgetVisibilitySnapshot);
+    }
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (
+    changes: WidgetVisibilityChange[] = [],
+    mode: SuperAdminModalMode = 'apply'
+  ) => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply') return;
+    if (!pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await apiClient.put(
+          '/dashboard/widgets/me',
+          {
+            widget_key: change.widget_key,
+            is_visible: change.is_visible,
+            super_admin_email: superAdminEmail.trim(),
+            super_admin_password: superAdminPassword,
+            lock_widget_controls: true,
+          },
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+    } catch (error) {
+      console.error('Error applying HRM widget visibility changes:', error);
+      alert('Super Admin confirmation failed or widget update failed.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreAllHiddenWidgetsStaged = () => {
+    if (widgetControlsLocked) return;
+    const hiddenKeys = allHrmWidgetItems
+      .map((item) => item.id)
+      .filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => {
+      const next = { ...prev };
+      hiddenKeys.forEach((key) => {
+        next[key] = true;
+      });
+      return next;
+    });
+    setPendingWidgetChanges((prev) => {
+      const mutable = [...prev];
+      hiddenKeys.forEach((key) => {
+        const remaining = mutable.filter((entry) => entry.widget_key !== key);
+        remaining.push({ widget_key: key, is_visible: true });
+        mutable.splice(0, mutable.length, ...remaining);
+      });
+      return mutable;
+    });
+  };
+
+  const hiddenWidgetCountManaged = allHrmWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = allHrmWidgetItems
+      .map((item) => item.id)
+      .filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) {
+      alert('All widgets are already visible.');
+      return;
+    }
+    openSuperAdminConfirmation(
+      hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })),
+      'restore'
+    );
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: true,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+      setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
+    } catch (error) {
+      console.error('Error restoring HRM widget:', error);
+      alert('Failed to restore widget. Please verify Super Admin credentials and try again.');
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => {
+    openSuperAdminConfirmation([], 'unlock');
+  };
+
+  const unlockWidgetControls = async () => {
+    if (superAdminModalMode !== 'unlock') return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      alert('Please enter Super Admin email and password.');
+      return;
+    }
+    const fallbackWidgetKey = allHrmWidgetItems[0]?.id ?? 'hrm-employees';
+    const fallbackVisibility = isWidgetVisible(fallbackWidgetKey);
+    try {
+      setSuperAdminConfirmLoading(true);
+      await apiClient.put(
+        '/dashboard/widgets/me',
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: false,
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setSuperAdminModalMode('apply');
+      setRestoreWidgetListVisible(false);
+      setRestoreWidgetLoadingKey(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      console.error('Error unlocking HRM widget controls:', error);
+      alert('Failed to unlock widget controls. Please verify Super Admin credentials and try again.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
     }
   };
 
@@ -463,58 +707,147 @@ export default function HRM() {
             From employee onboarding to payroll processing, manage everything in one place.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 sm:space-x-6">
-            <div className="text-center">
-              <div className="text-2xl font-bold text-blue-600">
-                {loading ? '...' : activeEmployees}
+            {isHeroActiveEmployeesVisible && (
+              <div className="relative text-center px-8">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-hero-active-employees', false)}
+                    className="absolute right-0 top-0 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Active Employees"
+                  >
+                    ×
+                  </button>
+                )}
+                <div className="text-2xl font-bold text-blue-600">{loading ? '...' : activeEmployees}</div>
+                <div className="text-sm text-gray-500">Active Employees</div>
               </div>
-              <div className="text-sm text-gray-500">Active Employees</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-green-600">
-                {loading ? '...' : `${attendanceRate}%`}
+            )}
+            {isHeroAttendanceRateVisible && (
+              <div className="relative text-center px-8">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-hero-attendance-rate', false)}
+                    className="absolute right-0 top-0 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Attendance Rate"
+                  >
+                    ×
+                  </button>
+                )}
+                <div className="text-2xl font-bold text-green-600">{loading ? '...' : `${attendanceRate}%`}</div>
+                <div className="text-sm text-gray-500">Attendance Rate</div>
               </div>
-              <div className="text-sm text-gray-500">Attendance Rate</div>
-            </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-purple-600">
-                {loading ? '...' : departmentsCount}
+            )}
+            {isHeroDepartmentsVisible && (
+              <div className="relative text-center px-8">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-hero-departments', false)}
+                    className="absolute right-0 top-0 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Departments"
+                  >
+                    ×
+                  </button>
+                )}
+                <div className="text-2xl font-bold text-purple-600">{loading ? '...' : departmentsCount}</div>
+                <div className="text-sm text-gray-500">Departments</div>
               </div>
-              <div className="text-sm text-gray-500">Departments</div>
-            </div>
+            )}
           </div>
-          {hiddenWidgetCount > 0 && (
-            <button
-              type="button"
-              onClick={restoreAllHiddenWidgets}
-              className="mt-4 rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
-            >
-              Restore Hidden Widgets ({hiddenWidgetCount})
-            </button>
-          )}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {!widgetControlsLocked && hiddenWidgetCountManaged > 0 && (
+              <button
+                type="button"
+                onClick={restoreAllHiddenWidgetsStaged}
+                className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+              >
+                Restore Hidden Widgets ({hiddenWidgetCountManaged})
+              </button>
+            )}
+            {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
+                  className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
+                >
+                  Fix Widget ({pendingWidgetChanges.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={rollbackPendingWidgetChanges}
+                  className="rounded-full border border-gray-300 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+                >
+                  Cancel Widget Changes
+                </button>
+              </>
+            )}
+            {widgetControlsLocked && (
+              <>
+                <div className="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
+                  Widget controls locked after Super Admin confirmation.
+                </div>
+                {hiddenWidgetCountManaged > 0 && (
+                  <button
+                    type="button"
+                    onClick={restoreHiddenWidgetsAfterFix}
+                    className="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                  >
+                    Restore Widgets ({hiddenWidgetCountManaged})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={openUnlockWidgetsAfterFix}
+                  className="rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                >
+                  Unlock Widgets
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* HRM Module Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {isModulesSectionVisible && (
+        <div className="relative grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {!widgetControlsLocked && (
+            <button
+              type="button"
+              onClick={() => stageWidgetVisibilityChange('hrm-modules-section', false)}
+              className="absolute -top-3 right-0 z-30 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+              title="Disable this widget"
+              aria-label="Disable HRM Modules Section"
+            >
+              ×
+            </button>
+          )}
           {visibleHrmModules.map((module, index) => (
             <Link
               key={index}
               href={module.path}
               className="group relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 cursor-pointer border border-white/20 overflow-hidden transform hover:-translate-y-2 hover:scale-105"
             >
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  if (widgetToggleLoadingKey) return;
-                  setMyWidgetVisibility(module.id, false);
-                }}
-                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
-                title="Disable this widget"
-                aria-label={`Disable ${module.name}`}
-              >
-                {widgetToggleLoadingKey === module.id ? '...' : 'x'}
-              </button>
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    stageWidgetVisibilityChange(module.id, false);
+                  }}
+                  className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label={`Disable ${module.name}`}
+                >
+                  ×
+                </button>
+              )}
 
               {/* Gradient Background */}
               <div className={`absolute inset-0 bg-gradient-to-br ${module.bgColor} opacity-0 group-hover:opacity-100 transition-opacity duration-500`}></div>
@@ -551,15 +884,28 @@ export default function HRM() {
             </Link>
           ))}
         </div>
+        )}
 
-        {visibleHrmModules.length === 0 && (
+        {isModulesSectionVisible && visibleHrmModules.length === 0 && (
           <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
             No HRM features are assigned to your role yet. Please contact an administrator.
           </div>
         )}
 
         {/* Quick Actions Section */}
-        <div className="mt-12 bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
+        {isQuickActionsSectionVisible && (
+        <div className="relative mt-12 bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
+          {!widgetControlsLocked && (
+            <button
+              type="button"
+              onClick={() => stageWidgetVisibilityChange('hrm-quick-actions-section', false)}
+              className="absolute right-3 top-3 z-30 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+              title="Disable this widget"
+              aria-label="Disable Quick Actions Section"
+            >
+              ×
+            </button>
+          )}
           <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
             <div className="flex items-center space-x-3">
               <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
@@ -579,18 +925,19 @@ export default function HRM() {
                   key={index}
                   className="group relative bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105 text-center"
                 >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (widgetToggleLoadingKey) return;
-                      setMyWidgetVisibility(action.id, false);
-                    }}
-                    className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
-                    title="Disable this widget"
-                    aria-label={`Disable ${action.title}`}
-                  >
-                    {widgetToggleLoadingKey === action.id ? '...' : 'x'}
-                  </button>
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        stageWidgetVisibilityChange(action.id, false);
+                      }}
+                      className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label={`Disable ${action.title}`}
+                    >
+                      ×
+                    </button>
+                  )}
                   <div className="text-2xl mb-2">{action.icon}</div>
                   <h4 className="font-semibold text-gray-900 group-hover:text-gray-800 transition-colors duration-300 text-sm">
                     {action.title}
@@ -603,6 +950,133 @@ export default function HRM() {
             </div>
           </div>
         </div>
+        )}
+
+        {showSuperAdminConfirmModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-md rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+                <h3 className="text-lg font-semibold text-gray-900">Super Admin Confirmation</h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (superAdminConfirmLoading) return;
+                    rollbackPendingWidgetChanges();
+                  }}
+                  className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="mt-4 space-y-4">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Email</label>
+                  <input
+                    type="email"
+                    value={superAdminEmail}
+                    onChange={(e) => setSuperAdminEmail(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                    placeholder="superadmin@company.com"
+                    autoComplete="username"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Password</label>
+                  <input
+                    type="password"
+                    value={superAdminPassword}
+                    onChange={(e) => setSuperAdminPassword(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                    placeholder="Enter password"
+                    autoComplete="current-password"
+                  />
+                </div>
+                {superAdminModalMode !== 'unlock' && !restoreWidgetListVisible && (
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                    Pending widget updates: <strong>{pendingWidgetChanges.length}</strong>
+                  </div>
+                )}
+                {superAdminModalMode === 'unlock' && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    Confirm Super Admin credentials to unlock widget controls and show close buttons again.
+                  </div>
+                )}
+                {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                  <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 px-3 py-3">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-indigo-700">Hidden widgets</p>
+                    {pendingWidgetChanges.length === 0 ? (
+                      <p className="text-sm text-indigo-800">All hidden widgets are restored.</p>
+                    ) : (
+                      <div className="max-h-56 space-y-2 overflow-y-auto">
+                        {pendingWidgetChanges.map((change) => {
+                          const widgetName =
+                            allHrmWidgetItems.find((item) => item.id === change.widget_key)?.name ?? change.widget_key;
+                          const isRestoring = restoreWidgetLoadingKey === change.widget_key;
+                          return (
+                            <div
+                              key={change.widget_key}
+                              className="flex items-center justify-between rounded-lg border border-indigo-100 bg-white px-3 py-2"
+                            >
+                              <span className="text-sm font-medium text-gray-800">{widgetName}</span>
+                              <button
+                                type="button"
+                                disabled={Boolean(restoreWidgetLoadingKey)}
+                                onClick={() => restoreHiddenWidgetOneByOne(change.widget_key)}
+                                className="rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+                              >
+                                {isRestoring ? 'Restoring...' : 'Restore'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="mt-5 flex justify-end gap-2 border-t border-gray-200 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (superAdminConfirmLoading) return;
+                    rollbackPendingWidgetChanges();
+                  }}
+                  className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                {superAdminModalMode === 'apply' ? (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading}
+                    onClick={applyWidgetVisibilityChanges}
+                    className="rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:from-blue-700 hover:to-cyan-700 disabled:opacity-60"
+                  >
+                    {superAdminConfirmLoading ? 'Confirming...' : 'Confirm & Apply'}
+                  </button>
+                ) : superAdminModalMode === 'restore' ? (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading || restoreWidgetListVisible}
+                    onClick={showRestoreWidgetList}
+                    className="rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white hover:from-indigo-700 hover:to-blue-700 disabled:opacity-60"
+                  >
+                    Show Hidden Widgets
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={superAdminConfirmLoading}
+                    onClick={unlockWidgetControls}
+                    className="rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-sm font-semibold text-white hover:from-amber-600 hover:to-orange-600 disabled:opacity-60"
+                  >
+                    {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

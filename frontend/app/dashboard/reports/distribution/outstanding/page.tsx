@@ -131,7 +131,7 @@ export default function DistributionOutstandingReportPage() {
       setErrorMessage('');
 
       const allRows: InvoiceRow[] = [];
-      let nextUrl: string | null = `${API_URL}/api/distribution/invoices?per_page=200`;
+      let nextUrl: string | null = `${API_URL}/api/distribution/invoices?per_page=200&exclude_cancelled=1`;
       let pageCount = 0;
 
       while (nextUrl && pageCount < 50) {
@@ -185,6 +185,7 @@ export default function DistributionOutstandingReportPage() {
     const term = search.trim().toLowerCase();
 
     return rows
+      .filter((row) => String(row.status || '').toLowerCase() !== 'cancelled')
       .filter((row) => getOutstanding(row) > 0)
       .filter((row) => {
         if (statusFilter !== 'all' && row.status !== statusFilter) return false;

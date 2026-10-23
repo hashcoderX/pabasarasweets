@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -44,6 +44,16 @@ type PlanSummary = {
 };
 
 type QuickFilterKey = 'all' | 'today' | 'this_week' | 'pending_orders';
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const productionPlanningWidgetItems = [
+  { id: 'production-planning-nav-bar', name: 'Production Planning Navigation Bar' },
+  { id: 'production-planning-flow-card', name: 'Production Planning Flow Card' },
+  { id: 'production-planning-summary-cards', name: 'Production Planning Summary Cards' },
+  { id: 'production-planning-content-panels', name: 'Production Planning Content Panels' },
+  { id: 'production-planning-order-confirm-modal', name: 'Production Planning Order Confirm Modal' },
+];
 
 const toDateInput = (date: Date): string => {
   const year = date.getFullYear();
@@ -112,13 +122,43 @@ export default function ProductionPlanningPage() {
   const [planBatchCount, setPlanBatchCount] = useState('1');
   const [planPriority, setPlanPriority] = useState<'low' | 'medium' | 'high'>('medium');
   const [planNotes, setPlanNotes] = useState('');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = productionPlanningWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
   const inputClass =
     'w-full rounded-xl border border-emerald-100 bg-gradient-to-b from-white to-emerald-50/40 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 focus:outline-none';
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
+
+  const fetchWidgetVisibility = useCallback(async (authToken: string) => {
+    if (!authToken) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  }, []);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -188,7 +228,129 @@ export default function ProductionPlanningPage() {
   useEffect(() => {
     if (!token) return;
     loadAll(token);
-  }, [token]);
+    fetchWidgetVisibility(token);
+  }, [token, fetchWidgetVisibility]);
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
+        });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = productionPlanningWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = productionPlanningWidgetItems[0]?.id || 'production-planning-nav-bar';
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const filteredBomsForProduct = useMemo(() => {
     if (!planProductId) return boms;
@@ -438,7 +600,7 @@ export default function ProductionPlanningPage() {
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.14),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.12),_transparent_28%),linear-gradient(180deg,_#f5fffb_0%,_#ecfeff_46%,_#f0fdf4_100%)]">
-      <nav className="relative z-10 border-b border-emerald-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
+      {isWidgetVisible('production-planning-nav-bar') && <nav className="relative z-10 border-b border-emerald-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <div className="overflow-hidden rounded-3xl border border-emerald-100 bg-white shadow-[0_18px_65px_-35px_rgba(5,150,105,0.45)]">
             <div className="border-b border-emerald-100 bg-gradient-to-r from-slate-900 via-teal-900 to-cyan-900 px-6 py-5">
@@ -468,18 +630,34 @@ export default function ProductionPlanningPage() {
             </div>
           </div>
         </div>
-      </nav>
+        {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-planning-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </nav>}
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-2xl border border-teal-200 bg-teal-50/75 px-4 py-3 text-sm text-teal-900 shadow-sm">
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('production-planning-flow-card') && <section className="rounded-2xl border border-teal-200 bg-teal-50/75 px-4 py-3 text-sm text-teal-900 shadow-sm">
           <p className="font-semibold">Recommended flow</p>
           <p className="mt-1">1) Filter and review existing plans, 2) Create a new production plan, 3) Verify today&apos;s queue, 4) Create production order when ready.</p>
-        </section>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('production-planning-flow-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </section>}
 
         {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
         {errorMessage && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{errorMessage}</div>}
 
-        <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        {isWidgetVisible('production-planning-summary-cards') && <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           <div className="rounded-2xl border border-cyan-100 bg-gradient-to-br from-cyan-50 to-white p-4 shadow-sm">
             <div className="text-xs uppercase tracking-[0.15em] text-cyan-600">Total Plans</div>
             <div className="mt-2 text-2xl font-bold text-gray-900">{summary.total_plans}</div>
@@ -496,9 +674,10 @@ export default function ProductionPlanningPage() {
             <div className="text-xs uppercase tracking-[0.15em] text-indigo-600">Scheduled/Order Created</div>
             <div className="mt-2 text-2xl font-bold text-gray-900">{summary.scheduled_or_order_created}</div>
           </div>
-        </section>
+          {!widgetControlsLocked && <div className="md:col-span-2 xl:col-span-4"><button type="button" onClick={() => stageWidgetVisibilityChange('production-planning-summary-cards', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </section>}
 
-        <section className="rounded-3xl border border-emerald-100 bg-white shadow-sm p-5">
+        {isWidgetVisible('production-planning-content-panels') && <><section className="rounded-3xl border border-emerald-100 bg-white shadow-sm p-5">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Production Schedule Filters</h2>
           <p className="text-xs text-gray-500 mb-4">Use date range and status together to quickly find missing or pending plans.</p>
           <div className="mb-4 flex flex-wrap gap-2">
@@ -758,9 +937,11 @@ export default function ProductionPlanningPage() {
             </table>
           </div>
         </section>
+        {!widgetControlsLocked && <div><button type="button" onClick={() => stageWidgetVisibilityChange('production-planning-content-panels', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </>}
       </main>
 
-      {confirmModal.open && confirmModal.plan && (
+      {isWidgetVisible('production-planning-order-confirm-modal') && confirmModal.open && confirmModal.plan && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 px-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-3xl border border-emerald-100 bg-white p-5 shadow-2xl">
             <h3 className="text-lg font-semibold text-gray-900">Create Production Order</h3>
@@ -789,6 +970,7 @@ export default function ProductionPlanningPage() {
           </div>
         </div>
       )}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{productionPlanningWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

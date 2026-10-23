@@ -65,7 +65,7 @@ interface InventoryItem {
   out_price?: number | null;
   current_stock: number;
   unit: string;
-  additional_info?: Record<string, any> | string | null;
+  additional_info?: Record<string, unknown> | string | null;
   last_batch_no?: string | null;
   lastBatchNo?: string | null;
   last_label_code?: string | null;
@@ -86,6 +86,15 @@ type ConfirmModalState = {
   confirmText: string;
   onConfirm: () => Promise<void> | void;
 };
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const vehicleLoadingLoadItemsWidgetItems = [
+  { id: 'vehicle-loading-load-items-hero-card', name: 'Vehicle Loading Load Items Hero Card' },
+  { id: 'vehicle-loading-load-items-load-selection-card', name: 'Vehicle Loading Load Selection Card' },
+  { id: 'vehicle-loading-load-items-workspace-card', name: 'Vehicle Loading Load Items Workspace Card' },
+  { id: 'vehicle-loading-load-items-csv-modal-pane', name: 'Vehicle Loading Load Items CSV Modal Pane' },
+];
 
 export default function LoadItemsPage() {
   const [token, setToken] = useState('');
@@ -100,6 +109,17 @@ export default function LoadItemsPage() {
   const [noticeModal, setNoticeModal] = useState<NoticeModalState | null>(null);
   const [confirmModal, setConfirmModal] = useState<ConfirmModalState | null>(null);
   const [confirmModalLoading, setConfirmModalLoading] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const [itemSearch, setItemSearch] = useState('');
   const [showItemDropdown, setShowItemDropdown] = useState(false);
   const [highlightedItemIndex, setHighlightedItemIndex] = useState(-1);
@@ -114,6 +134,8 @@ export default function LoadItemsPage() {
     qty: ''
   });
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = vehicleLoadingLoadItemsWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -128,8 +150,126 @@ export default function LoadItemsPage() {
     if (token) {
       fetchLoads();
       fetchInventoryItems();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = vehicleLoadingLoadItemsWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = vehicleLoadingLoadItemsWidgetItems[0]?.id || 'vehicle-loading-load-items-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (selectedLoad) {
@@ -175,7 +315,7 @@ export default function LoadItemsPage() {
     return toSafeNumber(item.current_stock);
   };
 
-  const resolveAdditionalInfo = (item: InventoryItem): Record<string, any> => {
+  const resolveAdditionalInfo = (item: InventoryItem): Record<string, unknown> => {
     const info = item.additional_info;
     if (!info) return {};
 
@@ -188,6 +328,13 @@ export default function LoadItemsPage() {
     }
 
     return info;
+  };
+
+  const extractApiErrorMessage = (error: unknown, fallback: string): string => {
+    if (!error || typeof error !== 'object') return fallback;
+    const errorRecord = error as { response?: { data?: { message?: unknown } } };
+    const apiMessage = errorRecord.response?.data?.message;
+    return typeof apiMessage === 'string' && apiMessage.trim() ? apiMessage : fallback;
   };
 
   // Handle clicking outside to close suggestions
@@ -273,11 +420,18 @@ export default function LoadItemsPage() {
         }),
       ]);
 
-      const extractItems = (response: any): any[] => {
-        const data = response?.data;
+      const extractItems = (response: unknown): unknown[] => {
+        const data = response && typeof response === 'object'
+          ? (response as { data?: unknown }).data
+          : null;
         if (Array.isArray(data)) return data;
-        if (Array.isArray(data?.data)) return data.data;
-        if (Array.isArray(data?.data?.data)) return data.data.data;
+        if (data && typeof data === 'object' && Array.isArray((data as { data?: unknown[] }).data)) return (data as { data: unknown[] }).data;
+        if (data && typeof data === 'object') {
+          const nested = (data as { data?: unknown }).data;
+          if (nested && typeof nested === 'object' && Array.isArray((nested as { data?: unknown[] }).data)) {
+            return (nested as { data: unknown[] }).data;
+          }
+        }
         return [];
       };
 
@@ -286,50 +440,53 @@ export default function LoadItemsPage() {
         ...extractItems(rawBatchResponse),
       ];
 
-      const normalized: InventoryItem[] = items.map((item: any) => ({
-        id: Number(item?.id) || 0,
-        inventory_item_id: Number(item?.inventory_item_id) || undefined,
-        grn_item_id: item?.grn_item_id !== undefined && item?.grn_item_id !== null ? Number(item?.grn_item_id) : null,
-        batch_no: item?.batch_no
-          ? String(item.batch_no)
-          : item?.batch_number
-            ? String(item.batch_number)
-            : item?.last_batch_no
-              ? String(item.last_batch_no)
-              : item?.lastBatchNo
-                ? String(item.lastBatchNo)
+      const normalized: InventoryItem[] = items.map((item) => {
+        const row = item as Record<string, unknown>;
+        return ({
+        id: Number(row.id) || 0,
+        inventory_item_id: Number(row.inventory_item_id) || undefined,
+        grn_item_id: row.grn_item_id !== undefined && row.grn_item_id !== null ? Number(row.grn_item_id) : null,
+        batch_no: row.batch_no
+          ? String(row.batch_no)
+          : row.batch_number
+            ? String(row.batch_number)
+            : row.last_batch_no
+              ? String(row.last_batch_no)
+              : row.lastBatchNo
+                ? String(row.lastBatchNo)
             : null,
-        batch_purchase_price: item?.batch_purchase_price !== undefined && item?.batch_purchase_price !== null
-          ? toSafeNumber(item.batch_purchase_price)
+        batch_purchase_price: row.batch_purchase_price !== undefined && row.batch_purchase_price !== null
+          ? toSafeNumber(row.batch_purchase_price)
           : null,
-        batch_received_quantity: item?.batch_received_quantity !== undefined && item?.batch_received_quantity !== null
-          ? toSafeNumber(item.batch_received_quantity)
+        batch_received_quantity: row.batch_received_quantity !== undefined && row.batch_received_quantity !== null
+          ? toSafeNumber(row.batch_received_quantity)
           : null,
-        batch_accepted_quantity: item?.batch_accepted_quantity !== undefined && item?.batch_accepted_quantity !== null
-          ? toSafeNumber(item.batch_accepted_quantity)
+        batch_accepted_quantity: row.batch_accepted_quantity !== undefined && row.batch_accepted_quantity !== null
+          ? toSafeNumber(row.batch_accepted_quantity)
           : null,
-        batch_received_date: item?.batch_received_date ? String(item.batch_received_date) : null,
-        name: String(item?.name || ''),
-        code: String(item?.code || ''),
-        type: (item?.type === 'raw_material' ? 'raw_material' : 'finished_good') as 'raw_material' | 'finished_good',
-        unit_price: toSafeNumber(item?.unit_price),
-        sell_price: toSafeNumber(item?.sell_price),
-        purchase_price: toSafeNumber(item?.purchase_price),
-        out_price: toSafeNumber(item?.out_price),
-        current_stock: toSafeNumber(item?.current_stock),
-        unit: String(item?.unit || ''),
-        additional_info: item?.additional_info ?? null,
-        last_batch_no: item?.last_batch_no ? String(item.last_batch_no) : null,
-        lastBatchNo: item?.lastBatchNo ? String(item.lastBatchNo) : null,
-        last_label_code: item?.last_label_code ? String(item.last_label_code) : null,
-        lastLabelCode: item?.lastLabelCode ? String(item.lastLabelCode) : null,
-        last_packaging_batch_id: item?.last_packaging_batch_id !== undefined && item?.last_packaging_batch_id !== null
-          ? Number(item.last_packaging_batch_id)
+        batch_received_date: row.batch_received_date ? String(row.batch_received_date) : null,
+        name: String(row.name || ''),
+        code: String(row.code || ''),
+        type: (row.type === 'raw_material' ? 'raw_material' : 'finished_good') as 'raw_material' | 'finished_good',
+        unit_price: toSafeNumber(row.unit_price),
+        sell_price: toSafeNumber(row.sell_price),
+        purchase_price: toSafeNumber(row.purchase_price),
+        out_price: toSafeNumber(row.out_price),
+        current_stock: toSafeNumber(row.current_stock),
+        unit: String(row.unit || ''),
+        additional_info: (row.additional_info as Record<string, unknown> | string | null | undefined) ?? null,
+        last_batch_no: row.last_batch_no ? String(row.last_batch_no) : null,
+        lastBatchNo: row.lastBatchNo ? String(row.lastBatchNo) : null,
+        last_label_code: row.last_label_code ? String(row.last_label_code) : null,
+        lastLabelCode: row.lastLabelCode ? String(row.lastLabelCode) : null,
+        last_packaging_batch_id: row.last_packaging_batch_id !== undefined && row.last_packaging_batch_id !== null
+          ? Number(row.last_packaging_batch_id)
           : null,
-        lastPackagingBatchId: item?.lastPackagingBatchId !== undefined && item?.lastPackagingBatchId !== null
-          ? Number(item.lastPackagingBatchId)
+        lastPackagingBatchId: row.lastPackagingBatchId !== undefined && row.lastPackagingBatchId !== null
+          ? Number(row.lastPackagingBatchId)
           : null,
-      })).filter((item) => item.id > 0 && resolveAvailableQty(item) > 0);
+      });
+      }).filter((rowItem) => rowItem.id > 0 && resolveAvailableQty(rowItem) > 0);
 
       setInventoryItems(normalized);
     } catch (error) {
@@ -477,11 +634,11 @@ export default function LoadItemsPage() {
       fetchLoadItems();
       setEditingItem(null);
       resetForm();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error saving load item:', error);
       setNoticeModal({
         title: 'Save Failed',
-        message: error.response?.data?.message || 'Failed to save load item',
+        message: extractApiErrorMessage(error, 'Failed to save load item'),
         tone: 'error',
       });
     }
@@ -556,11 +713,11 @@ export default function LoadItemsPage() {
         fetchLoadItems();
         setShowCsvModal(false);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error uploading CSV:', error);
       setNoticeModal({
         title: 'Upload Failed',
-        message: error.response?.data?.message || 'Failed to upload CSV',
+        message: extractApiErrorMessage(error, 'Failed to upload CSV'),
         tone: 'error',
       });
     }
@@ -568,11 +725,6 @@ export default function LoadItemsPage() {
 
   const getTotalValue = () => {
     return loadItems.reduce((total, item) => total + (item.sell_price * item.qty), 0);
-  };
-
-  const getTotalWeight = () => {
-    // Assuming average weight per item - this could be enhanced with actual weight data
-    return loadItems.reduce((total, item) => total + item.qty, 0);
   };
 
   const formatDisplayDate = (value: string) => {
@@ -711,8 +863,22 @@ export default function LoadItemsPage() {
     <div className="relative min-h-screen p-6">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]" />
       <div className="max-w-7xl mx-auto">
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
         {/* Header */}
-        <div className="rounded-[28px] border border-white/70 bg-white/85 p-6 mb-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
+        {isWidgetVisible('vehicle-loading-load-items-hero-card') && <div className="rounded-[28px] border border-white/70 bg-white/85 p-6 mb-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-3xl font-bold tracking-tight text-slate-900">Load Items Management</h1>
@@ -725,10 +891,11 @@ export default function LoadItemsPage() {
               Back to Loads
             </button>
           </div>
-        </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-load-items-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </div>}
 
         {/* Load Selection */}
-        <div className={`${sectionCardClass} p-6 mb-6`}>
+        {isWidgetVisible('vehicle-loading-load-items-load-selection-card') && <div className={`${sectionCardClass} p-6 mb-6`}>
           <h2 className="text-xl font-semibold text-slate-900 mb-4">Select Load</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {loads.map((load) => (
@@ -752,9 +919,10 @@ export default function LoadItemsPage() {
               </div>
             ))}
           </div>
-        </div>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-load-items-load-selection-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </div>}
 
-        {selectedLoad && (
+        {isWidgetVisible('vehicle-loading-load-items-workspace-card') && selectedLoad && (
           <>
             {/* Load Summary */}
             <div className={`${sectionCardClass} p-6 mb-6`}>
@@ -1071,7 +1239,7 @@ export default function LoadItemsPage() {
         )}
 
         {/* CSV Upload Modal */}
-        {showCsvModal && (
+        {isWidgetVisible('vehicle-loading-load-items-csv-modal-pane') && showCsvModal && (
           <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
             <div className="mx-auto w-full max-w-3xl">
               <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_30px_120px_-50px_rgba(16,185,129,0.55)] backdrop-blur-xl">
@@ -1139,6 +1307,8 @@ export default function LoadItemsPage() {
             </div>
           </div>
         )}
+
+        {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{vehicleLoadingLoadItemsWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
 
         {confirmModal && (
           <div className="fixed inset-0 z-[60] overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">

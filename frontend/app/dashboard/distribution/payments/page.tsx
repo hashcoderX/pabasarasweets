@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
@@ -55,6 +55,64 @@ interface OutstandingReceiptPreview {
   allocations: OutstandingReceiptAllocation[];
 }
 
+interface CustomerRecord {
+  id: number;
+  shop_name?: string;
+  customer_code?: string;
+  route_id?: number | string | null;
+  route?: {
+    route_name?: string;
+    name?: string;
+  } | null;
+  route_name?: string;
+}
+
+interface InvoiceRecord {
+  id: number;
+  customer_id: number;
+  customer?: {
+    shop_name?: string;
+    customer_code?: string;
+  } | null;
+  invoice_number?: string;
+  invoice_date?: string;
+  due_date?: string | null;
+  created_at?: string;
+  total?: number;
+  paid_amount?: number;
+  due_amount?: number;
+  balance_amount?: number;
+  status?: string;
+}
+
+interface PaymentRecord {
+  id: number;
+  payment_number?: string;
+  customer_id?: number;
+  distribution_invoice_id?: number | null;
+  payment_date?: string;
+  payment_method?: string;
+  amount?: number;
+  status?: string;
+  created_at?: string;
+  customer?: {
+    shop_name?: string;
+  } | null;
+  invoice?: {
+    invoice_number?: string;
+  } | null;
+}
+
+interface LoadApiRecord {
+  route_id?: number | string | null;
+  sales_ref_id?: number | string | null;
+  status?: string | null;
+  load_date?: string | null;
+  created_at?: string | null;
+}
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
 function DistributionPaymentsPageContent() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -62,9 +120,9 @@ function DistributionPaymentsPageContent() {
   const [selectedRouteFilter, setSelectedRouteFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [payments, setPayments] = useState<any[]>([]);
-  const [customers, setCustomers] = useState<any[]>([]);
-  const [invoices, setInvoices] = useState<any[]>([]);
+  const [payments, setPayments] = useState<PaymentRecord[]>([]);
+  const [customers, setCustomers] = useState<CustomerRecord[]>([]);
+  const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
@@ -77,7 +135,26 @@ function DistributionPaymentsPageContent() {
   const [receiptCompany, setReceiptCompany] = useState<CompanyProfile>({});
   const [outstandingReceiptPreview, setOutstandingReceiptPreview] = useState<OutstandingReceiptPreview | null>(null);
   const [receiptPrintLayout, setReceiptPrintLayout] = useState<'80mm' | 'dotmatrix' | 'a4'>('80mm');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+  const [customerSearchTerm, setCustomerSearchTerm] = useState('');
+  const [customerSearchOpen, setCustomerSearchOpen] = useState(false);
+  const customerSearchBoxRef = useRef<HTMLDivElement | null>(null);
+  const [historyCustomerSearchTerm, setHistoryCustomerSearchTerm] = useState('');
+  const [historyCustomerSearchOpen, setHistoryCustomerSearchOpen] = useState(false);
+  const historyCustomerSearchBoxRef = useRef<HTMLDivElement | null>(null);
   const pageSize = 10;
+  const debtorsPageSize = 10;
+  const [debtorsPage, setDebtorsPage] = useState(1);
 
   const [form, setForm] = useState({
     payment_number: '',
@@ -91,6 +168,144 @@ function DistributionPaymentsPageContent() {
     status: 'received',
     notes: '',
   });
+  const paymentWidgetItems = [
+    { id: 'distribution-payments-nav-back-button', name: 'Payments Back Button' },
+    { id: 'distribution-payments-nav-action-buttons', name: 'Payments Nav Action Buttons' },
+    { id: 'distribution-payments-offline-status-card', name: 'Payments Offline Status Card' },
+    { id: 'distribution-payments-route-filter-card', name: 'Payments Route Filter Card' },
+    { id: 'distribution-payments-ledger-filter-card', name: 'Payments Ledger Filter Card' },
+    { id: 'distribution-payments-debtors-card', name: 'Payments Debtors Card' },
+    { id: 'distribution-payments-records-card', name: 'Payments Records Card' },
+    { id: 'distribution-payments-records-table-headings', name: 'Payments Records Table Headings' },
+    { id: 'distribution-payments-row-action-buttons', name: 'Payments Row Action Buttons' },
+    { id: 'distribution-payments-modal-pane', name: 'Payments Modal Pane' },
+    { id: 'distribution-payments-modal-heading', name: 'Payments Modal Heading' },
+    { id: 'distribution-payments-modal-action-buttons', name: 'Payments Modal Action Buttons' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = paymentWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = paymentWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = paymentWidgetItems[0]?.id || 'distribution-payments-nav-back-button';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -105,6 +320,7 @@ function DistributionPaymentsPageContent() {
     if (token) {
       resolveAssignedRoute();
       fetchData();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
 
@@ -186,7 +402,12 @@ function DistributionPaymentsPageContent() {
       const userData = userRes.data || {};
       const roleNames = [
         String(userData?.role || ''),
-        ...(Array.isArray(userData?.roles) ? userData.roles.map((r: any) => String(r?.name || r || '')) : []),
+        ...(Array.isArray(userData?.roles) ? userData.roles.map((r: unknown) => {
+          if (typeof r === 'object' && r !== null && 'name' in r) {
+            return String((r as { name?: unknown }).name || '');
+          }
+          return String(r || '');
+        }) : []),
       ].join(' ').toLowerCase();
       const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
       setIsAdmin(adminUser);
@@ -208,10 +429,12 @@ function DistributionPaymentsPageContent() {
         headers: { Authorization: `Bearer ${token}` },
       });
 
-      const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
+      const loads: LoadApiRecord[] = Array.isArray(loadsRes.data)
+        ? (loadsRes.data as LoadApiRecord[])
+        : (Array.isArray(loadsRes.data?.data) ? (loadsRes.data.data as LoadApiRecord[]) : []);
       const assignedLoad = loads
-        .filter((load: any) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(load.status))
-        .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime())[0];
+        .filter((load) => Number(load.sales_ref_id) === employeeId && ['pending', 'in_transit'].includes(String(load.status || '')))
+        .sort((a, b) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime())[0];
 
       if (assignedLoad?.route_id) {
         const routeId = String(assignedLoad.route_id);
@@ -250,6 +473,48 @@ function DistributionPaymentsPageContent() {
     return customers.filter((customer) => String(customer?.route_id || '') === activeRouteFilter);
   }, [customers, activeRouteFilter]);
 
+  const formatCustomerOptionLabel = (customer: CustomerRecord) => {
+    const name = String(customer?.shop_name || `Customer #${customer?.id || ''}`);
+    const code = String(customer?.customer_code || '').trim();
+    return code ? `${name} (${code})` : name;
+  };
+
+  const selectedFormCustomer = useMemo(() => {
+    const customerId = Number(form.customer_id || 0);
+    if (!customerId) return null;
+    return scopedCustomers.find((customer) => Number(customer.id) === customerId) || null;
+  }, [form.customer_id, scopedCustomers]);
+
+  const selectedHistoryCustomerForSelect = useMemo(() => {
+    const customerId = Number(historyCustomerSelect || 0);
+    if (!customerId) return null;
+    return scopedCustomers.find((customer) => Number(customer.id) === customerId) || null;
+  }, [historyCustomerSelect, scopedCustomers]);
+
+  const filteredCustomerOptions = useMemo(() => {
+    const query = customerSearchTerm.trim().toLowerCase();
+    if (!query) return scopedCustomers;
+
+    return scopedCustomers.filter((customer) => {
+      const name = String(customer?.shop_name || '').toLowerCase();
+      const code = String(customer?.customer_code || '').toLowerCase();
+      const routeName = String(customer?.route?.route_name || customer?.route?.name || customer?.route_name || '').toLowerCase();
+      return name.includes(query) || code.includes(query) || routeName.includes(query);
+    });
+  }, [scopedCustomers, customerSearchTerm]);
+
+  const filteredHistoryCustomerOptions = useMemo(() => {
+    const query = historyCustomerSearchTerm.trim().toLowerCase();
+    if (!query) return scopedCustomers;
+
+    return scopedCustomers.filter((customer) => {
+      const name = String(customer?.shop_name || '').toLowerCase();
+      const code = String(customer?.customer_code || '').toLowerCase();
+      const routeName = String(customer?.route?.route_name || customer?.route?.name || customer?.route_name || '').toLowerCase();
+      return name.includes(query) || code.includes(query) || routeName.includes(query);
+    });
+  }, [scopedCustomers, historyCustomerSearchTerm]);
+
   const scopedCustomerIdSet = useMemo(
     () => new Set(scopedCustomers.map((customer) => Number(customer.id))),
     [scopedCustomers]
@@ -265,7 +530,7 @@ function DistributionPaymentsPageContent() {
     return payments.filter((payment) => scopedCustomerIdSet.has(Number(payment?.customer_id || 0)));
   }, [payments, scopedCustomerIdSet, activeRouteFilter]);
 
-  const getInvoiceDueAmount = (invoice: any): number => {
+  const getInvoiceDueAmount = (invoice: InvoiceRecord): number => {
     const total = Number(invoice?.total || 0);
     const paidAmount = Number(invoice?.paid_amount || 0);
     const explicitDue = Number(invoice?.due_amount || invoice?.balance_amount || 0);
@@ -313,7 +578,7 @@ function DistributionPaymentsPageContent() {
   }, [customerDueInvoices]);
 
   const outstandingDebtors = useMemo(() => {
-    const customerById = new Map<number, any>();
+    const customerById = new Map<number, CustomerRecord>();
     scopedCustomers.forEach((customer) => {
       customerById.set(Number(customer.id), customer);
     });
@@ -360,6 +625,16 @@ function DistributionPaymentsPageContent() {
     () => outstandingDebtors.reduce((sum, row) => sum + Number(row.total_due || 0), 0),
     [outstandingDebtors]
   );
+
+  const debtorsTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(outstandingDebtors.length / debtorsPageSize)),
+    [outstandingDebtors.length]
+  );
+
+  const pagedOutstandingDebtors = useMemo(() => {
+    const start = (debtorsPage - 1) * debtorsPageSize;
+    return outstandingDebtors.slice(start, start + debtorsPageSize);
+  }, [outstandingDebtors, debtorsPage]);
 
   const selectedHistoryCustomer = useMemo(() => {
     if (!historyCustomerId) return null;
@@ -470,6 +745,10 @@ function DistributionPaymentsPageContent() {
   }, [scopedPayments.length]);
 
   useEffect(() => {
+    setDebtorsPage(1);
+  }, [outstandingDebtors.length]);
+
+  useEffect(() => {
     if (form.customer_id && !scopedCustomers.some((customer) => Number(customer.id) === Number(form.customer_id))) {
       setForm((prev) => ({
         ...prev,
@@ -487,6 +766,35 @@ function DistributionPaymentsPageContent() {
       setShowHistoryModal(false);
     }
   }, [scopedCustomers, form.customer_id, historyCustomerSelect, historyCustomerId]);
+
+  useEffect(() => {
+    if (selectedFormCustomer) {
+      setCustomerSearchTerm(formatCustomerOptionLabel(selectedFormCustomer));
+    }
+  }, [selectedFormCustomer]);
+
+  useEffect(() => {
+    if (selectedHistoryCustomerForSelect) {
+      setHistoryCustomerSearchTerm(formatCustomerOptionLabel(selectedHistoryCustomerForSelect));
+    }
+  }, [selectedHistoryCustomerForSelect]);
+
+  useEffect(() => {
+    const onDocumentMouseDown = (event: MouseEvent) => {
+      if (customerSearchBoxRef.current && !customerSearchBoxRef.current.contains(event.target as Node)) {
+        setCustomerSearchOpen(false);
+      }
+
+      if (historyCustomerSearchBoxRef.current && !historyCustomerSearchBoxRef.current.contains(event.target as Node)) {
+        setHistoryCustomerSearchOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', onDocumentMouseDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocumentMouseDown);
+    };
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
@@ -579,7 +887,7 @@ function DistributionPaymentsPageContent() {
   ) => {
     const customer = scopedCustomers.find((row) => Number(row?.id || 0) === Number(customerId))
       || customers.find((row) => Number(row?.id || 0) === Number(customerId));
-    const invoiceMap = new Map<number, any>(
+    const invoiceMap = new Map<number, InvoiceRecord>(
       scopedInvoices
         .filter((invoice) => Number(invoice?.customer_id || 0) === Number(customerId))
         .map((invoice) => [Number(invoice?.id || 0), invoice]),
@@ -826,7 +1134,7 @@ function DistributionPaymentsPageContent() {
               </div>
             </div>
             <div className="flex justify-start sm:justify-end gap-2">
-              <button
+              {isWidgetVisible('distribution-payments-nav-action-buttons') && <button
                 type="button"
                 onClick={() => {
                   setPaymentEntryMode('default');
@@ -835,8 +1143,8 @@ function DistributionPaymentsPageContent() {
                 className="px-4 py-2 bg-green-600 border border-transparent rounded-md text-sm font-medium text-white hover:bg-green-700"
               >
                 Add Payment
-              </button>
-              <button
+              </button>}
+              {isWidgetVisible('distribution-payments-nav-action-buttons') && <button
                 type="button"
                 onClick={() => {
                   setPaymentEntryMode('outstanding');
@@ -850,37 +1158,54 @@ function DistributionPaymentsPageContent() {
                 className="px-4 py-2 bg-amber-600 border border-transparent rounded-md text-sm font-medium text-white hover:bg-amber-700"
               >
                 Add Outstanding Payment
-              </button>
-              <Link
+              </button>}
+              {isWidgetVisible('distribution-payments-nav-back-button') && <Link
                 href="/dashboard/distribution"
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 Back to Distribution
-              </Link>
+              </Link>}
+              {!widgetControlsLocked && isWidgetVisible('distribution-payments-nav-action-buttons') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-nav-action-buttons', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+              {!widgetControlsLocked && isWidgetVisible('distribution-payments-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-nav-back-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
           </div>
         </div>
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('distribution-payments-offline-status-card') && <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
             <p className={isOnline ? 'text-emerald-800' : 'text-amber-800'}>
               {isOnline ? 'Online mode: payments sync directly to server.' : 'Offline mode: new payments are saved locally.'}
             </p>
-            <p className="text-xs font-semibold text-gray-700">
+            <div className="flex items-center gap-2"><p className="text-xs font-semibold text-gray-700">
               Pending offline payments: {pendingOfflinePayments.length}
               {syncingOfflinePayments ? ' (syncing...)' : ''}
-            </p>
+            </p>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-offline-status-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
           </div>
-        </section>
+        </section>}
 
-        <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
+        {isWidgetVisible('distribution-payments-route-filter-card') && <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-gray-900">Route Filter</h2>
             {!isAdmin && assignedRouteId && (
               <span className="text-xs text-green-700 font-medium">Auto route filter enabled</span>
             )}
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-route-filter-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           {isAdmin ? (
@@ -915,9 +1240,9 @@ function DistributionPaymentsPageContent() {
               Showing data for your allocated route only.
             </p>
           )}
-        </section>
+        </section>}
 
-        <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
+        {isWidgetVisible('distribution-payments-ledger-filter-card') && <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-2">
             <h2 className="text-sm font-semibold text-gray-900">Customer Ledger View</h2>
             <p className="text-xs text-gray-500">Select a customer to open payment and invoice history ledger.</p>
@@ -925,18 +1250,45 @@ function DistributionPaymentsPageContent() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
             <div className="sm:col-span-2">
               <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
-              <select
-                value={historyCustomerSelect}
-                onChange={(e) => setHistoryCustomerSelect(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-              >
-                <option value="">Select Customer</option>
-                {scopedCustomers.map((customer) => (
-                  <option key={customer.id} value={customer.id}>
-                    {customer.shop_name} {customer.customer_code ? `(${customer.customer_code})` : ''}
-                  </option>
-                ))}
-              </select>
+              <div className="relative" ref={historyCustomerSearchBoxRef}>
+                <input
+                  type="text"
+                  value={historyCustomerSearchTerm}
+                  onFocus={() => setHistoryCustomerSearchOpen(true)}
+                  onChange={(e) => {
+                    const nextValue = e.target.value;
+                    setHistoryCustomerSearchTerm(nextValue);
+                    setHistoryCustomerSearchOpen(true);
+                    setHistoryCustomerSelect('');
+                  }}
+                  placeholder="Type customer name / code"
+                  className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                  autoComplete="off"
+                />
+                {historyCustomerSearchOpen && (
+                  <div className="absolute left-0 right-0 z-30 mt-1 max-h-52 overflow-auto rounded-md border border-gray-200 bg-white shadow-lg">
+                    {filteredHistoryCustomerOptions.length === 0 ? (
+                      <p className="px-3 py-2 text-xs text-gray-500">No matching customers</p>
+                    ) : (
+                      filteredHistoryCustomerOptions.map((customer) => (
+                        <button
+                          key={customer.id}
+                          type="button"
+                          onClick={() => {
+                            setHistoryCustomerSelect(String(customer.id));
+                            setHistoryCustomerSearchTerm(formatCustomerOptionLabel(customer));
+                            setHistoryCustomerSearchOpen(false);
+                          }}
+                          className="block w-full border-b border-gray-100 px-3 py-2 text-left text-sm text-gray-700 last:border-b-0 hover:bg-green-50"
+                        >
+                          <span className="font-medium text-gray-900">{customer.shop_name || `Customer #${customer.id}`}</span>
+                          {customer.customer_code && <span className="ml-1 text-xs text-gray-500">({customer.customer_code})</span>}
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
             <div className="sm:col-span-1 flex sm:justify-end">
               <button
@@ -949,14 +1301,15 @@ function DistributionPaymentsPageContent() {
               </button>
             </div>
           </div>
-        </section>
+        </section>}
 
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+        {isWidgetVisible('distribution-payments-debtors-card') && <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <div className="px-4 sm:px-6 py-3 border-b border-gray-100 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-gray-900">Outstanding Debtors</h2>
               <p className="text-xs text-gray-500">Customers with unpaid invoices and current due balances.</p>
             </div>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-debtors-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 px-4 sm:px-6 py-3 border-b border-gray-100 bg-gray-50">
@@ -996,7 +1349,7 @@ function DistributionPaymentsPageContent() {
                     <td colSpan={6} className="px-4 py-8 text-center text-gray-500">No outstanding debtors right now.</td>
                   </tr>
                 ) : (
-                  outstandingDebtors.map((row) => (
+                  pagedOutstandingDebtors.map((row) => (
                     <tr key={row.customer_id} className="hover:bg-gray-50">
                       <td className="px-4 py-2 text-sm text-gray-700">{row.customer_name}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{row.customer_code}</td>
@@ -1020,18 +1373,52 @@ function DistributionPaymentsPageContent() {
               </tbody>
             </table>
           </div>
-        </section>
 
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          {outstandingDebtors.length > 0 && (
+            <div className="px-4 py-3 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-gray-600">
+              <div>
+                {(() => {
+                  const start = (debtorsPage - 1) * debtorsPageSize + 1;
+                  const end = Math.min(outstandingDebtors.length, debtorsPage * debtorsPageSize);
+                  return `Showing ${start}-${end} of ${outstandingDebtors.length} debtors`;
+                })()}
+              </div>
+              <div className="inline-flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDebtorsPage((p) => Math.max(1, p - 1))}
+                  disabled={debtorsPage === 1}
+                  className="px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Previous
+                </button>
+                <span className="text-[11px] text-gray-500">
+                  Page {debtorsPage} of {debtorsTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDebtorsPage((p) => Math.min(debtorsTotalPages, p + 1))}
+                  disabled={debtorsPage === debtorsTotalPages}
+                  className="px-2.5 py-1 rounded-md border border-gray-300 bg-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+        </section>}
+
+        {isWidgetVisible('distribution-payments-records-card') && <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <div className="px-4 sm:px-6 py-3 border-b border-gray-100 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-gray-900">Payment records</h2>
               <p className="text-xs text-gray-500">Browse all distribution payment entries.</p>
             </div>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-payments-records-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+              {isWidgetVisible('distribution-payments-records-table-headings') && <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Payment</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Customer</th>
@@ -1042,7 +1429,7 @@ function DistributionPaymentsPageContent() {
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Actions</th>
                 </tr>
-              </thead>
+              </thead>}
               <tbody className="bg-white divide-y divide-gray-200">
                 {loading ? (
                   <tr>
@@ -1059,7 +1446,9 @@ function DistributionPaymentsPageContent() {
                       <td className="px-4 py-2 text-sm text-gray-700">{row.customer?.shop_name || '-'}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{row.invoice?.invoice_number || '-'}</td>
                       <td className="px-4 py-2 text-sm text-gray-700 capitalize">{String(row.payment_method || '-').replace('_', ' ')}</td>
-                      <td className="px-4 py-2 text-sm text-gray-700">{new Date(row.payment_date).toLocaleDateString()}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">
+                        {row.payment_date ? new Date(row.payment_date).toLocaleDateString() : '-'}
+                      </td>
                       <td className="px-4 py-2 text-sm text-gray-700 text-right">{Number(row.amount).toFixed(2)}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">
                         <span className="inline-flex px-2 py-0.5 rounded-full bg-gray-100 text-[11px] font-medium text-gray-700 capitalize">
@@ -1067,6 +1456,7 @@ function DistributionPaymentsPageContent() {
                         </span>
                       </td>
                       <td className="px-4 py-2 text-sm text-right">
+                        {isWidgetVisible('distribution-payments-row-action-buttons') && (
                         <button
                           type="button"
                           onClick={() => openCustomerHistory(Number(row.customer_id || 0))}
@@ -1075,6 +1465,7 @@ function DistributionPaymentsPageContent() {
                         >
                           History
                         </button>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -1114,19 +1505,19 @@ function DistributionPaymentsPageContent() {
               </div>
             </div>
           )}
-        </section>
+        </section>}
       </main>
 
-      {showPaymentModal && (
+      {isWidgetVisible('distribution-payments-modal-pane') && showPaymentModal && (
         <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40">
           <div className="relative w-full h-[90vh] md:h-auto md:w-11/12 max-w-5xl mx-auto bg-white rounded-t-2xl md:rounded-2xl shadow-2xl border border-gray-200 overflow-hidden md:max-h-[90vh] flex flex-col">
             <div className="flex items-start justify-between px-4 md:px-6 pt-4 pb-3 border-b border-gray-100 bg-gray-50/70 backdrop-blur-sm">
-              <div>
+              {isWidgetVisible('distribution-payments-modal-heading') && <div>
                 <h3 className="text-base sm:text-lg md:text-xl font-semibold text-gray-900">
                   {paymentEntryMode === 'outstanding' ? 'Record outstanding payment' : 'Record new payment'}
                 </h3>
                 <p className="mt-0.5 text-xs sm:text-sm text-gray-500">Capture cash, check, or bank transfer collections.</p>
-              </div>
+              </div>}
               <button
                 type="button"
                 onClick={() => setShowPaymentModal(false)}
@@ -1156,17 +1547,54 @@ function DistributionPaymentsPageContent() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
-                    <select
-                      value={form.customer_id}
-                      onChange={(e) => setForm({ ...form, customer_id: e.target.value })}
-                      className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                      required
-                    >
-                      <option value="">Select Customer</option>
-                      {scopedCustomers.map((customer) => (
-                        <option key={customer.id} value={customer.id}>{customer.shop_name}</option>
-                      ))}
-                    </select>
+                    <div className="relative" ref={customerSearchBoxRef}>
+                      <input
+                        type="text"
+                        value={customerSearchTerm}
+                        onFocus={() => setCustomerSearchOpen(true)}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          setCustomerSearchTerm(nextValue);
+                          setCustomerSearchOpen(true);
+                          setForm((prev) => ({
+                            ...prev,
+                            customer_id: '',
+                            distribution_invoice_id: '',
+                          }));
+                        }}
+                        placeholder="Type customer name / code"
+                        className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                        autoComplete="off"
+                        required
+                      />
+                      {customerSearchOpen && (
+                        <div className="absolute left-0 right-0 z-30 mt-1 max-h-52 overflow-auto rounded-md border border-gray-200 bg-white shadow-lg">
+                          {filteredCustomerOptions.length === 0 ? (
+                            <p className="px-3 py-2 text-xs text-gray-500">No matching customers</p>
+                          ) : (
+                            filteredCustomerOptions.map((customer) => (
+                              <button
+                                key={customer.id}
+                                type="button"
+                                onClick={() => {
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    customer_id: String(customer.id),
+                                    distribution_invoice_id: '',
+                                  }));
+                                  setCustomerSearchTerm(formatCustomerOptionLabel(customer));
+                                  setCustomerSearchOpen(false);
+                                }}
+                                className="block w-full border-b border-gray-100 px-3 py-2 text-left text-sm text-gray-700 last:border-b-0 hover:bg-green-50"
+                              >
+                                <span className="font-medium text-gray-900">{customer.shop_name || `Customer #${customer.id}`}</span>
+                                {customer.customer_code && <span className="ml-1 text-xs text-gray-500">({customer.customer_code})</span>}
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Linked Invoice (optional)</label>
@@ -1507,6 +1935,8 @@ function DistributionPaymentsPageContent() {
           </div>
         </div>
       )}
+
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{paymentWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
 
       <style jsx global>{`
         .outstanding-receipt-sheet {

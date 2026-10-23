@@ -158,7 +158,9 @@ export default function DistributionDeliveryBalanceReportPage() {
 
   const fetchPaginated = async <T,>(endpoint: string, authToken: string) => {
     const rows: T[] = [];
-    let nextUrl: string | null = `${API_URL}/api/${endpoint}?per_page=200`;
+    const normalizedEndpoint = endpoint.replace(/^\/+/, '');
+    const queryJoiner = normalizedEndpoint.includes('?') ? '&' : '?';
+    let nextUrl: string | null = `${API_URL}/api/${normalizedEndpoint}${queryJoiner}per_page=200`;
     let pageCount = 0;
 
     while (nextUrl && pageCount < 50) {
@@ -184,7 +186,7 @@ export default function DistributionDeliveryBalanceReportPage() {
       setErrorMessage('');
 
       const [invoiceRows, paymentRows, returnRows, loadRows] = await Promise.all([
-        fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse),
+        fetchPaginated<InvoiceRow>('distribution/invoices?exclude_cancelled=1', tokenToUse),
         fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
         fetchPaginated<ReturnRow>('distribution/returns', tokenToUse),
         axios

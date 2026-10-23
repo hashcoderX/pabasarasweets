@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\HR;
 
 use App\Http\Controllers\Controller;
 use App\Models\Payroll;
+use App\Models\PayrollSetting;
 use App\Models\Employee;
 use App\Models\Attendance;
 use App\Models\Company;
@@ -59,6 +60,16 @@ class PayrollController extends Controller
         $request->validate([
             'branch_id' => 'nullable|exists:companies,id',
             'month_year' => 'required|date_format:Y-m',
+            'payroll_settings' => 'nullable|array',
+            'persist_payroll_settings' => 'nullable|boolean',
+            'payroll_settings.salary_mode' => 'nullable|in:monthly,daily',
+            'payroll_settings.daily_rate' => 'nullable|numeric|min:0',
+            'payroll_settings.standard_working_days' => 'nullable|integer|min:1|max:31',
+            'payroll_settings.prorate_by_attendance' => 'nullable|boolean',
+            'payroll_settings.sunday_payment_enabled' => 'nullable|boolean',
+            'payroll_settings.sunday_payment_rate' => 'nullable|numeric|min:0',
+            'payroll_settings.poya_payment_enabled' => 'nullable|boolean',
+            'payroll_settings.poya_payment_rate' => 'nullable|numeric|min:0',
         ]);
 
         $user = $request->user();
@@ -85,6 +96,13 @@ class PayrollController extends Controller
             ], 422);
         }
 
+        $payrollSettings = $this->resolvePayrollSettings(
+            $tenantId,
+            $branchId,
+            $request->input('payroll_settings'),
+            $request->boolean('persist_payroll_settings', true)
+        );
+
         // Get all active employees for the branch
         $employees = Employee::where('tenant_id', $tenantId)
             ->where('branch_id', $branchId)
@@ -103,7 +121,7 @@ class PayrollController extends Controller
                 continue; // Skip if already generated
             }
 
-            $calculation = $this->calculatePayrollForEmployee($employee, $monthYear);
+            $calculation = $this->calculatePayrollForEmployee($employee, $monthYear, $payrollSettings);
 
             $payroll = Payroll::create($this->filterPayrollPayload([
                 'tenant_id' => $tenantId,
@@ -151,6 +169,16 @@ class PayrollController extends Controller
             'branch_id' => 'nullable|exists:companies,id',
             'month_year' => 'required|date_format:Y-m',
             'force_paid' => 'nullable|boolean',
+            'payroll_settings' => 'nullable|array',
+            'persist_payroll_settings' => 'nullable|boolean',
+            'payroll_settings.salary_mode' => 'nullable|in:monthly,daily',
+            'payroll_settings.daily_rate' => 'nullable|numeric|min:0',
+            'payroll_settings.standard_working_days' => 'nullable|integer|min:1|max:31',
+            'payroll_settings.prorate_by_attendance' => 'nullable|boolean',
+            'payroll_settings.sunday_payment_enabled' => 'nullable|boolean',
+            'payroll_settings.sunday_payment_rate' => 'nullable|numeric|min:0',
+            'payroll_settings.poya_payment_enabled' => 'nullable|boolean',
+            'payroll_settings.poya_payment_rate' => 'nullable|numeric|min:0',
         ]);
 
         $user = $request->user();
@@ -176,6 +204,13 @@ class PayrollController extends Controller
             ], 422);
         }
 
+        $payrollSettings = $this->resolvePayrollSettings(
+            $tenantId,
+            $branchId,
+            $request->input('payroll_settings'),
+            $request->boolean('persist_payroll_settings', true)
+        );
+
         $monthYear = $request->month_year;
         $forcePaid = (bool) $request->boolean('force_paid');
 
@@ -189,7 +224,7 @@ class PayrollController extends Controller
         $skippedPaid = 0;
 
         foreach ($employees as $employee) {
-            $calculation = $this->calculatePayrollForEmployee($employee, $monthYear);
+            $calculation = $this->calculatePayrollForEmployee($employee, $monthYear, $payrollSettings);
 
             $payload = $this->filterPayrollPayload([
                 'tenant_id' => $tenantId,
@@ -412,7 +447,7 @@ class PayrollController extends Controller
         return Pdf::loadHTML($html)->download($fileName);
     }
 
-    private function calculatePayrollForEmployee($employee, string $monthYear): array
+    private function calculatePayrollForEmployee($employee, string $monthYear, array $settings): array
     {
         $monthStart = Carbon::createFromFormat('Y-m', $monthYear)->startOfMonth();
         $monthEnd = (clone $monthStart)->endOfMonth();
@@ -421,11 +456,13 @@ class PayrollController extends Controller
             ->whereBetween('date', [$monthStart->toDateString(), $monthEnd->toDateString()])
             ->get();
 
-        $workingDays = $this->countWeekdaysInMonth($monthStart, $monthEnd);
+        $attendanceProrationEnabled = (bool) ($settings['prorate_by_attendance'] ?? true);
+        $workingDays = max(1, (int) ($settings['standard_working_days'] ?? $this->countWeekdaysInMonth($monthStart, $monthEnd)));
         $presentDays = $attendance->whereIn('status', ['present', 'late'])->count();
         $halfDays = $attendance->where('status', 'half_day')->count();
         $presentEquivalent = $presentDays + ($halfDays * 0.5);
-        $absentDays = max(0, round($workingDays - $presentEquivalent, 2));
+        $effectivePresentEquivalent = $attendanceProrationEnabled ? $presentEquivalent : (float) $workingDays;
+        $absentDays = max(0, round($workingDays - $effectivePresentEquivalent, 2));
 
         $effectiveWorkHours = $attendance->sum(function (Attendance $row) {
             if ($row->work_hours !== null) {
@@ -450,9 +487,18 @@ class PayrollController extends Controller
             return 1;
         }), 2);
 
-        $basicSalary = round((float) ($employee->basic_salary ?? 0), 2);
-        $dailyRate = $workingDays > 0 ? ($basicSalary / $workingDays) : ($basicSalary / 30);
-        $earnedBasicSalary = round(min($basicSalary, $dailyRate * $presentEquivalent), 2);
+        $salaryMode = (string) ($settings['salary_mode'] ?? 'monthly');
+        $baseMonthlySalary = round((float) ($employee->basic_salary ?? 0), 2);
+        $configuredDailyRate = round((float) ($settings['daily_rate'] ?? 0), 2);
+        $dailyRate = $salaryMode === 'daily'
+            ? ($configuredDailyRate > 0 ? $configuredDailyRate : ($baseMonthlySalary / max($workingDays, 1)))
+            : ($baseMonthlySalary / max($workingDays, 1));
+        $basicSalary = $salaryMode === 'daily'
+            ? round($dailyRate * $workingDays, 2)
+            : $baseMonthlySalary;
+        $earnedBasicSalary = $attendanceProrationEnabled
+            ? round(min($basicSalary, $dailyRate * $effectivePresentEquivalent), 2)
+            : $basicSalary;
         $attendanceDeductionAmount = round(max(0, $basicSalary - $earnedBasicSalary), 2);
 
         $commissionPct = (float) ($employee->commission ?? 0);
@@ -460,6 +506,39 @@ class PayrollController extends Controller
 
         $overtimeRate = (float) ($employee->overtime_payment_per_hour ?? 0);
         $overtimeAmount = round($overtimeHours * $overtimeRate, 2);
+
+        $attendanceEquivalentByDate = static function (Attendance $row): float {
+            return match ($row->status) {
+                'present', 'late' => 1.0,
+                'half_day' => 0.5,
+                default => 0.0,
+            };
+        };
+
+        $sundayDaysWorked = round($attendance->sum(function (Attendance $row) use ($attendanceEquivalentByDate) {
+            if (!$row->date || !$row->date->isSunday()) {
+                return 0;
+            }
+            return $attendanceEquivalentByDate($row);
+        }), 2);
+        $sundayPaymentEnabled = (bool) ($settings['sunday_payment_enabled'] ?? false);
+        $sundayPaymentRate = round((float) ($settings['sunday_payment_rate'] ?? 0), 2);
+        $sundayPaymentAmount = $sundayPaymentEnabled
+            ? round($sundayDaysWorked * $sundayPaymentRate, 2)
+            : 0.0;
+
+        $poyaDaysWorked = round($attendance->sum(function (Attendance $row) use ($attendanceEquivalentByDate) {
+            $notes = strtolower(trim((string) ($row->notes ?? '')));
+            if ($notes === '' || !str_contains($notes, 'poya')) {
+                return 0;
+            }
+            return $attendanceEquivalentByDate($row);
+        }), 2);
+        $poyaPaymentEnabled = (bool) ($settings['poya_payment_enabled'] ?? false);
+        $poyaPaymentRate = round((float) ($settings['poya_payment_rate'] ?? 0), 2);
+        $poyaPaymentAmount = $poyaPaymentEnabled
+            ? round($poyaDaysWorked * $poyaPaymentRate, 2)
+            : 0.0;
 
         $lateDeductionRate = (float) ($employee->deduction_late_hour ?? 0);
         $lateDeductionAmount = round($lateHours * $lateDeductionRate, 2);
@@ -485,7 +564,7 @@ class PayrollController extends Controller
             $customAllowanceItems = $adjustments['allowance_items'];
             $customDeductionItems = $adjustments['deduction_items'];
 
-            $allowances = round($commissionAmount + $overtimeAmount + $customAllowancesTotal, 2);
+            $allowances = round($commissionAmount + $overtimeAmount + $sundayPaymentAmount + $poyaPaymentAmount + $customAllowancesTotal, 2);
             $deductions = round($attendanceDeductionAmount + $lateDeductionAmount + $epfEmployeeAmount + $etfEmployeeAmount + $apitTaxAmount + $customDeductionsTotal, 2);
         $grossSalary = round($earnedBasicSalary + $allowances, 2);
         $netSalary = round(max(0, $grossSalary - $deductions), 2);
@@ -511,6 +590,10 @@ class PayrollController extends Controller
             'absent_days' => (int) ceil($absentDays),
             'overtime_hours' => $overtimeHours,
             'overtime_amount' => $overtimeAmount,
+            'sunday_days_worked' => $sundayDaysWorked,
+            'sunday_payment_amount' => $sundayPaymentAmount,
+            'poya_days_worked' => $poyaDaysWorked,
+            'poya_payment_amount' => $poyaPaymentAmount,
             'custom_allowances_total' => $customAllowancesTotal,
             'custom_deductions_total' => $customDeductionsTotal,
             'custom_allowance_items' => $customAllowanceItems,
@@ -577,6 +660,108 @@ class PayrollController extends Controller
         }
 
         return $count;
+    }
+
+    private function defaultPayrollSettings(): array
+    {
+        return [
+            'salary_mode' => 'monthly',
+            'daily_rate' => null,
+            'standard_working_days' => 30,
+            'prorate_by_attendance' => true,
+            'sunday_payment_enabled' => false,
+            'sunday_payment_rate' => null,
+            'poya_payment_enabled' => false,
+            'poya_payment_rate' => null,
+        ];
+    }
+
+    private function normalizePayrollSettings(array $settings): array
+    {
+        $defaults = $this->defaultPayrollSettings();
+        $merged = array_merge($defaults, $settings);
+
+        $salaryMode = (string) ($merged['salary_mode'] ?? 'monthly');
+        if (!in_array($salaryMode, ['monthly', 'daily'], true)) {
+            $salaryMode = 'monthly';
+        }
+
+        $dailyRate = is_numeric($merged['daily_rate'] ?? null) ? round((float) $merged['daily_rate'], 2) : null;
+        $standardWorkingDays = (int) ($merged['standard_working_days'] ?? 30);
+        if ($standardWorkingDays <= 0 || $standardWorkingDays > 31) {
+            $standardWorkingDays = 30;
+        }
+
+        $sundayEnabled = (bool) ($merged['sunday_payment_enabled'] ?? false);
+        $sundayRate = is_numeric($merged['sunday_payment_rate'] ?? null) ? round((float) $merged['sunday_payment_rate'], 2) : null;
+        if (!$sundayEnabled || ($sundayRate !== null && $sundayRate <= 0)) {
+            $sundayRate = null;
+            if ($sundayEnabled && ($merged['sunday_payment_rate'] ?? null) !== null && (float) $merged['sunday_payment_rate'] <= 0) {
+                $sundayEnabled = false;
+            }
+        }
+
+        $poyaEnabled = (bool) ($merged['poya_payment_enabled'] ?? false);
+        $poyaRate = is_numeric($merged['poya_payment_rate'] ?? null) ? round((float) $merged['poya_payment_rate'], 2) : null;
+        if (!$poyaEnabled || ($poyaRate !== null && $poyaRate <= 0)) {
+            $poyaRate = null;
+            if ($poyaEnabled && ($merged['poya_payment_rate'] ?? null) !== null && (float) $merged['poya_payment_rate'] <= 0) {
+                $poyaEnabled = false;
+            }
+        }
+
+        if ($salaryMode === 'daily' && ($dailyRate === null || $dailyRate <= 0)) {
+            $salaryMode = 'monthly';
+            $dailyRate = null;
+        }
+
+        return [
+            'salary_mode' => $salaryMode,
+            'daily_rate' => $dailyRate,
+            'standard_working_days' => $standardWorkingDays,
+            'prorate_by_attendance' => (bool) ($merged['prorate_by_attendance'] ?? true),
+            'sunday_payment_enabled' => $sundayEnabled,
+            'sunday_payment_rate' => $sundayRate,
+            'poya_payment_enabled' => $poyaEnabled,
+            'poya_payment_rate' => $poyaRate,
+        ];
+    }
+
+    private function resolvePayrollSettings(int $tenantId, int $branchId, ?array $inputSettings = null, bool $persistInputSettings = true): array
+    {
+        if (!Schema::hasTable('payroll_settings')) {
+            return $this->normalizePayrollSettings(is_array($inputSettings) ? $inputSettings : $this->defaultPayrollSettings());
+        }
+
+        $stored = PayrollSetting::query()
+            ->where('tenant_id', $tenantId)
+            ->where('branch_id', $branchId)
+            ->first();
+
+        $base = $stored ? $stored->only(array_keys($this->defaultPayrollSettings())) : $this->defaultPayrollSettings();
+        $resolved = $this->normalizePayrollSettings($base);
+
+        if (is_array($inputSettings) && !empty($inputSettings)) {
+            $resolved = $this->normalizePayrollSettings(array_merge($resolved, $inputSettings));
+
+            if ($persistInputSettings) {
+                PayrollSetting::updateOrCreate(
+                    ['tenant_id' => $tenantId, 'branch_id' => $branchId],
+                    [
+                        'salary_mode' => $resolved['salary_mode'],
+                        'daily_rate' => $resolved['daily_rate'],
+                        'standard_working_days' => $resolved['standard_working_days'],
+                        'prorate_by_attendance' => $resolved['prorate_by_attendance'],
+                        'sunday_payment_enabled' => $resolved['sunday_payment_enabled'],
+                        'sunday_payment_rate' => $resolved['sunday_payment_rate'],
+                        'poya_payment_enabled' => $resolved['poya_payment_enabled'],
+                        'poya_payment_rate' => $resolved['poya_payment_rate'],
+                    ]
+                );
+            }
+        }
+
+        return $resolved;
     }
 
     private function appendBreakdown(Payroll $payroll): Payroll

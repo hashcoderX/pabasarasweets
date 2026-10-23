@@ -396,7 +396,7 @@ export default function DistributionReturnsReportPage() {
         }),
         axios.get('/api/distribution/invoices', {
           headers: { Authorization: `Bearer ${tokenToUse}` },
-          params: { per_page: 1000 },
+          params: { per_page: 1000, exclude_cancelled: 1 },
         }),
         axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${tokenToUse}` },

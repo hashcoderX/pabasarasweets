@@ -6,6 +6,8 @@ import axios from '@/lib/http';
 
 type DriverStatus = 'active' | 'inactive' | 'suspended';
 type LicenseType = 'light' | 'heavy' | 'special';
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 type Driver = {
   id: number;
@@ -25,6 +27,13 @@ type Driver = {
 };
 
 const PAGE_SIZE = 10;
+const vehicleLoadingDriversWidgetItems = [
+  { id: 'vehicle-loading-drivers-hero-card', name: 'Vehicle Loading Drivers Hero Card' },
+  { id: 'vehicle-loading-drivers-message-banner', name: 'Vehicle Loading Drivers Message Banner' },
+  { id: 'vehicle-loading-drivers-filters-card', name: 'Vehicle Loading Drivers Filters Card' },
+  { id: 'vehicle-loading-drivers-table-card', name: 'Vehicle Loading Drivers Table Card' },
+  { id: 'vehicle-loading-drivers-summary-cards', name: 'Vehicle Loading Drivers Summary Cards' },
+];
 
 export default function DriversPage() {
   const [token, setToken] = useState('');
@@ -34,7 +43,20 @@ export default function DriversPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | DriverStatus>('all');
   const [currentPage, setCurrentPage] = useState(1);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = vehicleLoadingDriversWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -51,10 +73,129 @@ export default function DriversPage() {
 
     const load = async () => {
       await fetchDrivers(token);
+      await fetchWidgetVisibility(token);
     };
 
     load();
   }, [token]);
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = vehicleLoadingDriversWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = vehicleLoadingDriversWidgetItems[0]?.id || 'vehicle-loading-drivers-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const fetchDrivers = async (authToken: string) => {
     try {
@@ -80,7 +221,7 @@ export default function DriversPage() {
       }
 
       const payload = response.data;
-      const employees: any[] = Array.isArray(payload)
+      const employees: unknown[] = Array.isArray(payload)
         ? payload
         : (payload?.data?.data || payload?.data || []);
 
@@ -93,48 +234,63 @@ export default function DriversPage() {
       };
 
       const driverCandidates = employees.filter((emp) => {
-        const designationName = String(emp?.designation?.name || emp?.designation_name || emp?.designation || '').trim();
-        const positionName = String(emp?.position || emp?.job_title || emp?.title || '').trim();
-        const roleNames = Array.isArray(emp?.roles)
-          ? emp.roles.map((role: any) => String(role?.name || role || '')).join(' ')
-          : String(emp?.role || '');
+        const employee = emp as Record<string, unknown>;
+        const designation = employee.designation && typeof employee.designation === 'object'
+          ? (employee.designation as Record<string, unknown>)
+          : null;
+        const designationName = String(designation?.name || employee.designation_name || employee.designation || '').trim();
+        const positionName = String(employee.position || employee.job_title || employee.title || '').trim();
+        const roleNames = Array.isArray(employee.roles)
+          ? employee.roles.map((role) => {
+            if (typeof role === 'string') return role;
+            if (role && typeof role === 'object' && 'name' in role) return String((role as { name?: unknown }).name || '');
+            return '';
+          }).join(' ')
+          : String(employee.role || '');
 
         return [designationName, positionName, roleNames].some((value) => hasDriverRole(value));
       });
 
       const normalized: Driver[] = driverCandidates
         .map((emp) => {
-          const firstName = String(emp?.first_name || '').trim();
-          const lastName = String(emp?.last_name || '').trim();
-          const displayName = `${firstName} ${lastName}`.trim() || String(emp?.name || 'Unknown Driver');
+          const employee = emp as Record<string, unknown>;
+          const employeeDepartment = employee.department && typeof employee.department === 'object'
+            ? (employee.department as Record<string, unknown>)
+            : null;
+          const employeeDesignation = employee.designation && typeof employee.designation === 'object'
+            ? (employee.designation as Record<string, unknown>)
+            : null;
+          const firstName = String(employee.first_name || '').trim();
+          const lastName = String(employee.last_name || '').trim();
+          const displayName = `${firstName} ${lastName}`.trim() || String(employee.name || 'Unknown Driver');
 
-          const rawStatus = String(emp?.status || '').toLowerCase();
+          const rawStatus = String(employee.status || '').toLowerCase();
           const status: DriverStatus = rawStatus === 'suspended'
             ? 'suspended'
             : rawStatus === 'active'
               ? 'active'
               : 'inactive';
 
-          const rawLicenseType = String(emp?.license_type || '').toLowerCase();
+          const rawLicenseType = String(employee.license_type || '').toLowerCase();
           const licenseType: LicenseType = rawLicenseType === 'light' || rawLicenseType === 'special'
             ? rawLicenseType
             : 'heavy';
 
           return {
-            id: Number(emp?.id || 0),
+            id: Number(employee.id || 0),
             name: displayName,
-            employee_id: String(emp?.employee_id || emp?.employee_code || '-'),
-            license_number: String(emp?.driving_license || emp?.license_number || '-'),
+            employee_id: String(employee.employee_id || employee.employee_code || '-'),
+            license_number: String(employee.driving_license || employee.license_number || '-'),
             license_type: licenseType,
-            license_expiry: String(emp?.license_expiry || ''),
-            phone: String(emp?.phone || emp?.mobile || '-'),
-            email: String(emp?.email || '-'),
+            license_expiry: String(employee.license_expiry || ''),
+            phone: String(employee.phone || employee.mobile || '-'),
+            email: String(employee.email || '-'),
             status,
-            experience_years: Number(emp?.experience_years || 0),
-            emergency_contact: String(emp?.emergency_contact || '-'),
-            emergency_phone: String(emp?.emergency_phone || '-'),
-            department: String(emp?.department?.name || emp?.department_name || '-'),
-            designation: String(emp?.designation?.name || emp?.designation_name || '-'),
+            experience_years: Number(employee.experience_years || 0),
+            emergency_contact: String(employee.emergency_contact || '-'),
+            emergency_phone: String(employee.emergency_phone || '-'),
+            department: String(employeeDepartment?.name || employee.department_name || '-'),
+            designation: String(employeeDesignation?.name || employee.designation_name || '-'),
           };
         })
         .filter((driver) => driver.id > 0);
@@ -238,7 +394,21 @@ export default function DriversPage() {
     <div className="relative space-y-6">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]" />
 
-      <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+          </div>
+        </div>
+      </section>
+
+      {isWidgetVisible('vehicle-loading-drivers-hero-card') && <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">Drivers Management</h1>
@@ -248,13 +418,15 @@ export default function DriversPage() {
             HR Linked
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-drivers-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      {message && (
+      {isWidgetVisible('vehicle-loading-drivers-message-banner') && message && (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{message}</div>
       )}
+      {!widgetControlsLocked && isWidgetVisible('vehicle-loading-drivers-message-banner') && message && <button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-drivers-message-banner', false)} className="w-fit rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
 
-      <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-drivers-filters-card') && <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_220px]">
           <div>
             <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Search Drivers</label>
@@ -280,9 +452,10 @@ export default function DriversPage() {
             </select>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-drivers-filters-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-drivers-table-card') && <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 px-5 py-4">
           <h2 className="text-lg font-semibold text-slate-900">Drivers Table</h2>
           <div className="text-sm text-slate-600">Showing {rowStart} to {rowEnd} of {filteredDrivers.length}</div>
@@ -395,9 +568,10 @@ export default function DriversPage() {
             </button>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="px-5 pb-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-drivers-table-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {isWidgetVisible('vehicle-loading-drivers-summary-cards') && <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-white/70 bg-white/90 p-5 shadow-sm">
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Active Drivers</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{activeCount}</p>
@@ -417,7 +591,10 @@ export default function DriversPage() {
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Avg Experience</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{averageExperience} yrs</p>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="md:col-span-2 xl:col-span-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-drivers-summary-cards', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
+
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{vehicleLoadingDriversWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

@@ -18,6 +18,18 @@ interface Supplier {
   updated_at: string;
 }
 
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const stockSuppliersWidgetItems = [
+  { id: 'stock-suppliers-hero-card', name: 'Stock Suppliers Hero Card' },
+  { id: 'stock-suppliers-add-button', name: 'Stock Suppliers Add Button' },
+  { id: 'stock-suppliers-table-card', name: 'Stock Suppliers Table Card' },
+  { id: 'stock-suppliers-table-headings', name: 'Stock Suppliers Table Headings' },
+  { id: 'stock-suppliers-row-action-buttons', name: 'Stock Suppliers Row Action Buttons' },
+  { id: 'stock-suppliers-modal-pane', name: 'Stock Suppliers Modal Pane' },
+];
+
 export default function Suppliers() {
   const [token, setToken] = useState('');
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -38,7 +50,20 @@ export default function Suppliers() {
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = stockSuppliersWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -52,6 +77,7 @@ export default function Suppliers() {
   useEffect(() => {
     if (token) {
       fetchSuppliers();
+      fetchWidgetVisibility(token);
     }
   }, [token]);
 
@@ -70,7 +96,7 @@ export default function Suppliers() {
       if (response.data.success) {
         const suppliersData = response.data.data.data || response.data.data || [];
         // Ensure outstanding_balance is a number
-        const formattedSuppliers = suppliersData.map((supplier: any) => ({
+        const formattedSuppliers = suppliersData.map((supplier: Record<string, unknown>) => ({
           ...supplier,
           outstanding_balance: Number(supplier.outstanding_balance) || 0
         }));
@@ -116,6 +142,124 @@ export default function Suppliers() {
     }
   };
 
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = stockSuppliersWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = stockSuppliersWidgetItems[0]?.id || 'stock-suppliers-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name.trim()) return;
@@ -153,9 +297,10 @@ export default function Suppliers() {
       setShowModal(false);
       setEditingSupplier(null);
       resetForm();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error saving supplier:', error);
-      alert(error.response?.data?.message || error.message || 'Failed to save supplier');
+      const apiError = error as { response?: { data?: { message?: string } }; message?: string };
+      alert(apiError.response?.data?.message || apiError.message || 'Failed to save supplier');
     } finally {
       setSaving(false);
     }
@@ -188,9 +333,10 @@ export default function Suppliers() {
       } else {
         throw new Error(response.data.message || 'Failed to delete supplier');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error deleting supplier:', error);
-      alert(error.response?.data?.message || error.message || 'Failed to delete supplier');
+      const apiError = error as { response?: { data?: { message?: string } }; message?: string };
+      alert(apiError.response?.data?.message || apiError.message || 'Failed to delete supplier');
     }
   };
 
@@ -232,8 +378,22 @@ export default function Suppliers() {
 
   return (
     <div className="min-h-screen space-y-6 bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.12),_transparent_26%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)] p-4 sm:p-6 lg:p-8">
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+          </div>
+        </div>
+      </section>
+
       {/* Header */}
-      <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/80 shadow-[0_26px_90px_-45px_rgba(194,65,12,0.5)] backdrop-blur-xl">
+      {isWidgetVisible('stock-suppliers-hero-card') && <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/80 shadow-[0_26px_90px_-45px_rgba(194,65,12,0.5)] backdrop-blur-xl">
         <div className="grid gap-8 px-5 py-6 sm:px-6 lg:grid-cols-[1.35fr_1fr] lg:px-8">
           <div className="space-y-4">
             <div className="inline-flex items-center gap-2 rounded-full border border-orange-200 bg-orange-50 px-4 py-1.5 text-sm font-semibold text-orange-700">
@@ -246,7 +406,7 @@ export default function Suppliers() {
                 Manage supplier profiles, communication channels, and payable snapshots in one polished command center.
               </p>
             </div>
-            <button
+            {isWidgetVisible('stock-suppliers-add-button') && <button
               onClick={openAddModal}
               className="inline-flex items-center rounded-full bg-gradient-to-r from-orange-500 via-amber-500 to-yellow-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-orange-300/50 transition hover:scale-[1.02] hover:from-orange-600 hover:to-yellow-500"
             >
@@ -254,7 +414,8 @@ export default function Suppliers() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
               Add Supplier
-            </button>
+            </button>}
+            {!widgetControlsLocked && isWidgetVisible('stock-suppliers-add-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-suppliers-add-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
@@ -275,10 +436,11 @@ export default function Suppliers() {
             </div>
           </div>
         </div>
-      </div>
+        {!widgetControlsLocked && <div className="px-5 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-suppliers-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </div>}
 
       {/* Suppliers Table */}
-      <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
+      {isWidgetVisible('stock-suppliers-table-card') && <div className="overflow-hidden rounded-2xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
         <div className="border-b border-orange-100 bg-gradient-to-r from-slate-900 via-orange-900 to-amber-800 px-5 py-3.5">
           <h4 className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-100">Supplier Directory</h4>
         </div>
@@ -301,7 +463,7 @@ export default function Suppliers() {
             <>
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200">
-                <thead className="bg-slate-100/80">
+                {isWidgetVisible('stock-suppliers-table-headings') && <thead className="bg-slate-100/80">
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-[0.16em]">
                       Supplier
@@ -319,7 +481,7 @@ export default function Suppliers() {
                       Actions
                     </th>
                   </tr>
-                </thead>
+                </thead>}
                 <tbody className="bg-white divide-y divide-slate-200">
                   {paginatedSuppliers.map((supplier) => (
                     <tr key={supplier.id} className="transition hover:bg-orange-50/35">
@@ -360,23 +522,24 @@ export default function Suppliers() {
                         LKR {Number(supplier.outstanding_balance).toFixed(2)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                        <button
+                        {isWidgetVisible('stock-suppliers-row-action-buttons') && <button
                           onClick={() => handleEdit(supplier)}
                           className="mr-2 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
                         >
                           Edit
-                        </button>
-                        <button
+                        </button>}
+                        {isWidgetVisible('stock-suppliers-row-action-buttons') && <button
                           onClick={() => setDeleteConfirm(supplier.id)}
                           className="rounded-full border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100"
                         >
                           Delete
-                        </button>
+                        </button>}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {!widgetControlsLocked && <div className="px-5 pb-4 sm:px-6"><button type="button" onClick={() => stageWidgetVisibilityChange('stock-suppliers-table-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
             </div>
 
             <div className="mt-4 flex flex-col gap-3 border-t border-orange-100 bg-orange-50/40 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -424,10 +587,10 @@ export default function Suppliers() {
             </>
           )}
         </div>
-      </div>
+      </div>}
 
       {/* Add/Edit Modal */}
-      {showModal && (
+      {isWidgetVisible('stock-suppliers-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/55 p-4 backdrop-blur-sm">
           <div className="relative w-full max-w-4xl overflow-hidden rounded-[30px] border border-white/25 bg-white shadow-[0_28px_90px_-35px_rgba(234,88,12,0.55)]">
             <div className="absolute inset-x-0 top-0 h-40 bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.3),_transparent_42%),linear-gradient(120deg,_rgba(194,65,12,0.95)_0%,_rgba(234,88,12,0.95)_45%,_rgba(249,115,22,0.92)_100%)]"></div>
@@ -632,6 +795,8 @@ export default function Suppliers() {
           </div>
         </div>
       )}
+
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{stockSuppliersWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

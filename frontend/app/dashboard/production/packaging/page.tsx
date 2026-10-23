@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -108,6 +108,16 @@ type AppModalState = {
   onConfirm?: () => void | Promise<void>;
 };
 
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
+const productionPackagingWidgetItems = [
+  { id: 'production-packaging-nav-bar', name: 'Production Packaging Navigation Bar' },
+  { id: 'production-packaging-summary-cards', name: 'Production Packaging Summary Cards' },
+  { id: 'production-packaging-content-panels', name: 'Production Packaging Content Panels' },
+  { id: 'production-packaging-transfer-modal', name: 'Production Packaging Transfer Modal' },
+];
+
 export default function PackagingManagementPage() {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(true);
@@ -160,13 +170,43 @@ export default function PackagingManagementPage() {
   const [toDate, setToDate] = useState('');
   const [statusFilter, setStatusFilter] = useState<'planned' | 'packed' | 'dispatched' | ''>('');
   const [search, setSearch] = useState('');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = productionPackagingWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
   const inputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
+
+  const fetchWidgetVisibility = useCallback(async (authToken: string) => {
+    if (!authToken) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  }, []);
 
   const resolveOrder = (row: { productionOrder?: any; production_order?: any }) => row.productionOrder || row.production_order;
   const extractList = (payload: any) => {
@@ -257,7 +297,129 @@ export default function PackagingManagementPage() {
   useEffect(() => {
     if (!token) return;
     loadData(token);
-  }, [token]);
+    fetchWidgetVisibility(token);
+  }, [token, fetchWidgetVisibility]);
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/json',
+          },
+        });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = productionPackagingWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = productionPackagingWidgetItems[0]?.id || 'production-packaging-nav-bar';
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
 
   const resolveRawInventory = (raw: RawMaterialOption) => raw.inventoryItem || raw.inventory_item;
 
@@ -635,7 +797,7 @@ export default function PackagingManagementPage() {
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
 
-      <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
+      {isWidgetVisible('production-packaging-nav-bar') && <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <div>
@@ -649,20 +811,36 @@ export default function PackagingManagementPage() {
             </div>
           </div>
         </div>
-      </nav>
+        {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-packaging-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </nav>}
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
         {message && <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{message}</div>}
 
-        <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+        {isWidgetVisible('production-packaging-summary-cards') && <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm"><div className="text-xs text-gray-500">Total Packaging Batches</div><div className="text-2xl font-bold text-gray-900">{summary.total_batches}</div></div>
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm"><div className="text-xs text-gray-500">Planned</div><div className="text-2xl font-bold text-slate-700">{summary.planned_batches}</div></div>
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm"><div className="text-xs text-gray-500">Packed</div><div className="text-2xl font-bold text-emerald-700">{summary.packed_batches}</div></div>
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm"><div className="text-xs text-gray-500">Dispatched</div><div className="text-2xl font-bold text-indigo-700">{summary.dispatched_batches}</div></div>
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm"><div className="text-xs text-gray-500">Total Packed Qty</div><div className="text-2xl font-bold text-gray-900">{Number(summary.total_packed_quantity || 0).toFixed(3)}</div></div>
-        </section>
+          {!widgetControlsLocked && <div className="md:col-span-2 xl:col-span-5"><button type="button" onClick={() => stageWidgetVisibilityChange('production-packaging-summary-cards', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </section>}
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        {isWidgetVisible('production-packaging-content-panels') && <><div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
           <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Create Packaging Batch</h2>
             <p className="text-xs text-gray-500 mb-3">
@@ -1029,6 +1207,8 @@ export default function PackagingManagementPage() {
             </table>
           </div>
         </section>
+        {!widgetControlsLocked && <div><button type="button" onClick={() => stageWidgetVisibilityChange('production-packaging-content-panels', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </>}
       </main>
 
       {modal && (
@@ -1058,7 +1238,7 @@ export default function PackagingManagementPage() {
         </div>
       )}
 
-      {showTransferModal && (
+      {isWidgetVisible('production-packaging-transfer-modal') && showTransferModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
           <div className="w-full max-w-lg rounded-2xl border border-amber-100 bg-white p-5 shadow-2xl">
             <h3 className="text-base font-semibold text-gray-900">Transfer QC Balance</h3>
@@ -1134,6 +1314,7 @@ export default function PackagingManagementPage() {
           </div>
         </div>
       )}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{productionPackagingWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

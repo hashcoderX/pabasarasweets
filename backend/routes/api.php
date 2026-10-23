@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\HR\AttendanceController;
 use App\Http\Controllers\Api\HR\LeaveController;
 use App\Http\Controllers\Api\HR\LeaveTypeController;
 use App\Http\Controllers\Api\HR\PayrollController;
+use App\Http\Controllers\Api\HR\PayrollSettingController;
 use App\Http\Controllers\Api\HR\CandidateController;
 use App\Http\Controllers\Api\HR\CandidateDocumentController;
 use App\Http\Controllers\Api\HR\CandidateEducationController;
@@ -152,6 +153,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('leaves/{leave}/section-head-approve', [LeaveController::class, 'sectionHeadApprove']);
         Route::post('leaves/{leave}/hr-approve', [LeaveController::class, 'hrApprove']);
         Route::apiResource('leave-types', LeaveTypeController::class);
+        Route::get('payroll-settings', [PayrollSettingController::class, 'show']);
+        Route::put('payroll-settings', [PayrollSettingController::class, 'update']);
         Route::apiResource('payrolls', PayrollController::class);
         Route::post('payrolls/generate', [PayrollController::class, 'generate']);
         Route::post('payrolls/recalculate', [PayrollController::class, 'recalculate']);

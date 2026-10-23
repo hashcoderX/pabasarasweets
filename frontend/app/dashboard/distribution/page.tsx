@@ -102,6 +102,9 @@ interface DistributionDashboardCache {
   customers: RouteCustomer[];
 }
 
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
 const getDistributionCacheKey = (token: string) => `distribution_dashboard_cache_${token.slice(-16)}`;
 
 export default function DistributionPage() {
@@ -140,6 +143,17 @@ export default function DistributionPage() {
     payments: 0,
     returns: 0,
   });
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const cacheHydratedRef = useRef(false);
   const offlineSyncInFlightRef = useRef(false);
   const router = useRouter();
@@ -176,7 +190,7 @@ export default function DistributionPage() {
 
   useEffect(() => {
     if (token) {
-      void Promise.all([fetchStats(), resolveAssignedRoute()]);
+      void Promise.all([fetchStats(), resolveAssignedRoute(), fetchWidgetVisibility()]);
     }
   }, [token]);
 
@@ -256,6 +270,161 @@ export default function DistributionPage() {
     }
 
     return false;
+  };
+
+  const distributionWidgetItems = [
+    { id: 'distribution-nav-back-button', name: 'Distribution Back Button' },
+    { id: 'distribution-offline-status-card', name: 'Distribution Offline Status Card' },
+    { id: 'distribution-hero-card', name: 'Distribution Hero Card' },
+    { id: 'distribution-modules-grid', name: 'Distribution Modules Grid' },
+    { id: 'distribution-load-availability-section', name: 'Distribution Load Availability Section' },
+    { id: 'distribution-customer-performance-section', name: 'Distribution Customer Performance Section' },
+    { id: 'distribution-customer-performance-cards', name: 'Distribution Customer Performance Cards' },
+    { id: 'distribution-load-details-modal-pane', name: 'Distribution Load Details Modal Pane' },
+    { id: 'distribution-load-details-modal-heading', name: 'Distribution Load Details Modal Heading' },
+    { id: 'distribution-load-details-modal-action-buttons', name: 'Distribution Load Details Action Buttons' },
+    { id: 'distribution-load-details-cards', name: 'Distribution Load Details Cards' },
+    { id: 'distribution-route-customers-section', name: 'Distribution Route Customers Section' },
+    { id: 'distribution-route-customers-action-link', name: 'Distribution Route Customers Action Link' },
+    { id: 'distribution-route-customers-cards', name: 'Distribution Route Customers Cards' },
+    { id: 'distribution-module-load-availability-card', name: 'Distribution Load Availability Module Card' },
+    { id: 'distribution-module-customers-card', name: 'Distribution Customers Module Card' },
+    { id: 'distribution-module-invoices-card', name: 'Distribution Invoices Module Card' },
+    { id: 'distribution-module-returns-card', name: 'Distribution Returns Module Card' },
+    { id: 'distribution-module-payments-card', name: 'Distribution Payments Module Card' },
+    { id: 'distribution-module-outstanding-payment-card', name: 'Distribution Outstanding Payment Module Card' },
+    { id: 'distribution-module-live-locations-card', name: 'Distribution Live Locations Module Card' },
+    { id: 'distribution-module-reports-card', name: 'Distribution Reports Module Card' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = distributionWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async () => {
+    try {
+      const response = await api.get('/dashboard/widgets/me');
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch (error) {
+      if (handleUnauthorized(error)) return;
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await api.put('/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      if (handleUnauthorized(error)) return;
+      console.error('Failed to apply widget visibility changes:', error);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = distributionWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await api.put('/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } catch (error) {
+      if (handleUnauthorized(error)) return;
+      console.error('Failed to restore widget visibility:', error);
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = distributionWidgetItems[0]?.id || 'distribution-nav-back-button';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await api.put('/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      if (handleUnauthorized(error)) return;
+      console.error('Failed to unlock widget controls:', error);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
   };
 
   const resolveAssignedRoute = async () => {
@@ -631,14 +800,14 @@ export default function DistributionPage() {
   };
 
   const modules = [
-    { name: 'Load Availability', icon: '🚛', path: '#load-availability', stat: loadAvailabilityCount, desc: 'See in-transit loads for your allocated route' },
-    { name: 'Customers (Shops)', icon: '🏪', path: '/dashboard/distribution/customers', stat: customerCount, desc: 'Register and manage shops' },
-    { name: 'Invoices', icon: '🧾', path: '/dashboard/distribution/invoices', stat: invoiceCount, desc: 'Create and track invoices' },
-    { name: 'Returns', icon: '↩️', path: '/dashboard/distribution/returns', stat: returnCount, desc: 'Manage customer returns' },
-    { name: 'Payments', icon: '💳', path: '/dashboard/distribution/payments', stat: paymentCount, desc: 'Check, cash, and bank transfers' },
-    { name: 'Outstanding Payment', icon: '🧮', path: '/dashboard/distribution/payments?entry=outstanding', stat: paymentCount, desc: 'Collect outstanding without creating a new invoice' },
-    { name: 'Live Locations', icon: '📍', path: '/dashboard/distribution/live-locations', stat: 0, desc: 'Track all ref locations on map' },
-    { name: 'Reports', icon: '📊', path: '/dashboard/reports', stat: 2, desc: 'Sales and delivery balance reports' },
+    { name: 'Load Availability', icon: '🚛', path: '#load-availability', stat: loadAvailabilityCount, desc: 'See in-transit loads for your allocated route', widgetKey: 'distribution-module-load-availability-card' },
+    { name: 'Customers (Shops)', icon: '🏪', path: '/dashboard/distribution/customers', stat: customerCount, desc: 'Register and manage shops', widgetKey: 'distribution-module-customers-card' },
+    { name: 'Invoices', icon: '🧾', path: '/dashboard/distribution/invoices', stat: invoiceCount, desc: 'Create and track invoices', widgetKey: 'distribution-module-invoices-card' },
+    { name: 'Returns', icon: '↩️', path: '/dashboard/distribution/returns', stat: returnCount, desc: 'Manage customer returns', widgetKey: 'distribution-module-returns-card' },
+    { name: 'Payments', icon: '💳', path: '/dashboard/distribution/payments', stat: paymentCount, desc: 'Check, cash, and bank transfers', widgetKey: 'distribution-module-payments-card' },
+    { name: 'Outstanding Payment', icon: '🧮', path: '/dashboard/distribution/payments?entry=outstanding', stat: paymentCount, desc: 'Collect outstanding without creating a new invoice', widgetKey: 'distribution-module-outstanding-payment-card' },
+    { name: 'Live Locations', icon: '📍', path: '/dashboard/distribution/live-locations', stat: 0, desc: 'Track all ref locations on map', widgetKey: 'distribution-module-live-locations-card' },
+    { name: 'Reports', icon: '📊', path: '/dashboard/reports', stat: 2, desc: 'Sales and delivery balance reports', widgetKey: 'distribution-module-reports-card' },
   ];
 
   const getModulePath = (path: string) => {
@@ -784,10 +953,23 @@ export default function DistributionPage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
-              <Link href="/dashboard" className="flex items-center space-x-2 text-gray-700 hover:text-green-600">
-                <span>←</span>
-                <span className="font-medium text-sm sm:text-base">Back to Dashboard</span>
-              </Link>
+              {isWidgetVisible('distribution-nav-back-button') && (
+                <>
+                  <Link href="/dashboard" className="flex items-center space-x-2 text-gray-700 hover:text-green-600">
+                    <span>←</span>
+                    <span className="font-medium text-sm sm:text-base">Back to Dashboard</span>
+                  </Link>
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-nav-back-button', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </>
+              )}
             </div>
             <div className="flex items-center space-x-2 text-sm text-gray-600">
               <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
@@ -798,18 +980,29 @@ export default function DistributionPage() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-8">
-        <section className={`rounded-2xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50/90' : 'border-amber-200 bg-amber-50/90'}`}>
+        {isWidgetVisible('distribution-offline-status-card') && <section className={`rounded-2xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50/90' : 'border-amber-200 bg-amber-50/90'}`}>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
             <p className={`text-sm font-medium ${isOnline ? 'text-emerald-800' : 'text-amber-800'}`}>
               {isOnline ? 'Online mode: distribution entries sync to the server.' : 'Offline mode: distribution entries are saved locally and synced when internet returns.'}
             </p>
-            <p className="text-xs font-semibold text-slate-700">
-              Pending Sync: Invoices {pendingOfflineCounts.invoices} | Payments {pendingOfflineCounts.payments} | Returns {pendingOfflineCounts.returns}
-            </p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs font-semibold text-slate-700">
+                Pending Sync: Invoices {pendingOfflineCounts.invoices} | Payments {pendingOfflineCounts.payments} | Returns {pendingOfflineCounts.returns}
+              </p>
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('distribution-offline-status-card', false)}
+                  className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
-        </section>
+        </section>}
 
-        <div className="text-center">
+        {isWidgetVisible('distribution-hero-card') && <div className="text-center">
           <div className="inline-block p-1 bg-gradient-to-r from-green-500 to-teal-500 rounded-full mb-4">
             <div className="bg-white rounded-full p-4 text-4xl">🚚</div>
           </div>
@@ -828,28 +1021,113 @@ export default function DistributionPage() {
                 : (assignedRouteName || `Route #${assignedRouteId}`)}
             </p>
           ) : null}
-        </div>
+          {!widgetControlsLocked && (
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={() => stageWidgetVisibilityChange('distribution-hero-card', false)}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {modules.map((module) => (
-            <Link key={module.name} href={getModulePath(module.path)} className="group bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl border border-white/20 p-6 transition-all hover:-translate-y-1">
-              <div className="flex items-start justify-between mb-4">
-                <div className="w-12 h-12 rounded-xl bg-gradient-to-r from-green-500 to-teal-500 text-white text-2xl flex items-center justify-center">{module.icon}</div>
-                <div className="text-xs text-gray-500">{loading ? '...' : `${module.stat} records`}</div>
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden items, and unlock when required.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
+                disabled={widgetControlsLocked || pendingWidgetChanges.length === 0}
+                className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                Fix Widgets
+              </button>
+              <button
+                type="button"
+                onClick={restoreHiddenWidgetsAfterFix}
+                disabled={hiddenWidgetCount === 0}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
+              >
+                Restore Widgets
+              </button>
+              <button
+                type="button"
+                onClick={openUnlockWidgetsAfterFix}
+                className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700"
+              >
+                Unlock Widgets
+              </button>
+            </div>
+          </div>
+          <p className="mt-3 text-xs text-slate-600">
+            Hidden widgets: <span className="font-semibold">{hiddenWidgetCount}</span> · Pending changes:{' '}
+            <span className="font-semibold">{pendingWidgetChanges.length}</span> · Controls:{' '}
+            <span className={`font-semibold ${widgetControlsLocked ? 'text-rose-600' : 'text-emerald-600'}`}>
+              {widgetControlsLocked ? 'Locked' : 'Editable'}
+            </span>
+          </p>
+        </section>
+
+        {isWidgetVisible('distribution-modules-grid') && <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {modules
+            .filter((module) => isWidgetVisible(module.widgetKey))
+            .map((module) => (
+              <div key={module.name} className="relative">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange(module.widgetKey, false)}
+                    className="absolute right-3 top-3 z-10 rounded-md border border-slate-300 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    ✕
+                  </button>
+                )}
+                <Link href={getModulePath(module.path)} className="group block bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl border border-white/20 p-6 transition-all hover:-translate-y-1">
+                  <div className="flex items-start justify-between mb-4 pr-8">
+                    <div className="w-12 h-12 rounded-xl bg-gradient-to-r from-green-500 to-teal-500 text-white text-2xl flex items-center justify-center">{module.icon}</div>
+                    <div className="text-xs text-gray-500">{loading ? '...' : `${module.stat} records`}</div>
+                  </div>
+                  <h3 className="text-lg font-semibold text-gray-900">{module.name}</h3>
+                  <p className="text-sm text-gray-600 mt-1">{module.desc}</p>
+                </Link>
               </div>
-              <h3 className="text-lg font-semibold text-gray-900">{module.name}</h3>
-              <p className="text-sm text-gray-600 mt-1">{module.desc}</p>
-            </Link>
-          ))}
-        </div>
+            ))}
+          {!widgetControlsLocked && (
+            <div className="md:col-span-2 lg:col-span-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => stageWidgetVisibilityChange('distribution-modules-grid', false)}
+                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+        </div>}
 
-        <section id="load-availability" className="mt-8">
+        {isWidgetVisible('distribution-load-availability-section') && <section id="load-availability" className="mt-8">
           <div className="bg-white/80 backdrop-blur-sm border border-white/40 rounded-2xl shadow-lg p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Sales Ref Load Availability</h2>
                 <p className="text-xs text-gray-500">Only in-transit loads on your allocated route are shown here.</p>
               </div>
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('distribution-load-availability-section', false)}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  ✕
+                </button>
+              )}
             </div>
 
             {routeResolving ? (
@@ -875,20 +1153,41 @@ export default function DistributionPage() {
               </div>
             )}
           </div>
-        </section>
+        </section>}
 
-        <section className="mt-8">
+        {isWidgetVisible('distribution-customer-performance-section') && <section className="mt-8">
           <div className="bg-white/80 backdrop-blur-sm border border-white/40 rounded-2xl shadow-lg p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">New Customer Registration Performance</h2>
                 <p className="text-xs text-gray-500">Compare new customer registrations between previous month and current month.</p>
               </div>
+              {!widgetControlsLocked && (
+                <div className="flex items-center gap-2">
+                  {isWidgetVisible('distribution-customer-performance-cards') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-customer-performance-cards', false)}
+                      className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('distribution-customer-performance-section', false)}
+                    className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
             </div>
 
             {customerPerfLoading ? (
               <p className="text-sm text-gray-500">Loading registration performance...</p>
             ) : (
+              isWidgetVisible('distribution-customer-performance-cards') ? (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4">
@@ -916,19 +1215,53 @@ export default function DistributionPage() {
                   <p className="mt-1 text-xs text-slate-600">Based on customer registrations within your currently allocated route scope.</p>
                 </div>
               </div>
+              ) : (
+                <p className="text-sm text-slate-500">Performance cards are hidden.</p>
+              )
             )}
           </div>
-        </section>
+        </section>}
 
-        {isLoadDetailModalOpen && (
+        {isWidgetVisible('distribution-load-details-modal-pane') && isLoadDetailModalOpen && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 p-4">
             <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[90vh] overflow-hidden">
               <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-900">Load Details: {selectedLoad?.load_number || (selectedLoad ? `Load #${selectedLoad.id}` : '-')}</h3>
-                  <p className="text-xs text-slate-500">In-transit availability, sold quantity, return details, and financial summary.</p>
+                {isWidgetVisible('distribution-load-details-modal-heading') && (
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-900">Load Details: {selectedLoad?.load_number || (selectedLoad ? `Load #${selectedLoad.id}` : '-')}</h3>
+                    <p className="text-xs text-slate-500">In-transit availability, sold quantity, return details, and financial summary.</p>
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={closeLoadDetailsModal} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50">Close</button>
+                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-modal-heading') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-modal-heading', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-modal-action-buttons') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-modal-action-buttons', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-cards') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-cards', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
-                <button type="button" onClick={closeLoadDetailsModal} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50">Close</button>
               </div>
 
               <div className="overflow-y-auto p-5 space-y-4 max-h-[78vh]">
@@ -937,6 +1270,7 @@ export default function DistributionPage() {
                 ) : loadDetailError ? (
                   <p className="text-sm text-rose-600">{loadDetailError}</p>
                 ) : (
+                  isWidgetVisible('distribution-load-details-cards') ? (
                   <>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
@@ -1109,13 +1443,16 @@ export default function DistributionPage() {
                       <p className="text-xs text-slate-500">Period: {formatDate(selectedLoadSummary.period.from)} to {formatDate(selectedLoadSummary.period.to)}</p>
                     )}
                   </>
+                  ) : (
+                    <p className="text-sm text-slate-500">Load detail cards are hidden.</p>
+                  )
                 )}
               </div>
             </div>
           </div>
         )}
 
-        {assignedRouteId && (
+        {assignedRouteId && isWidgetVisible('distribution-route-customers-section') && (
           <section className="mt-8">
             <div className="bg-white/80 backdrop-blur-sm border border-white/40 rounded-2xl shadow-lg p-6">
               <div className="flex items-center justify-between mb-4">
@@ -1125,19 +1462,48 @@ export default function DistributionPage() {
                     Shops on your auto-assigned route.
                   </p>
                 </div>
-                <Link
-                  href={getModulePath('/dashboard/distribution/customers')}
-                  className="text-xs font-medium text-green-700 hover:text-green-900"
-                >
-                  View all →
-                </Link>
+                <div className="flex items-center gap-2">
+                  {isWidgetVisible('distribution-route-customers-action-link') && <Link
+                    href={getModulePath('/dashboard/distribution/customers')}
+                    className="text-xs font-medium text-green-700 hover:text-green-900"
+                  >
+                    View all →
+                  </Link>}
+                  {!widgetControlsLocked && isWidgetVisible('distribution-route-customers-action-link') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-route-customers-action-link', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-route-customers-section', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {!widgetControlsLocked && isWidgetVisible('distribution-route-customers-cards') && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('distribution-route-customers-cards', false)}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
               </div>
 
               {routeCustomersLoading ? (
                 <p className="text-sm text-gray-500">Loading customers...</p>
               ) : routeCustomers.length === 0 ? (
                 <p className="text-sm text-gray-500">No customers found for this route.</p>
-              ) : (
+              ) : isWidgetVisible('distribution-route-customers-cards') ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {routeCustomers.slice(0, 9).map((customer) => (
                     <div
@@ -1160,9 +1526,98 @@ export default function DistributionPage() {
                     </div>
                   ))}
                 </div>
+              ) : (
+                <p className="text-sm text-gray-500">Route customer cards are hidden.</p>
               )}
             </div>
           </section>
+        )}
+
+        {showSuperAdminConfirmModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="w-full max-w-lg rounded-xl bg-white shadow-2xl">
+              <div className="border-b border-slate-200 px-5 py-4">
+                <h3 className="text-base font-semibold text-slate-900">
+                  {superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}
+                </h3>
+              </div>
+              <div className="space-y-4 px-5 py-4">
+                <p className="text-sm text-slate-600">
+                  {superAdminModalMode === 'unlock'
+                    ? 'Enter Super Admin credentials to unlock widget controls.'
+                    : superAdminModalMode === 'restore'
+                      ? 'Authenticate and restore hidden widgets one by one.'
+                      : 'Authenticate and apply pending visibility changes.'}
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <input
+                    type="email"
+                    value={superAdminEmail}
+                    onChange={(e) => setSuperAdminEmail(e.target.value)}
+                    placeholder="Super Admin Email"
+                    className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900"
+                  />
+                  <input
+                    type="password"
+                    value={superAdminPassword}
+                    onChange={(e) => setSuperAdminPassword(e.target.value)}
+                    placeholder="Super Admin Password"
+                    className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900"
+                  />
+                </div>
+                {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                  <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">
+                    {distributionWidgetItems
+                      .filter((item) => widgetVisibility[item.id] === false)
+                      .map((item) => (
+                        <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2">
+                          <span className="text-sm text-slate-700">{item.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => restoreHiddenWidgetOneByOne(item.id)}
+                            disabled={restoreWidgetLoadingKey === item.id}
+                            className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60"
+                          >
+                            {restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}
+                          </button>
+                        </div>
+                      ))}
+                    {distributionWidgetItems.every((item) => widgetVisibility[item.id] !== false) && (
+                      <p className="text-sm text-slate-500">No hidden widgets remain.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4">
+                <button
+                  type="button"
+                  onClick={rollbackPendingWidgetChanges}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                  disabled={superAdminConfirmLoading}
+                >
+                  Cancel
+                </button>
+                {superAdminModalMode === 'restore' && (
+                  <button
+                    type="button"
+                    onClick={showRestoreWidgetList}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                    disabled={superAdminConfirmLoading}
+                  >
+                    Show Hidden Widgets
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                  disabled={superAdminConfirmLoading}
+                >
+                  {superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

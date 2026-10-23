@@ -48,6 +48,8 @@ type ReturnLineItem = {
   quantity: string;
   amount: string;
 };
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 export default function DistributionReturnsPage() {
   const [token, setToken] = useState('');
@@ -66,6 +68,17 @@ export default function DistributionReturnsPage() {
   const [returnLineItems, setReturnLineItems] = useState<ReturnLineItem[]>([
     { lineId: `line-${Date.now()}`, inventory_item_id: '', quantity: '', amount: '' },
   ]);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const [form, setForm] = useState({
     return_number: '',
@@ -121,13 +134,154 @@ export default function DistributionReturnsPage() {
     return flags.includes('raw_material') || flags.includes('raw material');
   };
 
+  const returnWidgetItems = [
+    { id: 'distribution-returns-nav-back-button', name: 'Returns Back Button' },
+    { id: 'distribution-returns-offline-status-card', name: 'Returns Offline Status Card' },
+    { id: 'distribution-returns-actions-card', name: 'Returns Actions Card' },
+    { id: 'distribution-returns-records-card', name: 'Returns Records Card' },
+    { id: 'distribution-returns-records-table-headings', name: 'Returns Table Headings' },
+    { id: 'distribution-returns-records-row-actions', name: 'Returns Row Actions' },
+    { id: 'distribution-returns-create-modal-pane', name: 'Returns Create Modal Pane' },
+    { id: 'distribution-returns-create-modal-heading', name: 'Returns Create Modal Heading' },
+    { id: 'distribution-returns-create-modal-action-buttons', name: 'Returns Create Modal Action Buttons' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = returnWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = returnWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = returnWidgetItems[0]?.id || 'distribution-returns-nav-back-button';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     if (!storedToken) router.push('/');
     else setToken(storedToken);
   }, [router]);
 
-  useEffect(() => { if (token) fetchData(); }, [token]);
+  useEffect(() => {
+    if (token) {
+      fetchData();
+      fetchWidgetVisibility(token);
+    }
+  }, [token]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -340,31 +494,46 @@ export default function DistributionReturnsPage() {
               </div>
             </div>
             <div className="flex justify-start sm:justify-end">
-              <Link
+              {isWidgetVisible('distribution-returns-nav-back-button') && <Link
                 href="/dashboard/distribution"
                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
                 Back to Distribution
-              </Link>
+              </Link>}
+              {!widgetControlsLocked && isWidgetVisible('distribution-returns-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-nav-back-button', false)} className="ml-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
           </div>
         </div>
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('distribution-returns-offline-status-card') && <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
             <p className={isOnline ? 'text-emerald-800' : 'text-amber-800'}>
               {isOnline ? 'Online mode: returns sync directly to server.' : 'Offline mode: new returns are saved locally.'}
             </p>
-            <p className="text-xs font-semibold text-gray-700">
+            <div className="flex items-center gap-2"><p className="text-xs font-semibold text-gray-700">
               Pending offline returns: {pendingOfflineReturns.length}
               {syncingOfflineReturns ? ' (syncing...)' : ''}
-            </p>
+            </p>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-offline-status-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
           </div>
-        </section>
+        </section>}
 
-        <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
+        {isWidgetVisible('distribution-returns-actions-card') && <section className="rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
           <div className="mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
               <h2 className="text-sm font-semibold text-gray-900">Return actions</h2>
@@ -380,19 +549,21 @@ export default function DistributionReturnsPage() {
             >
               Add Return
             </button>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-actions-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
-        </section>
+        </section>}
 
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+        {isWidgetVisible('distribution-returns-records-card') && <section className="rounded-xl border border-gray-200 bg-white overflow-hidden">
           <div className="px-4 sm:px-6 py-3 border-b border-gray-100 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold text-gray-900">Return records</h2>
               <p className="text-xs text-gray-500">Browse all distribution returns.</p>
             </div>
+            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-records-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+              {isWidgetVisible('distribution-returns-records-table-headings') && <thead className="bg-gray-50">
                 <tr>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Return</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Customer</th>
@@ -403,7 +574,7 @@ export default function DistributionReturnsPage() {
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Status</th>
                   <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Actions</th>
                 </tr>
-              </thead>
+              </thead>}
               <tbody className="bg-white divide-y divide-gray-200">
                 {loading ? (
                   <tr>
@@ -438,6 +609,7 @@ export default function DistributionReturnsPage() {
                         <td className="px-4 py-2 text-sm text-gray-700 text-right">{Number(row.total_amount).toFixed(2)}</td>
                         <td className="px-4 py-2 text-sm text-gray-700">{row.status}</td>
                         <td className="px-4 py-2 text-sm text-gray-700 text-right">
+                          {isWidgetVisible('distribution-returns-records-row-actions') && (
                           <button
                             type="button"
                             onClick={() => setViewReturn(row)}
@@ -445,6 +617,7 @@ export default function DistributionReturnsPage() {
                           >
                             View
                           </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -453,17 +626,17 @@ export default function DistributionReturnsPage() {
               </tbody>
             </table>
           </div>
-        </section>
+        </section>}
       </main>
 
-      {showCreateModal && (
+      {isWidgetVisible('distribution-returns-create-modal-pane') && showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
           <div className="w-full max-w-5xl rounded-xl border border-gray-200 bg-white p-4 shadow-2xl max-h-[92vh] overflow-y-auto">
             <div className="mb-3 flex items-start justify-between gap-3">
-              <div>
+              {isWidgetVisible('distribution-returns-create-modal-heading') && <div>
                 <h3 className="text-lg font-semibold text-gray-900">Add Return</h3>
                 <p className="text-xs text-gray-500">Link a return to a customer and optionally to an invoice and item.</p>
-              </div>
+              </div>}
               <button
                 type="button"
                 onClick={() => setShowCreateModal(false)}
@@ -673,7 +846,7 @@ export default function DistributionReturnsPage() {
                     className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
                   />
                 </div>
-                <div className="md:col-span-1 flex justify-end gap-2">
+                {isWidgetVisible('distribution-returns-create-modal-action-buttons') && <div className="md:col-span-1 flex justify-end gap-2">
                   <button
                     type="button"
                     onClick={() => setShowCreateModal(false)}
@@ -688,7 +861,7 @@ export default function DistributionReturnsPage() {
                   >
                     {saving ? 'Saving...' : 'Record Return'}
                   </button>
-                </div>
+                </div>}
               </div>
             </form>
           </div>
@@ -957,6 +1130,7 @@ export default function DistributionReturnsPage() {
           </div>
         </div>
       )}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{returnWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

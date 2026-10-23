@@ -37,18 +37,32 @@ class DatabaseBackupController extends Controller
         }
 
         $database = DB::getDatabaseName();
-        $fileName = $database . '_backup_' . now()->format('Ymd_His') . '.sql';
+        $excludeCacheTables = filter_var($request->query('exclude_cache', false), FILTER_VALIDATE_BOOLEAN);
+        $fileSuffix = $excludeCacheTables ? '_no_cache' : '';
+        $fileName = $database . '_backup' . $fileSuffix . '_' . now()->format('Ymd_His') . '.sql';
 
         $tables = collect(DB::select('SHOW FULL TABLES WHERE Table_type = "BASE TABLE"'))
             ->map(fn ($row) => array_values((array) $row)[0])
+            ->filter(function ($table) use ($excludeCacheTables) {
+                if (!$excludeCacheTables) {
+                    return true;
+                }
+
+                $normalized = strtolower((string) $table);
+                return $normalized !== 'cache' && $normalized !== 'cache_locks';
+            })
+            ->values()
             ->all();
 
-        return new StreamedResponse(function () use ($database, $tables) {
+        return new StreamedResponse(function () use ($database, $tables, $excludeCacheTables) {
             $pdo = DB::getPdo();
             $out = fopen('php://output', 'w');
 
             fwrite($out, "-- Database backup for `{$database}`\n");
             fwrite($out, '-- Generated at ' . now()->toDateTimeString() . "\n");
+            if ($excludeCacheTables) {
+                fwrite($out, "-- Cache tables excluded from this backup\n");
+            }
             fwrite($out, "SET FOREIGN_KEY_CHECKS=0;\nSET NAMES utf8mb4;\n\n");
 
             foreach ($tables as $table) {

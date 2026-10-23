@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
@@ -30,6 +30,7 @@ type InvoiceRow = {
   paid_amount?: number;
   status?: InvoiceStatus;
   items?: InvoiceItem[];
+  items_count?: number;
   created_at?: string;
 };
 
@@ -39,6 +40,9 @@ type PaginatedResponse<T> = {
 };
 
 export default function DistributionInvoiceReportPage() {
+  const REPORT_CACHE_KEY = 'distribution-invoice-report:rows:v1';
+  const REPORT_CACHE_TTL_MS = 60 * 1000;
+
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -49,6 +53,11 @@ export default function DistributionInvoiceReportPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(20);
+  const [backgroundLoading, setBackgroundLoading] = useState(false);
+  const [loadedRowsCount, setLoadedRowsCount] = useState(0);
+  const fetchRunRef = useRef(0);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -111,7 +120,8 @@ export default function DistributionInvoiceReportPage() {
           return;
         }
 
-        await fetchRows(token);
+        const hadWarmCache = readRowsCache();
+        await fetchRows(token, { skipLoading: hadWarmCache });
       } catch (error) {
         console.error('Error checking invoice report access:', error);
         router.push('/dashboard');
@@ -123,38 +133,117 @@ export default function DistributionInvoiceReportPage() {
     verifyAccess();
   }, [token, router]);
 
-  const fetchRows = async (authToken?: string) => {
+  const readRowsCache = () => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const raw = sessionStorage.getItem(REPORT_CACHE_KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw) as { cachedAt?: number; rows?: InvoiceRow[] };
+      if (!parsed || !Array.isArray(parsed.rows) || typeof parsed.cachedAt !== 'number') return false;
+      if ((Date.now() - parsed.cachedAt) > REPORT_CACHE_TTL_MS) return false;
+
+      setRows(parsed.rows);
+      setLoadedRowsCount(parsed.rows.length);
+      return true;
+    } catch (error) {
+      console.error('Error reading invoice report cache:', error);
+      return false;
+    }
+  };
+
+  const writeRowsCache = (invoiceRows: InvoiceRow[]) => {
+    if (typeof window === 'undefined') return;
+    try {
+      const payload = JSON.stringify({
+        cachedAt: Date.now(),
+        rows: invoiceRows,
+      });
+      if (payload.length > 1_500_000) {
+        sessionStorage.removeItem(REPORT_CACHE_KEY);
+        return;
+      }
+      sessionStorage.setItem(REPORT_CACHE_KEY, payload);
+    } catch (error) {
+      console.error('Error writing invoice report cache:', error);
+    }
+  };
+
+  const fetchRows = async (authToken?: string, options?: { skipLoading?: boolean }) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
+    const runId = ++fetchRunRef.current;
 
     try {
-      setLoading(true);
+      if (!options?.skipLoading) setLoading(true);
+      setBackgroundLoading(false);
       setErrorMessage('');
+      setLoadedRowsCount(0);
 
-      const allRows: InvoiceRow[] = [];
-      let nextUrl: string | null = `${API_URL}/api/distribution/invoices?per_page=200`;
-      let pageCount = 0;
+      const firstUrl = `${API_URL}/api/distribution/invoices?per_page=20&exclude_cancelled=1&report_mode=1`;
+      const firstResponse: { data: { data?: PaginatedResponse<InvoiceRow> } } = await axios.get(firstUrl, {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
 
-      while (nextUrl && pageCount < 50) {
-        const response: { data: { data?: PaginatedResponse<InvoiceRow> } } = await axios.get(nextUrl, {
-          headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
-        });
+      if (runId !== fetchRunRef.current) return;
 
-        const payload = response.data?.data;
-        const pageRows = Array.isArray(payload?.data) ? payload.data : [];
-        allRows.push(...pageRows);
+      const firstPayload = firstResponse.data?.data;
+      const firstRows = Array.isArray(firstPayload?.data) ? firstPayload.data : [];
+      let nextUrl: string | null = firstPayload?.next_page_url || null;
 
-        nextUrl = payload?.next_page_url || null;
-        pageCount += 1;
+      setRows(firstRows);
+      setLoadedRowsCount(firstRows.length);
+      writeRowsCache(firstRows);
+      if (!options?.skipLoading) setLoading(false);
+
+      if (!nextUrl) {
+        setBackgroundLoading(false);
+        return;
       }
 
-      setRows(allRows);
+      setBackgroundLoading(true);
+      void (async () => {
+        const allRows: InvoiceRow[] = [...firstRows];
+        let pageCount = 0;
+
+        try {
+          while (nextUrl && pageCount < 200) {
+            const response: { data: { data?: PaginatedResponse<InvoiceRow> } } = await axios.get(nextUrl, {
+              headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+            });
+
+            if (runId !== fetchRunRef.current) return;
+
+            const payload = response.data?.data;
+            const pageRows = Array.isArray(payload?.data) ? payload.data : [];
+            allRows.push(...pageRows);
+
+            nextUrl = payload?.next_page_url || null;
+            pageCount += 1;
+
+            setRows([...allRows]);
+            setLoadedRowsCount(allRows.length);
+            if (pageCount % 2 === 0 || !nextUrl) {
+              writeRowsCache(allRows);
+            }
+          }
+        } catch (error) {
+          if (runId !== fetchRunRef.current) return;
+          console.error('Error fetching remaining invoice report rows:', error);
+          setErrorMessage((prev) => prev || 'Initial records loaded. Failed to sync all remaining records.');
+        } finally {
+          if (runId !== fetchRunRef.current) return;
+          setBackgroundLoading(false);
+        }
+      })();
     } catch (error) {
+      if (runId !== fetchRunRef.current) return;
       console.error('Error fetching invoice report rows:', error);
       setRows([]);
+      setLoadedRowsCount(0);
+      setBackgroundLoading(false);
       setErrorMessage('Failed to load invoice report data.');
     } finally {
-      setLoading(false);
+      if (runId === fetchRunRef.current && !options?.skipLoading) setLoading(false);
     }
   };
 
@@ -179,6 +268,7 @@ export default function DistributionInvoiceReportPage() {
     const term = search.trim().toLowerCase();
 
     return rows.filter((row) => {
+      if (String(row.status || '').toLowerCase() === 'cancelled') return false;
       if (statusFilter !== 'all' && row.status !== statusFilter) return false;
       if (customerFilter !== 'all' && String(row.customer?.shop_name || '') !== customerFilter) return false;
 
@@ -229,6 +319,25 @@ export default function DistributionInvoiceReportPage() {
       statusCounts,
     };
   }, [filteredRows]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, customerFilter, fromDate, toDate, rowsPerPage, rows.length]);
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  }, [filteredRows.length, rowsPerPage]);
+
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+
+  const paginatedRows = useMemo(() => {
+    const start = (safeCurrentPage - 1) * rowsPerPage;
+    const end = start + rowsPerPage;
+    return filteredRows.slice(start, end);
+  }, [filteredRows, safeCurrentPage, rowsPerPage]);
+
+  const pageStart = filteredRows.length === 0 ? 0 : (safeCurrentPage - 1) * rowsPerPage + 1;
+  const pageEnd = filteredRows.length === 0 ? 0 : Math.min(pageStart + paginatedRows.length - 1, filteredRows.length);
 
   const toDateLabel = (value?: string | null) => {
     if (!value) return '-';
@@ -323,7 +432,6 @@ export default function DistributionInvoiceReportPage() {
                 <option value="pending">Pending</option>
                 <option value="partial">Partial</option>
                 <option value="paid">Paid</option>
-                <option value="cancelled">Cancelled</option>
               </select>
             </div>
             <div>
@@ -364,8 +472,20 @@ export default function DistributionInvoiceReportPage() {
                 disabled={loading}
                 className="px-4 py-2 bg-gradient-to-r from-green-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-green-700 hover:to-teal-700 disabled:opacity-60"
               >
-                {loading ? 'Loading...' : 'Refresh Data'}
+                {loading ? 'Loading...' : backgroundLoading ? 'Syncing...' : 'Refresh Data'}
               </button>
+            </div>
+            <div className="md:col-span-6 flex justify-end items-center gap-2">
+              <label className="text-xs font-medium text-gray-700">Rows per page</label>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+              >
+                {[10, 20, 25, 50, 100].map((size) => (
+                  <option key={size} value={size}>{size}</option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -380,6 +500,11 @@ export default function DistributionInvoiceReportPage() {
             <span>Pending: <strong>{summary.statusCounts.pending}</strong></span>
             <span>Partial: <strong>{summary.statusCounts.partial}</strong></span>
             <span>Paid: <strong>{summary.statusCounts.paid}</strong></span>
+            {backgroundLoading && (
+              <span className="text-teal-700 font-medium">
+                Loading remaining records... <strong>{loadedRowsCount}</strong> loaded
+              </span>
+            )}
           </div>
 
           <div className="overflow-x-auto">
@@ -405,8 +530,8 @@ export default function DistributionInvoiceReportPage() {
                     <td colSpan={11} className="px-4 py-10 text-center text-sm text-gray-500">No invoice records found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
-                    <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                  paginatedRows.map((row, idx) => (
+                    <tr key={row.id} className={((pageStart - 1 + idx) % 2) === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.invoice_number || '-'}</td>
                       <td className="px-4 py-3 text-sm text-gray-900 font-medium">
                         {(row.customer?.customer_code || '-') + ' - ' + (row.customer?.shop_name || '-')}
@@ -418,7 +543,7 @@ export default function DistributionInvoiceReportPage() {
                           {row.status ? row.status.toUpperCase() : '-'}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{(row.items || []).length}</td>
+                      <td className="px-4 py-3 text-sm text-right text-gray-700">{Number(row.items_count ?? (row.items || []).length)}</td>
                       <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.subtotal)}</td>
                       <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.discount)}</td>
                       <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">{formatMoney(row.total)}</td>
@@ -429,6 +554,33 @@ export default function DistributionInvoiceReportPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="px-4 py-3 border-t border-gray-100 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="text-sm text-gray-600">
+              Showing <strong>{pageStart}</strong> to <strong>{pageEnd}</strong> of <strong>{filteredRows.length}</strong> invoices
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={safeCurrentPage <= 1}
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+              >
+                Previous
+              </button>
+              <span className="text-sm text-gray-700">
+                Page <strong>{safeCurrentPage}</strong> of <strong>{totalPages}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={safeCurrentPage >= totalPages}
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
       </main>

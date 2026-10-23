@@ -220,7 +220,9 @@ export default function DistributionSalesSummaryReportPage() {
 
   const fetchPaginated = useCallback(async <T,>(endpoint: string, authToken: string): Promise<T[]> => {
     const rows: T[] = [];
-    let nextUrl: string | null = `${API_URL}/api/${endpoint.replace(/^\/+/, '')}?per_page=200`;
+    const normalizedEndpoint = endpoint.replace(/^\/+/, '');
+    const queryJoiner = normalizedEndpoint.includes('?') ? '&' : '?';
+    let nextUrl: string | null = `${API_URL}/api/${normalizedEndpoint}${queryJoiner}per_page=200`;
     let pageCount = 0;
 
     while (nextUrl && pageCount < 100) {
@@ -400,7 +402,7 @@ export default function DistributionSalesSummaryReportPage() {
       setLoads(loadRows);
       setLoadingStep('invoices');
 
-      const invoiceRows = await fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse);
+      const invoiceRows = await fetchPaginated<InvoiceRow>('distribution/invoices?exclude_cancelled=1', tokenToUse);
       setInvoices(invoiceRows);
       setLoadingStep('payments');
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
 
@@ -246,7 +246,20 @@ interface LoadExpenseRecord {
   note?: string | null;
 }
 
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+
 const PAGE_SIZE = 10;
+const vehicleLoadingLoadsWidgetItems = [
+  { id: 'vehicle-loading-loads-hero-card', name: 'Vehicle Loading Loads Hero Card' },
+  { id: 'vehicle-loading-loads-filters-card', name: 'Vehicle Loading Loads Filters Card' },
+  { id: 'vehicle-loading-loads-table-card', name: 'Vehicle Loading Loads Table Card' },
+  { id: 'vehicle-loading-loads-table-headings', name: 'Vehicle Loading Loads Table Headings' },
+  { id: 'vehicle-loading-loads-row-action-buttons', name: 'Vehicle Loading Loads Row Action Buttons' },
+  { id: 'vehicle-loading-loads-summary-cards', name: 'Vehicle Loading Loads Summary Cards' },
+  { id: 'vehicle-loading-loads-form-modal-pane', name: 'Vehicle Loading Loads Form Modal Pane' },
+  { id: 'vehicle-loading-loads-details-modal-pane', name: 'Vehicle Loading Loads Details Modal Pane' },
+];
 
 export default function LoadsPage() {
   const [token, setToken] = useState('');
@@ -255,6 +268,17 @@ export default function LoadsPage() {
   const [showModal, setShowModal] = useState(false);
   const [showAddRouteModal, setShowAddRouteModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsMode, setDetailsMode] = useState<'view' | 'complete'>('view');
   const [detailsCompleting, setDetailsCompleting] = useState(false);
@@ -301,6 +325,8 @@ export default function LoadsPage() {
     notes: ''
   });
   const router = useRouter();
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = vehicleLoadingLoadsWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   const soldProfitTotals = useMemo(() => {
     return soldItemProfitRows.reduce(
@@ -406,47 +432,78 @@ export default function LoadsPage() {
       .sort((a, b) => b.total_sale - a.total_sale);
   }, [loadInvoices, loadPayments]);
 
-  const toDeliveryCashRows = (payload: any): DeliveryCashTransactionRecord[] => {
-    const rows = Array.isArray(payload)
+  const asRecord = useCallback((value: unknown): Record<string, unknown> | null => {
+    if (!value || typeof value !== 'object') return null;
+    return value as Record<string, unknown>;
+  }, []);
+
+  const toNullableString = useCallback((value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return null;
+  }, []);
+
+  const toDeliveryCashRows = useCallback((payload: unknown): DeliveryCashTransactionRecord[] => {
+    const payloadRecord = asRecord(payload);
+    const nestedData = asRecord(payloadRecord?.data);
+    const rows: unknown[] = Array.isArray(payload)
       ? payload
-      : (payload?.data?.data || payload?.data || []);
+      : Array.isArray(nestedData?.data)
+        ? nestedData.data
+        : Array.isArray(payloadRecord?.data)
+          ? payloadRecord.data
+          : [];
 
-    if (!Array.isArray(rows)) return [];
+    const mapped: DeliveryCashTransactionRecord[] = [];
+    for (const row of rows) {
+      const tx = asRecord(row);
+      if (!tx) continue;
+      mapped.push({
+        id: (typeof tx.id === 'number' || typeof tx.id === 'string') ? tx.id : 0,
+        date: String(tx.date || ''),
+        type: tx.type === 'in' ? 'in' : 'out',
+        amount: Number(tx.amount || 0),
+        reference: toNullableString(tx.reference),
+        note: toNullableString(tx.note),
+      });
+    }
 
-    return rows.map((row: any) => ({
-      id: row.id,
-      date: String(row.date || ''),
-      type: row.type === 'in' ? 'in' : 'out',
-      amount: Number(row.amount || 0),
-      reference: row.reference ?? null,
-      note: row.note ?? null,
-    }));
-  };
+    return mapped;
+  }, [asRecord, toNullableString]);
 
-  const toLoadExpenseRows = (payload: any): LoadExpenseRecord[] => {
-    const rows = Array.isArray(payload)
+  const toLoadExpenseRows = useCallback((payload: unknown): LoadExpenseRecord[] => {
+    const payloadRecord = asRecord(payload);
+    const rows: unknown[] = Array.isArray(payload)
       ? payload
-      : (payload?.data || []);
+      : Array.isArray(payloadRecord?.data)
+        ? payloadRecord.data
+        : [];
 
-    if (!Array.isArray(rows)) return [];
+    const mapped: LoadExpenseRecord[] = [];
+    for (const row of rows) {
+      const expense = asRecord(row);
+      if (!expense) continue;
+      mapped.push({
+        id: (typeof expense.id === 'number' || typeof expense.id === 'string') ? expense.id : 0,
+        load_id: Number(expense.load_id || 0),
+        expense_date: String(expense.expense_date || ''),
+        expense_type: String(expense.expense_type || 'other'),
+        amount: Number(expense.amount || 0),
+        reference: toNullableString(expense.reference),
+        note: toNullableString(expense.note),
+      });
+    }
 
-    return rows.map((row: any) => ({
-      id: row.id,
-      load_id: Number(row.load_id || 0),
-      expense_date: String(row.expense_date || ''),
-      expense_type: String(row.expense_type || 'other'),
-      amount: Number(row.amount || 0),
-      reference: row.reference ?? null,
-      note: row.note ?? null,
-    }));
-  };
+    return mapped;
+  }, [asRecord, toNullableString]);
 
-  const calculateDeliveryCashBalance = (transactions: DeliveryCashTransactionRecord[]) => {
+  const calculateDeliveryCashBalance = useCallback((transactions: DeliveryCashTransactionRecord[]) => {
     return transactions.reduce((sum, tx) => {
       const amount = Number(tx.amount || 0);
       return tx.type === 'in' ? sum + amount : sum - amount;
     }, 0);
-  };
+  }, []);
 
   const formatExpenseCategory = (value?: string | null) => {
     const raw = String(value || '').trim();
@@ -457,7 +514,26 @@ export default function LoadsPage() {
       .join(' ');
   };
 
-  const refreshDeliveryCashForLoad = async (loadId?: number) => {
+  const extractApiErrorMessage = (error: unknown, fallback: string): string => {
+    const errorRecord = error && typeof error === 'object' ? (error as Record<string, unknown>) : null;
+    const response = errorRecord?.response && typeof errorRecord.response === 'object'
+      ? (errorRecord.response as Record<string, unknown>)
+      : null;
+    const responseData = response?.data && typeof response.data === 'object'
+      ? (response.data as Record<string, unknown>)
+      : null;
+    const apiMessage = typeof responseData?.message === 'string' ? responseData.message : fallback;
+    const errorsObject = responseData?.errors && typeof responseData.errors === 'object'
+      ? (responseData.errors as Record<string, unknown>)
+      : null;
+    const firstErrorEntry = errorsObject ? Object.values(errorsObject)[0] : null;
+    if (Array.isArray(firstErrorEntry) && firstErrorEntry.length > 0 && typeof firstErrorEntry[0] === 'string') {
+      return firstErrorEntry[0];
+    }
+    return apiMessage;
+  };
+
+  const refreshDeliveryCashForLoad = useCallback(async (loadId?: number) => {
     const response = await axios.get('/api/delivery-cash-transactions', {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -476,7 +552,7 @@ export default function LoadsPage() {
       });
       setLoadExpenses(toLoadExpenseRows(expensesRes.data));
     }
-  };
+  }, [calculateDeliveryCashBalance, toDeliveryCashRows, toLoadExpenseRows, token]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -487,19 +563,126 @@ export default function LoadsPage() {
     }
   }, [router]);
 
-  useEffect(() => {
-    if (token) {
-      fetchLoads();
-      fetchVehicles();
-      fetchDrivers();
-      fetchRoutes();
-      refreshDeliveryCashForLoad().catch((error) => {
-        console.error('Error fetching delivery cash transactions:', error);
+  const fetchWidgetVisibility = useCallback(async (authToken: string) => {
+    if (!authToken) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          Accept: 'application/json',
+        },
       });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
     }
-  }, [token]);
+  }, []);
 
-  const fetchLoads = async () => {
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const showRestoreWidgetList = () => {
+    const hiddenKeys = vehicleLoadingLoadsWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = vehicleLoadingLoadsWidgetItems[0]?.id || 'vehicle-loading-loads-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const fetchLoads = useCallback(async () => {
     try {
       setLoading(true);
       const response = await axios.get('/api/vehicle-loading/loads', {
@@ -513,9 +696,9 @@ export default function LoadsPage() {
       console.error('Error fetching loads:', error);
       setLoading(false);
     }
-  };
+  }, [token]);
 
-  const fetchVehicles = async () => {
+  const fetchVehicles = useCallback(async () => {
     try {
       const response = await axios.get('/api/vehicle-loading/vehicles', {
         headers: {
@@ -527,36 +710,46 @@ export default function LoadsPage() {
       console.error('Error fetching vehicles:', error);
       setVehicles([]);
     }
-  };
+  }, [token]);
 
-  const fetchDrivers = async () => {
+  const fetchDrivers = useCallback(async () => {
     try {
       const response = await axios.get('/api/hr/employees', {
         headers: {
           Authorization: `Bearer ${token}`,
         },
       });
-      const employeeList = Array.isArray(response.data)
+      const responseData = response.data && typeof response.data === 'object' ? response.data as Record<string, unknown> : null;
+      const employeeRows = Array.isArray(response.data)
         ? response.data
-        : (response.data?.data || []);
-      const onlyDrivers = employeeList.filter((employee: any) => {
-        const designationName = String(employee?.designation?.name || '').toLowerCase();
-        return designationName.includes('driver');
-      });
-      setDrivers(onlyDrivers);
-      const onlySalesRefs = employeeList.filter((employee: any) => {
-        const designationName = String(employee?.designation?.name || '').toLowerCase();
-        return designationName.includes('sales');
-      });
-      setSalesRefs(onlySalesRefs);
+        : (Array.isArray(responseData?.data) ? responseData.data : []);
+      const normalizedEmployees = employeeRows
+        .map((employee) => {
+          const row = employee && typeof employee === 'object' ? employee as Record<string, unknown> : null;
+          if (!row) return null;
+          const designation = row.designation && typeof row.designation === 'object'
+            ? row.designation as Record<string, unknown>
+            : null;
+          return {
+            id: Number(row.id || 0),
+            first_name: String(row.first_name || ''),
+            last_name: String(row.last_name || ''),
+            employee_code: String(row.employee_code || ''),
+            designation_name: String(designation?.name || '').toLowerCase(),
+          };
+        })
+        .filter((employee): employee is Driver & { designation_name: string } => Boolean(employee && employee.id > 0));
+
+      setDrivers(normalizedEmployees.filter((employee) => employee.designation_name.includes('driver')));
+      setSalesRefs(normalizedEmployees.filter((employee) => employee.designation_name.includes('sales')));
     } catch (error) {
       console.error('Error fetching drivers:', error);
       setDrivers([]);
       setSalesRefs([]);
     }
-  };
+  }, [token]);
 
-  const fetchRoutes = async () => {
+  const fetchRoutes = useCallback(async () => {
     try {
       const response = await axios.get('/api/vehicle-loading/routes', {
         headers: {
@@ -568,7 +761,20 @@ export default function LoadsPage() {
       console.error('Error fetching routes:', error);
       setRoutes([]);
     }
-  };
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    fetchLoads();
+    fetchVehicles();
+    fetchDrivers();
+    fetchRoutes();
+    fetchWidgetVisibility(token);
+    refreshDeliveryCashForLoad().catch((error) => {
+      console.error('Error fetching delivery cash transactions:', error);
+    });
+  }, [token, fetchLoads, fetchVehicles, fetchDrivers, fetchRoutes, fetchWidgetVisibility, refreshDeliveryCashForLoad]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -865,11 +1071,9 @@ export default function LoadsPage() {
       setLoadExpenses([]);
       setExpenseError('');
       setExpenseSuccess('');
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error completing load:', error);
-      const apiMessage = error?.response?.data?.message || 'Failed to complete load';
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      alert(firstError?.[0] || apiMessage);
+      alert(extractApiErrorMessage(error, 'Failed to complete load'));
     } finally {
       setDetailsCompleting(false);
     }
@@ -1164,10 +1368,8 @@ export default function LoadsPage() {
       setRouteAssignLoad(null);
       setAdditionalRouteId('');
       setRouteAssignError('');
-    } catch (error: any) {
-      const apiMessage = error?.response?.data?.message || 'Failed to add additional route.';
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      setRouteAssignError(firstError?.[0] || apiMessage);
+    } catch (error: unknown) {
+      setRouteAssignError(extractApiErrorMessage(error, 'Failed to add additional route.'));
     } finally {
       setRouteAssigning(false);
     }
@@ -1192,10 +1394,8 @@ export default function LoadsPage() {
       } else {
         await fetchLoads();
       }
-    } catch (error: any) {
-      const apiMessage = error?.response?.data?.message || 'Failed to remove route.';
-      const firstError = Object.values(error?.response?.data?.errors || {})?.[0] as string[] | undefined;
-      setRouteAssignError(firstError?.[0] || apiMessage);
+    } catch (error: unknown) {
+      setRouteAssignError(extractApiErrorMessage(error, 'Failed to remove route.'));
     } finally {
       setRouteRemovingId(null);
     }
@@ -1250,6 +1450,8 @@ export default function LoadsPage() {
 
   const rowStart = filteredLoads.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
   const rowEnd = Math.min(currentPage * PAGE_SIZE, filteredLoads.length);
+  const isLoadsTableHeadingsVisible = isWidgetVisible('vehicle-loading-loads-table-headings');
+  const isLoadsTableActionsVisible = isWidgetVisible('vehicle-loading-loads-row-action-buttons');
 
   if (loading) {
     return (
@@ -1263,7 +1465,21 @@ export default function LoadsPage() {
     <div className="relative space-y-6">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]" />
 
-      <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
+          </div>
+        </div>
+      </section>
+
+      {isWidgetVisible('vehicle-loading-loads-hero-card') && <section className="rounded-[28px] border border-white/70 bg-white/85 px-6 py-6 shadow-[0_26px_90px_-45px_rgba(16,185,129,0.5)] backdrop-blur-xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">Loads Management</h1>
@@ -1281,9 +1497,10 @@ export default function LoadsPage() {
             Add New Load
           </button>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-loads-filters-card') && <section className="rounded-2xl border border-white/60 bg-white/90 p-5 shadow-[0_18px_65px_-35px_rgba(30,64,175,0.45)] backdrop-blur-lg">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_220px]">
           <div>
             <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Search Loads</label>
@@ -1310,17 +1527,19 @@ export default function LoadsPage() {
             </select>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-filters-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
+      {isWidgetVisible('vehicle-loading-loads-table-card') && <section className="overflow-hidden rounded-2xl border border-white/60 bg-white/90 shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)] backdrop-blur-lg">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 px-5 py-4">
           <h2 className="text-lg font-semibold text-slate-900">Load Preview Table</h2>
           <div className="text-sm text-slate-600">Showing {rowStart} to {rowEnd} of {filteredLoads.length}</div>
         </div>
+        {!widgetControlsLocked && <div className="flex flex-wrap gap-2 border-b border-slate-200/70 px-5 py-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-table-headings', false)} disabled={!isLoadsTableHeadingsVisible} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">✕ Headings</button><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-row-action-buttons', false)} disabled={!isLoadsTableActionsVisible} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">✕ Action Buttons</button></div>}
 
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-slate-200">
-            <thead className="bg-slate-100/80">
+            {isLoadsTableHeadingsVisible && <thead className="bg-slate-100/80">
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
                   Load Number
@@ -1340,11 +1559,11 @@ export default function LoadsPage() {
                 <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
                   Weight (kg)
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                {isLoadsTableActionsVisible && <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
                   Actions
-                </th>
+                </th>}
               </tr>
-            </thead>
+            </thead>}
             <tbody className="bg-white divide-y divide-slate-100">
               {paginatedLoads.map((load) => (
                 <tr key={load.id} className="transition hover:bg-emerald-50/35">
@@ -1376,7 +1595,7 @@ export default function LoadsPage() {
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
                     {load.total_weight.toLocaleString()}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                  {isLoadsTableActionsVisible && <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                     <button
                       onClick={() => handleViewDetails(load.id)}
                       className="text-green-600 hover:text-green-900 mr-4"
@@ -1415,13 +1634,13 @@ export default function LoadsPage() {
                     >
                       Delete
                     </button>
-                  </td>
+                  </td>}
                 </tr>
               ))}
 
               {paginatedLoads.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-6 py-10 text-center">
+                  <td colSpan={isLoadsTableActionsVisible ? 7 : 6} className="px-6 py-10 text-center">
                     <div className="text-base font-medium text-slate-800">No Loads Found</div>
                     <p className="mt-1 text-sm text-slate-500">
                       {searchTerm || statusFilter !== 'all'
@@ -1472,9 +1691,10 @@ export default function LoadsPage() {
             </button>
           </div>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="px-5 pb-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-table-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {isWidgetVisible('vehicle-loading-loads-summary-cards') && <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-white/70 bg-white/90 p-5 shadow-sm">
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Pending Loads</p>
           <p className="mt-2 text-3xl font-bold text-slate-900">{loads.filter((load) => load.status === 'pending').length}</p>
@@ -1496,9 +1716,10 @@ export default function LoadsPage() {
             {loads.reduce((sum, load) => sum + Number(load.total_weight || 0), 0).toFixed(2)} kg
           </p>
         </div>
-      </section>
+        {!widgetControlsLocked && <div className="md:col-span-2 xl:col-span-4"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-loads-summary-cards', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+      </section>}
 
-      {showDetailsModal && (
+      {isWidgetVisible('vehicle-loading-loads-details-modal-pane') && showDetailsModal && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
           <div className="mx-auto w-full max-w-7xl">
             <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_30px_120px_-50px_rgba(16,185,129,0.55)] backdrop-blur-xl">
@@ -2305,7 +2526,7 @@ export default function LoadsPage() {
         </div>
       )}
 
-      {showModal && (
+      {isWidgetVisible('vehicle-loading-loads-form-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-4 py-8 backdrop-blur-sm">
           <div className="mx-auto w-full max-w-5xl">
             <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/90 shadow-[0_30px_120px_-50px_rgba(16,185,129,0.55)] backdrop-blur-xl">
@@ -2600,6 +2821,7 @@ export default function LoadsPage() {
           </div>
         </div>
       )}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{vehicleLoadingLoadsWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
     </div>
   );
 }

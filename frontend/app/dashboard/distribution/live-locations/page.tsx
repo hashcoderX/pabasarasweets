@@ -19,6 +19,8 @@ type LiveLocationRow = {
   captured_at?: string | null;
   updated_at?: string | null;
 };
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 export default function DistributionLiveLocationsPage() {
   const router = useRouter();
@@ -30,6 +32,17 @@ export default function DistributionLiveLocationsPage() {
   const [mapReady, setMapReady] = useState(false);
   const [lastPingAt, setLastPingAt] = useState('');
   const [trackingStatus, setTrackingStatus] = useState<'idle' | 'starting' | 'active'>('idle');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
@@ -48,6 +61,139 @@ export default function DistributionLiveLocationsPage() {
     });
   }, [locations]);
 
+  const liveLocationWidgetItems = [
+    { id: 'distribution-live-locations-nav-back-button', name: 'Live Locations Back Button' },
+    { id: 'distribution-live-locations-hero-card', name: 'Live Locations Hero Card' },
+    { id: 'distribution-live-locations-tracking-card', name: 'Live Locations Tracking Card' },
+    { id: 'distribution-live-locations-map-card', name: 'Live Locations Map Card' },
+    { id: 'distribution-live-locations-table-card', name: 'Live Locations Table Card' },
+    { id: 'distribution-live-locations-table-headings', name: 'Live Locations Table Headings' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = liveLocationWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length || !token) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = liveLocationWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = liveLocationWidgetItems[0]?.id || 'distribution-live-locations-nav-back-button';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
     if (!storedToken) {
@@ -65,6 +211,7 @@ export default function DistributionLiveLocationsPage() {
       try {
         setLoading(true);
         setErrorMessage('');
+        await fetchWidgetVisibility(token);
 
         const userRes = await axios.get('/api/user', {
           headers: { Authorization: `Bearer ${token}` },
@@ -281,15 +428,32 @@ export default function DistributionLiveLocationsPage() {
     <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-white to-emerald-50">
       <nav className="bg-white/85 backdrop-blur-lg shadow-sm border-b border-white/40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
-          <Link href="/dashboard/distribution" className="text-sm font-medium text-gray-700 hover:text-cyan-700">
-            ← Back to Distribution
-          </Link>
+          <div className="flex items-center gap-2">
+            {isWidgetVisible('distribution-live-locations-nav-back-button') && <Link href="/dashboard/distribution" className="text-sm font-medium text-gray-700 hover:text-cyan-700">
+              ← Back to Distribution
+            </Link>}
+            {!widgetControlsLocked && isWidgetVisible('distribution-live-locations-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-live-locations-nav-back-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+          </div>
           <div className="text-xs font-semibold text-cyan-700 uppercase tracking-[0.18em]">Live Location</div>
         </div>
       </nav>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-        <section className="rounded-2xl border border-cyan-100 bg-white/90 shadow-xl p-5">
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
+              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
+              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
+            </div>
+          </div>
+        </section>
+
+        {isWidgetVisible('distribution-live-locations-hero-card') && <section className="rounded-2xl border border-cyan-100 bg-white/90 shadow-xl p-5">
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">Live Ref Location Tracker</h1>
           <p className="mt-1 text-sm text-slate-600">
             {isAdmin
@@ -299,10 +463,11 @@ export default function DistributionLiveLocationsPage() {
           {errorMessage ? (
             <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{errorMessage}</p>
           ) : null}
-        </section>
+          {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('distribution-live-locations-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
+        </section>}
 
         {!isAdmin ? (
-          <section className="rounded-2xl border border-emerald-100 bg-white/90 shadow-xl p-5">
+          isWidgetVisible('distribution-live-locations-tracking-card') && <section className="rounded-2xl border border-emerald-100 bg-white/90 shadow-xl p-5">
             <h2 className="text-lg font-semibold text-slate-900">Share My Live Location</h2>
             <p className="text-sm text-slate-600 mt-1">Keep this page open while delivering to send periodic GPS updates.</p>
             <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -328,19 +493,20 @@ export default function DistributionLiveLocationsPage() {
             {lastPingAt ? (
               <p className="mt-2 text-xs text-slate-500">Last update sent at {lastPingAt}</p>
             ) : null}
+            {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('distribution-live-locations-tracking-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
           </section>
         ) : (
           <>
-            <section className="rounded-2xl border border-cyan-100 bg-white/90 shadow-xl p-5">
+            {isWidgetVisible('distribution-live-locations-map-card') && <section className="rounded-2xl border border-cyan-100 bg-white/90 shadow-xl p-5">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-lg font-semibold text-slate-900">Google Map - All Ref Locations</h2>
-                <button
-                  type="button"
-                  onClick={() => fetchAllLocations(token)}
-                  className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-100"
-                >
-                  Refresh
-                </button>
+                <div className="flex items-center gap-2"><button
+                    type="button"
+                    onClick={() => fetchAllLocations(token)}
+                    className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 hover:bg-cyan-100"
+                  >
+                    Refresh
+                  </button>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-live-locations-map-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
               </div>
 
               {!googleMapsKey ? (
@@ -350,16 +516,16 @@ export default function DistributionLiveLocationsPage() {
               ) : (
                 <div ref={mapNodeRef} className="h-[420px] w-full rounded-xl border border-cyan-100" />
               )}
-            </section>
+            </section>}
 
-            <section className="rounded-2xl border border-slate-200 bg-white/95 shadow-xl overflow-hidden">
+            {isWidgetVisible('distribution-live-locations-table-card') && <section className="rounded-2xl border border-slate-200 bg-white/95 shadow-xl overflow-hidden">
               <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-800">Latest Ref Positions</h3>
-                <span className="text-xs text-slate-500">{sortedLocations.length} refs</span>
+                <div className="flex items-center gap-2"><span className="text-xs text-slate-500">{sortedLocations.length} refs</span>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-live-locations-table-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
               </div>
               <div className="overflow-x-auto">
                 <table className="min-w-full text-sm">
-                  <thead className="bg-slate-100 text-slate-600">
+                  {isWidgetVisible('distribution-live-locations-table-headings') && <thead className="bg-slate-100 text-slate-600">
                     <tr>
                       <th className="px-4 py-2 text-left">Ref</th>
                       <th className="px-4 py-2 text-left">Code</th>
@@ -368,7 +534,7 @@ export default function DistributionLiveLocationsPage() {
                       <th className="px-4 py-2 text-right">Accuracy</th>
                       <th className="px-4 py-2 text-left">Updated</th>
                     </tr>
-                  </thead>
+                  </thead>}
                   <tbody className="divide-y divide-slate-100">
                     {sortedLocations.length === 0 ? (
                       <tr>
@@ -389,13 +555,15 @@ export default function DistributionLiveLocationsPage() {
                   </tbody>
                 </table>
               </div>
-            </section>
+            </section>}
           </>
         )}
 
         {loading && (
           <div className="text-sm text-slate-500">Loading live location module...</div>
         )}
+
+        {showSuperAdminConfirmModal && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{liveLocationWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
       </main>
     </div>
   );

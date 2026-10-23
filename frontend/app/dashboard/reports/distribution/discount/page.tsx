@@ -148,7 +148,7 @@ export default function DistributionDiscountReportPage() {
       setErrorMessage('');
 
       const allRows: InvoiceRow[] = [];
-      let nextUrl: string | null = `${API_URL}/api/distribution/invoices?per_page=200`;
+      let nextUrl: string | null = `${API_URL}/api/distribution/invoices?per_page=200&exclude_cancelled=1`;
       let pageCount = 0;
 
       while (nextUrl && pageCount < 50) {

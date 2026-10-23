@@ -29,6 +29,13 @@ interface AttendanceRecord {
   employee: Employee;
 }
 
+type WidgetVisibilityChange = {
+  widget_key: string;
+  is_visible: boolean;
+};
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+
 export default function AttendancePage() {
   type NoticeTone = 'success' | 'error' | 'info';
   const todayDate = new Date().toISOString().split('T')[0];
@@ -62,6 +69,17 @@ export default function AttendancePage() {
   const [editOutTime, setEditOutTime] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [noticeModal, setNoticeModal] = useState<{ title: string; message: string; tone: NoticeTone } | null>(null);
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
   const router = useRouter();
 
   const openNoticeModal = (tone: NoticeTone, title: string, message: string) => {
@@ -75,6 +93,7 @@ export default function AttendancePage() {
     } else {
       setToken(storedToken);
       fetchEmployees(storedToken);
+      fetchWidgetVisibility(storedToken);
     }
   }, [router]);
 
@@ -100,6 +119,24 @@ export default function AttendancePage() {
     } catch (error) {
       console.error('Error fetching employees:', error);
       setEmployees([]);
+    }
+  };
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}` },
+      });
+      const widgetMap = response.data?.data?.widgets || {};
+      const controlsLocked = Boolean(response.data?.data?.widget_controls_locked);
+      setWidgetVisibility(widgetMap);
+      setWidgetControlsLocked(controlsLocked);
+    } catch (error) {
+      console.error('Error fetching attendance widget visibility:', error);
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
     }
   };
 
@@ -384,6 +421,229 @@ export default function AttendancePage() {
     );
   });
 
+  const attendanceWidgetItems = [
+    { id: 'hrm-attendance-nav-back-button', name: 'Attendance Back Button' },
+    { id: 'hrm-attendance-header', name: 'Attendance Header' },
+    { id: 'hrm-attendance-heading-title', name: 'Attendance Title Heading' },
+    { id: 'hrm-attendance-heading-subtitle', name: 'Attendance Subtitle Heading' },
+    { id: 'hrm-attendance-tabs', name: 'Attendance Tabs' },
+    { id: 'hrm-attendance-tab-button-mark', name: 'Attendance Tab Button: Quick Mark' },
+    { id: 'hrm-attendance-tab-button-upload', name: 'Attendance Tab Button: CSV Upload' },
+    { id: 'hrm-attendance-tab-button-history', name: 'Attendance Tab Button: View History' },
+    { id: 'hrm-attendance-mark-pane', name: 'Attendance Tab Pane: Quick Mark' },
+    { id: 'hrm-attendance-mark-controls', name: 'Quick Mark Controls' },
+    { id: 'hrm-attendance-mark-table', name: 'Quick Mark Employee Table' },
+    { id: 'hrm-attendance-mark-action-buttons', name: 'Quick Mark Action Buttons' },
+    { id: 'hrm-attendance-upload-pane', name: 'Attendance Tab Pane: Upload' },
+    { id: 'hrm-attendance-upload-panel', name: 'Attendance CSV Upload Panel' },
+    { id: 'hrm-attendance-upload-heading', name: 'Attendance Upload Heading' },
+    { id: 'hrm-attendance-upload-action-buttons', name: 'Attendance Upload Buttons' },
+    { id: 'hrm-attendance-history-pane', name: 'Attendance Tab Pane: History' },
+    { id: 'hrm-attendance-history-panel', name: 'Attendance History Panel' },
+    { id: 'hrm-attendance-history-heading', name: 'Attendance History Heading' },
+    { id: 'hrm-attendance-history-action-buttons', name: 'Attendance History Buttons' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = attendanceWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({
+      ...prev,
+      [widgetKey]: isVisible,
+    }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) {
+      setWidgetVisibility(widgetVisibilitySnapshot);
+    }
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (
+    changes: WidgetVisibilityChange[] = [],
+    mode: SuperAdminModalMode = 'apply'
+  ) => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply') return;
+    if (!pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openNoticeModal('info', 'Super Admin Required', 'Please enter Super Admin email and password.');
+      return;
+    }
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put(
+          '/api/dashboard/widgets/me',
+          {
+            widget_key: change.widget_key,
+            is_visible: change.is_visible,
+            super_admin_email: superAdminEmail.trim(),
+            super_admin_password: superAdminPassword,
+            lock_widget_controls: true,
+          },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+      }
+
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+    } catch (error) {
+      console.error('Error applying attendance widget changes:', error);
+      openNoticeModal('error', 'Widget Update Failed', 'Super Admin confirmation failed or widget update failed.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreAllHiddenWidgetsStaged = () => {
+    if (widgetControlsLocked) return;
+    const hiddenKeys = attendanceWidgetItems
+      .map((item) => item.id)
+      .filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => {
+      const next = { ...prev };
+      hiddenKeys.forEach((key) => {
+        next[key] = true;
+      });
+      return next;
+    });
+    setPendingWidgetChanges((prev) => {
+      const next = [...prev];
+      hiddenKeys.forEach((key) => {
+        const remaining = next.filter((entry) => entry.widget_key !== key);
+        remaining.push({ widget_key: key, is_visible: true });
+        next.splice(0, next.length, ...remaining);
+      });
+      return next;
+    });
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = attendanceWidgetItems
+      .map((item) => item.id)
+      .filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) {
+      openNoticeModal('info', 'Nothing to Restore', 'All widgets are already visible.');
+      return;
+    }
+    openSuperAdminConfirmation(
+      hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })),
+      'restore'
+    );
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openNoticeModal('info', 'Super Admin Required', 'Please enter Super Admin email and password.');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openNoticeModal('info', 'Super Admin Required', 'Please enter Super Admin email and password.');
+      return;
+    }
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put(
+        '/api/dashboard/widgets/me',
+        {
+          widget_key: widgetKey,
+          is_visible: true,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+      setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
+    } catch (error) {
+      console.error('Error restoring attendance widget:', error);
+      openNoticeModal('error', 'Restore Failed', 'Failed to restore widget.');
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => {
+    openSuperAdminConfirmation([], 'unlock');
+  };
+
+  const unlockWidgetControls = async () => {
+    if (superAdminModalMode !== 'unlock') return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openNoticeModal('info', 'Super Admin Required', 'Please enter Super Admin email and password.');
+      return;
+    }
+    const fallbackWidgetKey = attendanceWidgetItems[0]?.id ?? 'hrm-attendance-header';
+    const fallbackVisibility = isWidgetVisible(fallbackWidgetKey);
+
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put(
+        '/api/dashboard/widgets/me',
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: false,
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setSuperAdminModalMode('apply');
+      setRestoreWidgetListVisible(false);
+      setRestoreWidgetLoadingKey(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      console.error('Error unlocking attendance widgets:', error);
+      openNoticeModal('error', 'Unlock Failed', 'Failed to unlock widget controls.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
   if (!token) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-rose-50 flex items-center justify-center">
@@ -406,12 +666,27 @@ export default function AttendancePage() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
-              <button onClick={() => router.push('/dashboard/hrm')} className="flex items-center space-x-2 text-gray-700 hover:text-orange-600 transition-colors duration-300">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-                <span className="font-medium">Back to HRM</span>
-              </button>
+              {isWidgetVisible('hrm-attendance-nav-back-button') && (
+                <div className="flex items-center gap-2">
+                  <button onClick={() => router.push('/dashboard/hrm')} className="flex items-center space-x-2 text-gray-700 hover:text-orange-600 transition-colors duration-300">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                    </svg>
+                    <span className="font-medium">Back to HRM</span>
+                  </button>
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('hrm-attendance-nav-back-button', false)}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label="Disable Attendance Back Button"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex items-center justify-between sm:justify-end space-x-2">
               <div className="w-8 h-8 bg-gradient-to-r from-orange-500 to-red-500 rounded-full flex items-center justify-center text-white text-sm font-bold">
@@ -425,61 +700,239 @@ export default function AttendancePage() {
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
         {/* Header */}
-        <div className="text-center mb-8">
+        {isWidgetVisible('hrm-attendance-header') && (
+        <div className="relative text-center mb-8">
+          {!widgetControlsLocked && (
+            <button
+              type="button"
+              onClick={() => stageWidgetVisibilityChange('hrm-attendance-header', false)}
+              className="absolute right-0 top-0 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+              title="Disable this widget"
+              aria-label="Disable Attendance Header"
+            >
+              ×
+            </button>
+          )}
           <div className="inline-block p-1 bg-gradient-to-r from-orange-500 to-red-500 rounded-full mb-6">
             <div className="bg-white rounded-full p-4">
               <span className="text-4xl">📅</span>
             </div>
           </div>
-          <h2 className="text-3xl md:text-5xl font-bold text-gray-900 mb-3">
-            Attendance <span className="bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent">Manager</span>
-          </h2>
-          <p className="text-base sm:text-lg text-gray-600 max-w-3xl mx-auto leading-relaxed px-1">
-            Manage employee attendance with quick marking, CSV uploads, and history tracking.
-          </p>
-        </div>
-
-        {/* Tabs */}
-        <div className="mb-6 flex justify-center">
-          <div className="bg-white/70 backdrop-blur-sm rounded-full p-1 shadow-lg inline-flex max-w-full overflow-x-auto">
-            <button
-              onClick={() => setActiveTab('mark')}
-              className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
-                activeTab === 'mark'
-                  ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              Quick Mark
-            </button>
-            <button
-              onClick={() => setActiveTab('upload')}
-              className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
-                activeTab === 'upload'
-                  ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              CSV Upload
-            </button>
-            <button
-              onClick={() => setActiveTab('history')}
-              className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
-                activeTab === 'history'
-                  ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              View History
-            </button>
+          {isWidgetVisible('hrm-attendance-heading-title') && (
+            <div className="relative mx-auto w-fit">
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-heading-title', false)}
+                  className="absolute -right-8 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label="Disable Attendance Title Heading"
+                >
+                  ×
+                </button>
+              )}
+              <h2 className="text-3xl md:text-5xl font-bold text-gray-900 mb-3">
+                Attendance <span className="bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent">Manager</span>
+              </h2>
+            </div>
+          )}
+          {isWidgetVisible('hrm-attendance-heading-subtitle') && (
+            <div className="relative mx-auto max-w-3xl">
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-heading-subtitle', false)}
+                  className="absolute -right-8 top-1 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label="Disable Attendance Subtitle Heading"
+                >
+                  ×
+                </button>
+              )}
+              <p className="text-base sm:text-lg text-gray-600 mx-auto leading-relaxed px-1">
+                Manage employee attendance with quick marking, CSV uploads, and history tracking.
+              </p>
+            </div>
+          )}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {!widgetControlsLocked && hiddenWidgetCount > 0 && (
+              <button
+                type="button"
+                onClick={restoreAllHiddenWidgetsStaged}
+                className="rounded-full border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
+              >
+                Restore Hidden Widgets ({hiddenWidgetCount})
+              </button>
+            )}
+            {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
+                  className="rounded-full border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 transition hover:bg-orange-100"
+                >
+                  Fix Widget ({pendingWidgetChanges.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={rollbackPendingWidgetChanges}
+                  className="rounded-full border border-gray-300 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
+                >
+                  Cancel Widget Changes
+                </button>
+              </>
+            )}
+            {widgetControlsLocked && (
+              <>
+                <div className="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
+                  Widget controls locked after Super Admin confirmation.
+                </div>
+                {hiddenWidgetCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={restoreHiddenWidgetsAfterFix}
+                    className="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                  >
+                    Restore Widgets ({hiddenWidgetCount})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={openUnlockWidgetsAfterFix}
+                  className="rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                >
+                  Unlock Widgets
+                </button>
+              </>
+            )}
           </div>
         </div>
+        )}
+
+        {/* Tabs */}
+        {isWidgetVisible('hrm-attendance-tabs') && (
+        <div className="mb-6 flex justify-center">
+          <div className="relative bg-white/70 backdrop-blur-sm rounded-full p-1 pr-10 shadow-lg inline-flex max-w-full overflow-x-auto">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={() => stageWidgetVisibilityChange('hrm-attendance-tabs', false)}
+                className="absolute right-2 top-1/2 z-20 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Attendance Tabs"
+              >
+                ×
+              </button>
+            )}
+            {isWidgetVisible('hrm-attendance-tab-button-mark') && (
+              <div className="relative">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-tab-button-mark', false)}
+                    className="absolute -right-2 -top-2 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Quick Mark Tab Button"
+                  >
+                    ×
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveTab('mark')}
+                  className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
+                    activeTab === 'mark'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Quick Mark
+                </button>
+              </div>
+            )}
+            {isWidgetVisible('hrm-attendance-tab-button-upload') && (
+              <div className="relative">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-tab-button-upload', false)}
+                    className="absolute -right-2 -top-2 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable CSV Upload Tab Button"
+                  >
+                    ×
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveTab('upload')}
+                  className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
+                    activeTab === 'upload'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  CSV Upload
+                </button>
+              </div>
+            )}
+            {isWidgetVisible('hrm-attendance-tab-button-history') && (
+              <div className="relative">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-tab-button-history', false)}
+                    className="absolute -right-2 -top-2 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable View History Tab Button"
+                  >
+                    ×
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveTab('history')}
+                  className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
+                    activeTab === 'history'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  View History
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+        )}
 
         {/* Tab Content */}
-        {activeTab === 'mark' && (
+        {activeTab === 'mark' && isWidgetVisible('hrm-attendance-mark-pane') && (
           <>
+            {!widgetControlsLocked && (
+              <div className="mb-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-mark-pane', false)}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label="Disable Quick Mark Tab Pane"
+                >
+                  ×
+                </button>
+              </div>
+            )}
             {/* Controls */}
-            <div className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            {isWidgetVisible('hrm-attendance-mark-controls') && (
+            <div className="relative mb-6 flex flex-col gap-3 pr-10 md:flex-row md:items-center md:justify-between">
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-mark-controls', false)}
+                  className="absolute right-0 top-1/2 z-20 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label="Disable Quick Mark Controls"
+                >
+                  ×
+                </button>
+              )}
               <div className="flex items-center gap-3">
                 <input
                   type="text"
@@ -501,9 +954,22 @@ export default function AttendancePage() {
                 {loading ? 'Updating attendance...' : `${filteredEmployees.length} employees listed for ${selectedAttendanceDate}`}
               </div>
             </div>
+            )}
 
             {/* Employees Table */}
-            <div className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 overflow-hidden">
+            {isWidgetVisible('hrm-attendance-mark-table') && (
+            <div className="relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 overflow-hidden">
+              {!widgetControlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-mark-table', false)}
+                  className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                  title="Disable this widget"
+                  aria-label="Disable Quick Mark Employee Table"
+                >
+                  ×
+                </button>
+              )}
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-white/30">
                   <thead className="bg-gradient-to-r from-orange-500 to-red-500 text-white">
@@ -563,67 +1029,82 @@ export default function AttendancePage() {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm">
                             <div className="flex flex-wrap gap-2">
-                              <button
-                                onClick={() => openMarkModal(emp, 'present')}
-                                disabled={isMarked || loading}
-                                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                                  isMarked 
-                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                                    : 'bg-green-500 text-white hover:bg-green-600'
-                                }`}
-                              >
-                                Present
-                              </button>
-                              <button
-                                onClick={() => openMarkModal(emp, 'absent')}
-                                disabled={isMarked || loading}
-                                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                                  isMarked 
-                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                                    : 'bg-red-500 text-white hover:bg-red-600'
-                                }`}
-                              >
-                                Absent
-                              </button>
-                              <button
-                                onClick={() => openMarkModal(emp, 'late')}
-                                disabled={isMarked || loading}
-                                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                                  isMarked 
-                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                                    : 'bg-yellow-500 text-white hover:bg-yellow-600'
-                                }`}
-                              >
-                                Late
-                              </button>
-                              <button
-                                onClick={() => openMarkModal(emp, 'half_day')}
-                                disabled={isMarked || loading}
-                                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                                  isMarked 
-                                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                                    : 'bg-blue-500 text-white hover:bg-blue-600'
-                                }`}
-                              >
-                                Half Day
-                              </button>
-                              {isMarked && attendance.status === 'present' && !attendance.out_time && (
+                              {isWidgetVisible('hrm-attendance-mark-action-buttons') && !widgetControlsLocked && (
                                 <button
-                                  onClick={() => openMarkOutModal(attendance)}
-                                  disabled={loading}
-                                  className="px-3 py-1 rounded-full text-xs font-medium transition-colors bg-purple-500 text-white hover:bg-purple-600"
+                                  type="button"
+                                  onClick={() => stageWidgetVisibilityChange('hrm-attendance-mark-action-buttons', false)}
+                                  className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                                  title="Disable this widget"
+                                  aria-label="Disable Quick Mark Action Buttons"
                                 >
-                                  Mark Out
+                                  ×
                                 </button>
                               )}
-                              {isMarked && (
-                                <button
-                                  onClick={() => openEditModal(attendance)}
-                                  disabled={loading}
-                                  className="px-3 py-1 rounded-full text-xs font-medium transition-colors bg-indigo-500 text-white hover:bg-indigo-600"
-                                >
-                                  Edit
-                                </button>
+                              {isWidgetVisible('hrm-attendance-mark-action-buttons') && (
+                                <>
+                                  <button
+                                    onClick={() => openMarkModal(emp, 'present')}
+                                    disabled={isMarked || loading}
+                                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                                      isMarked 
+                                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-green-500 text-white hover:bg-green-600'
+                                    }`}
+                                  >
+                                    Present
+                                  </button>
+                                  <button
+                                    onClick={() => openMarkModal(emp, 'absent')}
+                                    disabled={isMarked || loading}
+                                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                                      isMarked 
+                                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-red-500 text-white hover:bg-red-600'
+                                    }`}
+                                  >
+                                    Absent
+                                  </button>
+                                  <button
+                                    onClick={() => openMarkModal(emp, 'late')}
+                                    disabled={isMarked || loading}
+                                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                                      isMarked 
+                                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-yellow-500 text-white hover:bg-yellow-600'
+                                    }`}
+                                  >
+                                    Late
+                                  </button>
+                                  <button
+                                    onClick={() => openMarkModal(emp, 'half_day')}
+                                    disabled={isMarked || loading}
+                                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                                      isMarked 
+                                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                                        : 'bg-blue-500 text-white hover:bg-blue-600'
+                                    }`}
+                                  >
+                                    Half Day
+                                  </button>
+                                  {isMarked && attendance.status === 'present' && !attendance.out_time && (
+                                    <button
+                                      onClick={() => openMarkOutModal(attendance)}
+                                      disabled={loading}
+                                      className="px-3 py-1 rounded-full text-xs font-medium transition-colors bg-purple-500 text-white hover:bg-purple-600"
+                                    >
+                                      Mark Out
+                                    </button>
+                                  )}
+                                  {isMarked && (
+                                    <button
+                                      onClick={() => openEditModal(attendance)}
+                                      disabled={loading}
+                                      className="px-3 py-1 rounded-full text-xs font-medium transition-colors bg-indigo-500 text-white hover:bg-indigo-600"
+                                    >
+                                      Edit
+                                    </button>
+                                  )}
+                                </>
                               )}
                             </div>
                           </td>
@@ -634,12 +1115,42 @@ export default function AttendancePage() {
                 </table>
               </div>
             </div>
+            )}
           </>
         )}
 
-        {activeTab === 'upload' && (
-          <div className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 p-8">
-            <h3 className="text-2xl font-bold text-gray-900 mb-4">Upload Attendance CSV</h3>
+        {activeTab === 'upload' && isWidgetVisible('hrm-attendance-upload-pane') && isWidgetVisible('hrm-attendance-upload-panel') && (
+          <div className="relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 p-8">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={() => {
+                  stageWidgetVisibilityChange('hrm-attendance-upload-panel', false);
+                  stageWidgetVisibilityChange('hrm-attendance-upload-pane', false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Attendance CSV Upload Panel"
+              >
+                ×
+              </button>
+            )}
+            {isWidgetVisible('hrm-attendance-upload-heading') && (
+              <div className="relative mb-4 w-fit">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-upload-heading', false)}
+                    className="absolute -right-7 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Attendance Upload Heading"
+                  >
+                    ×
+                  </button>
+                )}
+                <h3 className="text-2xl font-bold text-gray-900">Upload Attendance CSV</h3>
+              </div>
+            )}
             <p className="text-gray-600 mb-6">
               Upload a CSV from your fingerprint machine. Supported headers include both legacy format and fingerprint format.
             </p>
@@ -655,13 +1166,28 @@ export default function AttendancePage() {
                 className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100"
               />
             </div>
-            <button
-              onClick={handleCsvUpload}
-              disabled={!csvFile || loading}
-              className="px-6 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-full font-medium hover:from-orange-600 hover:to-red-600 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? 'Uploading...' : 'Upload CSV'}
-            </button>
+            {isWidgetVisible('hrm-attendance-upload-action-buttons') && (
+              <div className="relative w-fit">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-upload-action-buttons', false)}
+                    className="absolute -right-7 top-2 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Attendance Upload Buttons"
+                  >
+                    ×
+                  </button>
+                )}
+                <button
+                  onClick={handleCsvUpload}
+                  disabled={!csvFile || loading}
+                  className="px-6 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-full font-medium hover:from-orange-600 hover:to-red-600 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? 'Uploading...' : 'Upload CSV'}
+                </button>
+              </div>
+            )}
             {uploadResult && (
               <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
                 <h4 className="font-semibold text-green-800">Upload Result</h4>
@@ -685,9 +1211,38 @@ export default function AttendancePage() {
           </div>
         )}
 
-        {activeTab === 'history' && (
-          <div className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 p-8">
-            <h3 className="text-2xl font-bold text-gray-900 mb-4">Attendance History</h3>
+        {activeTab === 'history' && isWidgetVisible('hrm-attendance-history-pane') && isWidgetVisible('hrm-attendance-history-panel') && (
+          <div className="relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 p-8">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={() => {
+                  stageWidgetVisibilityChange('hrm-attendance-history-panel', false);
+                  stageWidgetVisibilityChange('hrm-attendance-history-pane', false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Attendance History Panel"
+              >
+                ×
+              </button>
+            )}
+            {isWidgetVisible('hrm-attendance-history-heading') && (
+              <div className="relative mb-4 w-fit">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-history-heading', false)}
+                    className="absolute -right-7 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Attendance History Heading"
+                  >
+                    ×
+                  </button>
+                )}
+                <h3 className="text-2xl font-bold text-gray-900">Attendance History</h3>
+              </div>
+            )}
             <div className="mb-6 flex flex-col md:flex-row gap-4">
               <select
                 value={selectedEmployee?.id || ''}
@@ -718,13 +1273,28 @@ export default function AttendancePage() {
                 className="px-4 py-2 rounded-full border border-white/20 bg-white/70 backdrop-blur-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-orange-500"
                 placeholder="End Date"
               />
-              <button
-                onClick={fetchAttendanceHistory}
-                disabled={!selectedEmployee || loading}
-                className="px-6 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-full font-medium hover:from-orange-600 hover:to-red-600 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? 'Loading...' : 'View History'}
-              </button>
+              {isWidgetVisible('hrm-attendance-history-action-buttons') && (
+                <div className="relative w-fit">
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => stageWidgetVisibilityChange('hrm-attendance-history-action-buttons', false)}
+                      className="absolute -right-7 top-1 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                      title="Disable this widget"
+                      aria-label="Disable Attendance History Buttons"
+                    >
+                      ×
+                    </button>
+                  )}
+                  <button
+                    onClick={fetchAttendanceHistory}
+                    disabled={!selectedEmployee || loading}
+                    className="px-6 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-full font-medium hover:from-orange-600 hover:to-red-600 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {loading ? 'Loading...' : 'View History'}
+                  </button>
+                </div>
+              )}
             </div>
             {attendanceHistory.length > 0 && (
               <div className="overflow-x-auto">
@@ -766,6 +1336,132 @@ export default function AttendancePage() {
           </div>
         )}
       </main>
+
+      {showSuperAdminConfirmModal && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+              <h3 className="text-lg font-semibold text-gray-900">Super Admin Confirmation</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  if (superAdminConfirmLoading) return;
+                  rollbackPendingWidgetChanges();
+                }}
+                className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Email</label>
+                <input
+                  type="email"
+                  value={superAdminEmail}
+                  onChange={(e) => setSuperAdminEmail(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="superadmin@company.com"
+                  autoComplete="username"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">Super Admin Password</label>
+                <input
+                  type="password"
+                  value={superAdminPassword}
+                  onChange={(e) => setSuperAdminPassword(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="Enter password"
+                  autoComplete="current-password"
+                />
+              </div>
+              {superAdminModalMode !== 'unlock' && !restoreWidgetListVisible && (
+                <div className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                  Pending widget updates: <strong>{pendingWidgetChanges.length}</strong>
+                </div>
+              )}
+              {superAdminModalMode === 'unlock' && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  Confirm Super Admin credentials to unlock widget controls and show close buttons again.
+                </div>
+              )}
+              {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                <div className="rounded-xl border border-indigo-100 bg-indigo-50/70 px-3 py-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-[0.1em] text-indigo-700">Hidden widgets</p>
+                  {pendingWidgetChanges.length === 0 ? (
+                    <p className="text-sm text-indigo-800">All hidden widgets are restored.</p>
+                  ) : (
+                    <div className="max-h-56 space-y-2 overflow-y-auto">
+                      {pendingWidgetChanges.map((change) => {
+                        const widgetName =
+                          attendanceWidgetItems.find((item) => item.id === change.widget_key)?.name ?? change.widget_key;
+                        const isRestoring = restoreWidgetLoadingKey === change.widget_key;
+                        return (
+                          <div
+                            key={change.widget_key}
+                            className="flex items-center justify-between rounded-lg border border-indigo-100 bg-white px-3 py-2"
+                          >
+                            <span className="text-sm font-medium text-gray-800">{widgetName}</span>
+                            <button
+                              type="button"
+                              disabled={Boolean(restoreWidgetLoadingKey)}
+                              onClick={() => restoreHiddenWidgetOneByOne(change.widget_key)}
+                              className="rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+                            >
+                              {isRestoring ? 'Restoring...' : 'Restore'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="mt-5 flex justify-end gap-2 border-t border-gray-200 pt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  if (superAdminConfirmLoading) return;
+                  rollbackPendingWidgetChanges();
+                }}
+                className="rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+              {superAdminModalMode === 'apply' ? (
+                <button
+                  type="button"
+                  disabled={superAdminConfirmLoading}
+                  onClick={applyWidgetVisibilityChanges}
+                  className="rounded-xl bg-gradient-to-r from-orange-500 to-red-500 px-4 py-2 text-sm font-semibold text-white hover:from-orange-600 hover:to-red-600 disabled:opacity-60"
+                >
+                  {superAdminConfirmLoading ? 'Confirming...' : 'Confirm & Apply'}
+                </button>
+              ) : superAdminModalMode === 'restore' ? (
+                <button
+                  type="button"
+                  disabled={superAdminConfirmLoading || restoreWidgetListVisible}
+                  onClick={showRestoreWidgetList}
+                  className="rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white hover:from-indigo-700 hover:to-blue-700 disabled:opacity-60"
+                >
+                  Show Hidden Widgets
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={superAdminConfirmLoading}
+                  onClick={unlockWidgetControls}
+                  className="rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-sm font-semibold text-white hover:from-amber-600 hover:to-orange-600 disabled:opacity-60"
+                >
+                  {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Feedback Modal */}
       {noticeModal && (

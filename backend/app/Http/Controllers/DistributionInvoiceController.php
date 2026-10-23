@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
@@ -57,11 +58,33 @@ class DistributionInvoiceController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        $query = DistributionInvoice::with([
+        $reportMode = $request->boolean('report_mode');
+
+        $query = DistributionInvoice::query()->with([
             'customer:id,shop_name,customer_code,route_id',
-            'items',
-            'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status',
         ]);
+
+        if ($reportMode) {
+            $query->withCount('items')
+                ->select([
+                    'id',
+                    'invoice_number',
+                    'customer_id',
+                    'invoice_date',
+                    'due_date',
+                    'subtotal',
+                    'discount',
+                    'total',
+                    'paid_amount',
+                    'status',
+                    'created_at',
+                ]);
+        } else {
+            $query->with([
+                'items',
+                'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status',
+            ]);
+        }
 
         $user = $request->user();
 
@@ -105,11 +128,37 @@ class DistributionInvoiceController extends Controller
             $query->where('status', $request->status);
         }
 
+        if ($request->boolean('exclude_cancelled')) {
+            $query->whereNotIn('status', ['cancelled', 'deleted']);
+        }
+
         if ($request->filled('load_id')) {
             $query->where('load_id', (int) $request->load_id);
         }
 
-        $invoices = $query->orderByDesc('invoice_date')->orderByDesc('id')->paginate($request->get('per_page', 15));
+        $perPage = max(1, min(500, (int) $request->get('per_page', 15)));
+
+        if ($reportMode) {
+            $cacheKey = 'distribution_invoices_report:' . md5(json_encode([
+                'user_id' => (int) ($user?->id ?? 0),
+                'employee_id' => (int) ($user?->employee_id ?? 0),
+                'query' => $request->query(),
+                'per_page' => $perPage,
+            ]));
+
+            $invoices = Cache::remember($cacheKey, now()->addSeconds(45), function () use ($query, $perPage) {
+                return $query
+                    ->orderByDesc('invoice_date')
+                    ->orderByDesc('id')
+                    ->paginate($perPage)
+                    ->toArray();
+            });
+        } else {
+            $invoices = $query
+                ->orderByDesc('invoice_date')
+                ->orderByDesc('id')
+                ->paginate($perPage);
+        }
 
         return response()->json([
             'success' => true,

@@ -94,6 +94,21 @@ interface Branch {
   currency?: string;
 }
 
+interface PayrollSettings {
+  salaryMode: 'monthly' | 'daily';
+  dailyRate: string;
+  standardWorkingDays: string;
+  prorateByAttendance: boolean;
+  enableSundayPayment: boolean;
+  sundayRate: string;
+  enablePoyaPayment: boolean;
+  poyaRate: string;
+}
+
+type PaysheetMode = 'standard' | 'custom';
+
+const PAYROLL_SETTINGS_STORAGE_KEY = 'hrm_payroll_settings_v1';
+
 export default function Payroll() {
   const [token, setToken] = useState('');
   const [payrolls, setPayrolls] = useState<Payroll[]>([]);
@@ -101,6 +116,7 @@ export default function Payroll() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showPayslipModal, setShowPayslipModal] = useState(false);
   const [selectedPayroll, setSelectedPayroll] = useState<Payroll | null>(null);
   const router = useRouter();
@@ -108,9 +124,20 @@ export default function Payroll() {
   // Generate payroll form fields
   const [selectedBranch, setSelectedBranch] = useState('');
   const [selectedMonth, setSelectedMonth] = useState('');
+  const [selectedPaysheetMode, setSelectedPaysheetMode] = useState<PaysheetMode>('standard');
   const [generateLoading, setGenerateLoading] = useState(false);
   const [recalculateLoading, setRecalculateLoading] = useState(false);
   const [bulkProcessLoading, setBulkProcessLoading] = useState(false);
+  const [payrollSettings, setPayrollSettings] = useState<PayrollSettings>({
+    salaryMode: 'monthly',
+    dailyRate: '',
+    standardWorkingDays: '30',
+    prorateByAttendance: true,
+    enableSundayPayment: false,
+    sundayRate: '',
+    enablePoyaPayment: false,
+    poyaRate: '',
+  });
 
   // Filter states
   const [filterMonth, setFilterMonth] = useState('');
@@ -138,8 +165,36 @@ export default function Payroll() {
       fetchPayrolls(storedToken);
       fetchEmployees(storedToken);
       fetchBranches(storedToken);
+      fetchPayrollSettings(storedToken);
     }
   }, [router]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(PAYROLL_SETTINGS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<PayrollSettings>;
+      setPayrollSettings((prev) => ({
+        salaryMode: parsed.salaryMode === 'daily' ? 'daily' : 'monthly',
+        dailyRate: String(parsed.dailyRate ?? prev.dailyRate ?? ''),
+        standardWorkingDays: String(parsed.standardWorkingDays ?? prev.standardWorkingDays ?? '30'),
+        prorateByAttendance: parsed.prorateByAttendance !== false,
+        enableSundayPayment: Boolean(parsed.enableSundayPayment),
+        sundayRate: String(parsed.sundayRate ?? prev.sundayRate ?? ''),
+        enablePoyaPayment: Boolean(parsed.enablePoyaPayment),
+        poyaRate: String(parsed.poyaRate ?? prev.poyaRate ?? ''),
+      }));
+    } catch (error) {
+      console.error('Error loading payroll settings:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    const branchContext = filterBranch || selectedBranch;
+    fetchPayrollSettings(token, branchContext || undefined);
+  }, [token, filterBranch, selectedBranch]);
 
   const fetchPayrolls = async (authToken: string) => {
     try {
@@ -193,8 +248,129 @@ export default function Payroll() {
     }
   };
 
+  const fetchPayrollSettings = async (authToken: string, branchId?: string) => {
+    try {
+      const params = branchId ? { branch_id: Number(branchId) } : undefined;
+      const response = await axios.get('/api/hr/payroll-settings', {
+        headers: { Authorization: `Bearer ${authToken}` },
+        params,
+      });
+
+      const settings = response.data?.settings || {};
+      setPayrollSettings({
+        salaryMode: settings.salary_mode === 'daily' ? 'daily' : 'monthly',
+        dailyRate: settings.daily_rate != null ? String(settings.daily_rate) : '',
+        standardWorkingDays: String(settings.standard_working_days ?? 30),
+        prorateByAttendance: settings.prorate_by_attendance !== false,
+        enableSundayPayment: Boolean(settings.sunday_payment_enabled),
+        sundayRate: settings.sunday_payment_rate != null ? String(settings.sunday_payment_rate) : '',
+        enablePoyaPayment: Boolean(settings.poya_payment_enabled),
+        poyaRate: settings.poya_payment_rate != null ? String(settings.poya_payment_rate) : '',
+      });
+    } catch (error) {
+      console.error('Error fetching payroll settings:', error);
+    }
+  };
+
+  const validatePayrollSettings = () => {
+    const workingDays = Number(payrollSettings.standardWorkingDays || 0);
+    if (!Number.isFinite(workingDays) || workingDays <= 0) {
+      showNotice('Validation', 'Standard working days must be greater than 0.', 'warning');
+      return false;
+    }
+
+    if (payrollSettings.salaryMode === 'daily') {
+      const dailyRate = Number(payrollSettings.dailyRate || 0);
+      if (!Number.isFinite(dailyRate) || dailyRate <= 0) {
+        showNotice('Validation', 'Daily salary rate must be greater than 0 for daily mode.', 'warning');
+        return false;
+      }
+    }
+
+    if (payrollSettings.enableSundayPayment) {
+      const sundayRate = Number(payrollSettings.sundayRate || 0);
+      if (!Number.isFinite(sundayRate) || sundayRate <= 0) {
+        showNotice('Validation', 'Sunday payment rate must be greater than 0 when enabled.', 'warning');
+        return false;
+      }
+    }
+
+    if (payrollSettings.enablePoyaPayment) {
+      const poyaRate = Number(payrollSettings.poyaRate || 0);
+      if (!Number.isFinite(poyaRate) || poyaRate <= 0) {
+        showNotice('Validation', 'Poya day payment rate must be greater than 0 when enabled.', 'warning');
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  const buildPayrollSettingsPayload = () => {
+    const workingDays = Number(payrollSettings.standardWorkingDays || 0);
+    const dailyRate = Number(payrollSettings.dailyRate || 0);
+    const sundayRate = Number(payrollSettings.sundayRate || 0);
+    const poyaRate = Number(payrollSettings.poyaRate || 0);
+
+    return {
+      salary_mode: payrollSettings.salaryMode,
+      daily_rate: payrollSettings.salaryMode === 'daily' ? dailyRate : null,
+      standard_working_days: workingDays > 0 ? workingDays : 30,
+      prorate_by_attendance: payrollSettings.prorateByAttendance,
+      sunday_payment_enabled: payrollSettings.enableSundayPayment,
+      sunday_payment_rate: payrollSettings.enableSundayPayment ? sundayRate : null,
+      poya_payment_enabled: payrollSettings.enablePoyaPayment,
+      poya_payment_rate: payrollSettings.enablePoyaPayment ? poyaRate : null,
+    };
+  };
+
+  const buildStandardPayrollSettingsPayload = () => {
+    const workingDays = Number(payrollSettings.standardWorkingDays || 30);
+
+    return {
+      salary_mode: 'monthly' as const,
+      daily_rate: null,
+      standard_working_days: Number.isFinite(workingDays) && workingDays > 0 ? workingDays : 30,
+      prorate_by_attendance: true,
+      sunday_payment_enabled: false,
+      sunday_payment_rate: null,
+      poya_payment_enabled: false,
+      poya_payment_rate: null,
+    };
+  };
+
+  const savePayrollSettings = () => {
+    if (!validatePayrollSettings()) return;
+    if (!token) return;
+    const branchContext = filterBranch || selectedBranch || '';
+
+    void (async () => {
+      try {
+        const payload = buildPayrollSettingsPayload();
+        await axios.put('/api/hr/payroll-settings', {
+          branch_id: branchContext ? Number(branchContext) : null,
+          ...payload,
+        }, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        localStorage.setItem(PAYROLL_SETTINGS_STORAGE_KEY, JSON.stringify(payrollSettings));
+        setShowSettingsModal(false);
+        showNotice('Success', 'Payroll settings saved successfully.', 'success');
+      } catch (error) {
+        console.error('Error saving payroll settings:', error);
+        showNotice('Error', 'Failed to save payroll settings.', 'error');
+      }
+    })();
+  };
+
   const executeGeneratePayroll = async () => {
     if (!token || !selectedBranch || !selectedMonth) return;
+    if (selectedPaysheetMode === 'custom' && !validatePayrollSettings()) return;
+
+    const payrollSettingsPayload = selectedPaysheetMode === 'custom'
+      ? buildPayrollSettingsPayload()
+      : buildStandardPayrollSettingsPayload();
 
     try {
       setGenerateLoading(true);
@@ -202,6 +378,8 @@ export default function Payroll() {
       const response = await axios.post('/api/hr/payrolls/generate', {
         branch_id: parseInt(selectedBranch),
         month_year: selectedMonth,
+        payroll_settings: payrollSettingsPayload,
+        persist_payroll_settings: false,
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -209,6 +387,7 @@ export default function Payroll() {
       setShowGenerateModal(false);
       setSelectedBranch('');
       setSelectedMonth('');
+      setSelectedPaysheetMode('standard');
       fetchPayrolls(token);
 
       // Show success message
@@ -227,7 +406,7 @@ export default function Payroll() {
 
     openConfirm(
       'Generate Payroll',
-      `Generate payroll for ${selectedMonth} in selected branch? Existing records for the month will not be regenerated by this action.`,
+      `Generate ${selectedPaysheetMode === 'custom' ? 'Custom' : 'Standard'} payroll for ${selectedMonth} in selected branch? Existing records for the month will not be regenerated by this action.`,
       async () => {
         await executeGeneratePayroll();
       }
@@ -339,11 +518,13 @@ export default function Payroll() {
       showNotice('Validation', 'Please select Month/Year before recalculation.', 'warning');
       return;
     }
+    if (!validatePayrollSettings()) return;
 
     try {
       setRecalculateLoading(true);
-      const payload: { month_year: string; branch_id?: number } = {
+      const payload: { month_year: string; branch_id?: number; payroll_settings: ReturnType<typeof buildPayrollSettingsPayload> } = {
         month_year: filterMonth,
+        payroll_settings: buildPayrollSettingsPayload(),
       };
 
       if (filterBranch) {
@@ -542,9 +723,18 @@ export default function Payroll() {
               <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-slate-900 tracking-tight">Payroll Management</h1>
               <p className="text-sm sm:text-base md:text-lg text-slate-600 mt-2">Accurate salary processing with attendance, overtime, deductions, EPF/ETF, and APIT in one place.</p>
             </div>
-            <div className="md:flex-shrink-0">
+            <div className="md:flex-shrink-0 flex flex-col sm:flex-row gap-2">
               <button
-                onClick={() => setShowGenerateModal(true)}
+                onClick={() => setShowSettingsModal(true)}
+                className="w-full md:w-auto bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 px-7 py-3 rounded-xl font-semibold transition-all duration-300 shadow"
+              >
+                Payroll Settings
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedPaysheetMode('standard');
+                  setShowGenerateModal(true);
+                }}
                 className="w-full md:w-auto bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white px-7 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-[1.02] shadow-xl"
               >
                 Generate Payroll
@@ -579,6 +769,18 @@ export default function Payroll() {
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-bold text-slate-900">Filter & Recalculate</h3>
             <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100 text-slate-600">Smart Controls</span>
+          </div>
+          <div className="mb-4 rounded-xl border border-cyan-100 bg-cyan-50/70 px-4 py-3 text-sm text-slate-700">
+            <p className="font-semibold text-cyan-800">Current payroll mode: {payrollSettings.salaryMode === 'daily' ? 'Daily Rate' : 'Monthly Salary'}</p>
+            <p className="text-xs mt-1">
+              {payrollSettings.salaryMode === 'daily'
+                ? `Daily rate ${Number(payrollSettings.dailyRate || 0).toFixed(2)} × worked days (standard month ${payrollSettings.standardWorkingDays} days).`
+                : `Monthly salary with standard month ${payrollSettings.standardWorkingDays} days.`}
+              {payrollSettings.prorateByAttendance ? ' Attendance proration is enabled.' : ' Attendance proration is disabled.'}
+            </p>
+            <p className="text-xs mt-1">
+              Sunday payment: {payrollSettings.enableSundayPayment ? `Enabled (${Number(payrollSettings.sundayRate || 0).toFixed(2)} per day)` : 'Disabled'} | Poya payment: {payrollSettings.enablePoyaPayment ? `Enabled (${Number(payrollSettings.poyaRate || 0).toFixed(2)} per day)` : 'Disabled'}
+            </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
@@ -773,6 +975,145 @@ export default function Payroll() {
         </div>
       </div>
 
+      {/* Payroll Settings Modal */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full">
+            <div className="bg-gradient-to-r from-slate-700 to-slate-900 p-6 rounded-t-2xl">
+              <h3 className="text-xl font-bold text-white">Payroll Settings</h3>
+              <p className="text-slate-200 text-sm mt-1">Configure salary calculation mode for payroll generation.</p>
+              <p className="text-slate-300 text-xs mt-1">
+                Applies to: {(() => {
+                  const branchId = filterBranch || selectedBranch;
+                  const branch = branches.find((row) => String(row.id) === String(branchId));
+                  return branch ? branch.name : 'Current default branch';
+                })()}
+              </p>
+            </div>
+            <div className="p-6 space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Salary Calculation Mode</label>
+                <select
+                  value={payrollSettings.salaryMode}
+                  onChange={(e) => setPayrollSettings((prev) => ({ ...prev, salaryMode: e.target.value as 'monthly' | 'daily' }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-black"
+                >
+                  <option value="monthly">Monthly Salary</option>
+                  <option value="daily">Daily Rate × Worked Days</option>
+                </select>
+              </div>
+
+              {payrollSettings.salaryMode === 'daily' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Daily Salary Rate</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={payrollSettings.dailyRate}
+                    onChange={(e) => setPayrollSettings((prev) => ({ ...prev, dailyRate: e.target.value }))}
+                    placeholder="e.g. 900"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-black"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Standard Working Days per Month</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="31"
+                  value={payrollSettings.standardWorkingDays}
+                  onChange={(e) => setPayrollSettings((prev) => ({ ...prev, standardWorkingDays: e.target.value }))}
+                  placeholder="e.g. 28, 30"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-black"
+                />
+              </div>
+
+              <label className="inline-flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={payrollSettings.prorateByAttendance}
+                  onChange={(e) => setPayrollSettings((prev) => ({ ...prev, prorateByAttendance: e.target.checked }))}
+                  className="h-4 w-4 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                />
+                <span className="text-sm text-gray-700">Prorate salary by attendance (present/working days)</span>
+              </label>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-lg border border-gray-200 p-3">
+                  <label className="inline-flex items-center gap-2 mb-3">
+                    <input
+                      type="checkbox"
+                      checked={payrollSettings.enableSundayPayment}
+                      onChange={(e) => setPayrollSettings((prev) => ({ ...prev, enableSundayPayment: e.target.checked }))}
+                      className="h-4 w-4 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <span className="text-sm font-medium text-gray-700">Enable Sunday Payment</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={payrollSettings.sundayRate}
+                    onChange={(e) => setPayrollSettings((prev) => ({ ...prev, sundayRate: e.target.value }))}
+                    placeholder="Sunday day-rate payment"
+                    disabled={!payrollSettings.enableSundayPayment}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-black disabled:bg-gray-100 disabled:text-gray-500"
+                  />
+                </div>
+
+                <div className="rounded-lg border border-gray-200 p-3">
+                  <label className="inline-flex items-center gap-2 mb-3">
+                    <input
+                      type="checkbox"
+                      checked={payrollSettings.enablePoyaPayment}
+                      onChange={(e) => setPayrollSettings((prev) => ({ ...prev, enablePoyaPayment: e.target.checked }))}
+                      className="h-4 w-4 rounded border-gray-300 text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <span className="text-sm font-medium text-gray-700">Enable Poya Day Payment</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={payrollSettings.poyaRate}
+                    onChange={(e) => setPayrollSettings((prev) => ({ ...prev, poyaRate: e.target.value }))}
+                    placeholder="Poya day-rate payment"
+                    disabled={!payrollSettings.enablePoyaPayment}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent text-black disabled:bg-gray-100 disabled:text-gray-500"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-cyan-100 bg-cyan-50 p-3 text-xs text-cyan-900">
+                {payrollSettings.salaryMode === 'daily'
+                  ? `Daily mode preview: ${Number(payrollSettings.dailyRate || 0).toFixed(2)} × worked days.`
+                  : 'Monthly mode preview: use employee monthly salary as base.'}
+              </div>
+
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsModal(false)}
+                  className="px-5 py-2 border border-gray-300 rounded-lg text-black hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={savePayrollSettings}
+                  className="px-5 py-2 rounded-lg bg-gradient-to-r from-cyan-600 to-blue-600 text-white font-medium hover:from-cyan-700 hover:to-blue-700"
+                >
+                  Save Settings
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Generate Payroll Modal */}
       {showGenerateModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -781,6 +1122,43 @@ export default function Payroll() {
               <h3 className="text-xl font-bold text-white">Generate Payroll</h3>
             </div>
             <form onSubmit={handleGeneratePayroll} className="p-6 space-y-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Paysheet Type</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className={`rounded-lg border p-3 cursor-pointer transition-colors ${selectedPaysheetMode === 'standard' ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'}`}>
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="paysheet_mode"
+                        value="standard"
+                        checked={selectedPaysheetMode === 'standard'}
+                        onChange={() => setSelectedPaysheetMode('standard')}
+                        className="mt-1"
+                      />
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">Standard</p>
+                        <p className="text-xs text-gray-600">Monthly standard payroll (default).</p>
+                      </div>
+                    </div>
+                  </label>
+                  <label className={`rounded-lg border p-3 cursor-pointer transition-colors ${selectedPaysheetMode === 'custom' ? 'border-blue-500 bg-blue-50' : 'border-gray-300 bg-white'}`}>
+                    <div className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="paysheet_mode"
+                        value="custom"
+                        checked={selectedPaysheetMode === 'custom'}
+                        onChange={() => setSelectedPaysheetMode('custom')}
+                        className="mt-1"
+                      />
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">Custom</p>
+                        <p className="text-xs text-gray-600">Use saved daily/sunday/poya payroll settings.</p>
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Branch</label>
                 <select
@@ -810,7 +1188,10 @@ export default function Payroll() {
               <div className="flex justify-end space-x-4">
                 <button
                   type="button"
-                  onClick={() => setShowGenerateModal(false)}
+                  onClick={() => {
+                    setShowGenerateModal(false);
+                    setSelectedPaysheetMode('standard');
+                  }}
                   className="px-6 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors duration-300"
                 >
                   Cancel

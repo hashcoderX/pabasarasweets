@@ -34,6 +34,8 @@ type Target = {
 
 type Option = { id: number; name?: string; first_name?: string; last_name?: string; employee_code?: string; code?: string; origin?: string; destination?: string };
 type ConfirmAction = (() => void | Promise<void>) | null;
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 const tabs: Array<{ key: Tab; label: string }> = [
   { key: 'setup', label: 'Target Setup' },
@@ -74,6 +76,7 @@ export default function SalesTargetsPage() {
   useEffect(() => {
     if (!token) return;
     const headers = { Authorization: `Bearer ${token}` };
+    fetchWidgetVisibility(token);
     Promise.all([
       axios.get('/api/sales-targets', { headers, params: { per_page: 500 } }),
       axios.get('/api/hr/employees', { headers, params: { per_page: 1000 } }),
@@ -109,6 +112,169 @@ export default function SalesTargetsPage() {
       setConfirmAction(null);
     } finally {
       setConfirmLoading(false);
+    }
+  };
+
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+
+  const salesTargetWidgetItems = [
+    { id: 'hrm-sales-targets-hero-card', name: 'Sales Targets Hero Card' },
+    { id: 'hrm-sales-targets-nav-back-button', name: 'Sales Targets Back Button' },
+    { id: 'hrm-sales-targets-tabs', name: 'Sales Targets Tabs' },
+    { id: 'hrm-sales-targets-setup-pane', name: 'Sales Targets Setup Pane' },
+    { id: 'hrm-sales-targets-setup-action-button', name: 'Assign Target Button' },
+    { id: 'hrm-sales-targets-list-pane', name: 'Sales Targets List Pane' },
+    { id: 'hrm-sales-targets-list-table-headings', name: 'Sales Targets Table Headings' },
+    { id: 'hrm-sales-targets-list-row-actions', name: 'Sales Targets Row Actions' },
+    { id: 'hrm-sales-targets-alert-modal-pane', name: 'Sales Targets Alert Pane' },
+    { id: 'hrm-sales-targets-alert-modal-heading', name: 'Sales Targets Alert Heading' },
+    { id: 'hrm-sales-targets-confirm-modal-pane', name: 'Sales Targets Confirm Pane' },
+    { id: 'hrm-sales-targets-confirm-modal-heading', name: 'Sales Targets Confirm Heading' },
+    { id: 'hrm-sales-targets-confirm-modal-action-buttons', name: 'Sales Targets Confirm Action Buttons' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = salesTargetWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get('/api/dashboard/widgets/me', {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      setWidgetVisibility(response.data?.data?.widgets || {});
+      setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
+    } catch {
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
+    }
+  };
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (changes: WidgetVisibilityChange[] = [], mode: SuperAdminModalMode = 'apply') => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openAlert('Widget Update Failed', 'Please enter Super Admin email and password.');
+      return;
+    }
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put('/api/dashboard/widgets/me', {
+          widget_key: change.widget_key,
+          is_visible: change.is_visible,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch {
+      openAlert('Widget Update Failed', 'Super Admin confirmation failed or widget update failed.');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = salesTargetWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) {
+      openAlert('Nothing to Restore', 'All widgets are already visible.');
+      return;
+    }
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      openAlert('Super Admin Required', 'Please enter Super Admin email and password.');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: widgetKey,
+        is_visible: true,
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: true,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) return;
+    const fallbackWidgetKey = salesTargetWidgetItems[0]?.id ?? 'hrm-sales-targets-hero-card';
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put('/api/dashboard/widgets/me', {
+        widget_key: fallbackWidgetKey,
+        is_visible: isWidgetVisible(fallbackWidgetKey),
+        super_admin_email: superAdminEmail.trim(),
+        super_admin_password: superAdminPassword,
+        lock_widget_controls: false,
+      }, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } finally {
+      setSuperAdminConfirmLoading(false);
     }
   };
 
@@ -307,15 +473,31 @@ export default function SalesTargetsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 rounded-2xl bg-gradient-to-r from-slate-950 via-emerald-900 to-teal-800 p-6 text-white shadow-xl sm:flex-row sm:items-end sm:justify-between">
+      {isWidgetVisible('hrm-sales-targets-hero-card') && <div className="flex flex-col gap-3 rounded-2xl bg-gradient-to-r from-slate-950 via-emerald-900 to-teal-800 p-6 text-white shadow-xl sm:flex-row sm:items-end sm:justify-between">
         <div><p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-200">Performance Management</p><h1 className="mt-1 text-3xl font-bold">Sales Targets ⭐</h1><p className="mt-1 text-sm text-emerald-100">Assign measurable goals to people, branches, products, and territories.</p></div>
-        <button onClick={() => router.push('/dashboard/hrm')} className="rounded-lg border border-white/30 px-4 py-2 text-sm hover:bg-white/10">Back to HRM</button>
-      </div>
-      <div className="flex gap-2 overflow-x-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
+        <div className="flex items-center gap-2">
+          {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-hero-card', false)} className="rounded-lg border border-white/40 px-3 py-2 text-sm hover:bg-white/10">Close ✕</button>}
+          {isWidgetVisible('hrm-sales-targets-nav-back-button') && <button onClick={() => router.push('/dashboard/hrm')} className="rounded-lg border border-white/30 px-4 py-2 text-sm hover:bg-white/10">Back to HRM</button>}
+          {!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-nav-back-button', false)} className="rounded-lg border border-white/40 px-3 py-2 text-sm hover:bg-white/10">Close ✕</button>}
+        </div>
+      </div>}
+      {isWidgetVisible('hrm-sales-targets-tabs') && <div className="flex gap-2 overflow-x-auto rounded-xl border border-slate-200 bg-white p-2 shadow-sm">
         {tabs.map((item) => <button key={item.key} onClick={() => setTab(item.key)} className={`whitespace-nowrap rounded-lg px-4 py-2 text-sm font-semibold ${tab === item.key ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-emerald-50'}`}>{item.label}</button>)}
-      </div>
+        {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-tabs', false)} className="ml-auto rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">Close ✕</button>}
+      </div>}
+      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3><p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden items, and unlock when needed.</p></div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
+            <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
+            <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
+          </div>
+        </div>
+        <div className="mt-3 text-xs text-slate-600">Hidden widgets: <span className="font-semibold">{hiddenWidgetCount}</span> · Pending changes: <span className="font-semibold">{pendingWidgetChanges.length}</span> · Controls: <span className={`font-semibold ${widgetControlsLocked ? 'text-rose-600' : 'text-emerald-600'}`}>{widgetControlsLocked ? 'Locked' : 'Editable'}</span></div>
+      </section>
 
-      {tab === 'setup' && <form onSubmit={saveTarget} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-4"><h2 className="text-lg font-bold text-slate-900">Assign New Target</h2><p className="text-sm text-slate-500">Set the scope, pick what the target applies to, and define the time window.</p></div><div className="space-y-5">
+      {tab === 'setup' && isWidgetVisible('hrm-sales-targets-setup-pane') && <form onSubmit={saveTarget} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="mb-4 flex items-start justify-between gap-2"><div><h2 className="text-lg font-bold text-slate-900">Assign New Target</h2><p className="text-sm text-slate-500">Set the scope, pick what the target applies to, and define the time window.</p></div>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-setup-pane', false)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Close ✕</button>}</div><div className="space-y-5">
         <div className="rounded-xl border border-slate-200 p-4"><h3 className="text-sm font-semibold uppercase tracking-wide text-slate-600">1. Scope and Ownership</h3><div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-3">
           <label className="text-sm font-medium text-slate-700">Target scope<select value={form.target_type} onChange={(e) => setForm({ ...form, target_type: e.target.value as TargetType })} className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2 text-slate-900"><option value="employee">Employee</option><option value="branch">Branch</option><option value="product">Product</option><option value="territory">Territory</option></select></label>
           <label className="text-sm font-medium text-slate-700">Employee<select value={form.employee_id} onChange={(e) => setForm({ ...form, employee_id: e.target.value })} className={`mt-1 w-full rounded-lg border bg-white p-2 text-slate-900 ${errors.employee_id ? 'border-rose-400' : 'border-slate-300'}`}><option value="">Select employee</option>{employees.map((e) => <option key={e.id} value={e.id}>{e.employee_code} - {e.first_name} {e.last_name}</option>)}</select>{errors.employee_id && <p className="mt-1 text-xs text-rose-600">{errors.employee_id}</p>}</label>
@@ -350,13 +532,15 @@ export default function SalesTargetsPage() {
           {!form.all_products && <label className="text-sm font-medium text-slate-700">Target quantity<input type="number" min="0" step="0.01" value={form.target_quantity} onChange={(e) => setForm({ ...form, target_quantity: e.target.value })} className={`mt-1 w-full rounded-lg border p-2 text-slate-900 ${errors.target_quantity ? 'border-rose-400' : 'border-slate-300'}`} />{errors.target_quantity && <p className="mt-1 text-xs text-rose-600">{errors.target_quantity}</p>}</label>}
           <label className="text-sm font-medium text-slate-700 md:col-span-3">Notes<textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} className="mt-1 w-full rounded-lg border border-slate-300 p-2 text-slate-900" rows={2} placeholder="Optional context for the assignee" /></label>
         </div></div>
-      </div><div className="mt-4 flex justify-end"><button disabled={saving} className="rounded-lg bg-emerald-600 px-5 py-2 font-semibold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Assign Target'}</button></div></form>}
+      </div><div className="mt-4 flex justify-end gap-2">{isWidgetVisible('hrm-sales-targets-setup-action-button') && <button disabled={saving} className="rounded-lg bg-emerald-600 px-5 py-2 font-semibold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Assign Target'}</button>}{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-setup-action-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-setup-action-button', false)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Close ✕</button>}</div></form>}
 
-      <section className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b px-5 py-4"><h2 className="font-bold text-slate-900">{tab === 'performance' ? 'Target Performance' : tab === 'setup' ? 'Current Assignments' : tabs.find((item) => item.key === tab)?.label}</h2></div>{loading ? <div className="p-8 text-center text-slate-500">Loading targets...</div> : <div className="overflow-x-auto"><table className="min-w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Period</th><th className="px-4 py-3 text-right">Target Amount</th><th className="px-4 py-3 text-right">Achieved</th><th className="px-4 py-3 text-right">Progress</th><th className="px-4 py-3">Action</th></tr></thead><tbody className="divide-y">{visibleTargets.map((target) => { const progress = Number(target.target_amount) > 0 ? Math.min(100, Number(target.achieved_amount || 0) / Number(target.target_amount) * 100) : 0; return <tr key={target.id}><td className="px-4 py-3 font-medium text-slate-900">{labelFor(target)}<div className="text-xs text-slate-500">{target.target_type}</div></td><td className="px-4 py-3 text-slate-600">{target.period_key}<div className="text-xs">{formatDateValue(target.period_start)} to {formatDateValue(target.period_end)}</div></td><td className="px-4 py-3 text-right text-slate-900">{formatAmount(target.target_amount)}</td><td className="px-4 py-3 text-right text-slate-900">{formatAmount(target.achieved_amount)}</td><td className="px-4 py-3 text-right"><span className="font-semibold text-emerald-700">{progress.toFixed(0)}%</span></td><td className="px-4 py-3"><button onClick={() => deleteTarget(target.id)} className="text-rose-600 hover:underline">Delete</button></td></tr>; })}</tbody></table>{!visibleTargets.length && <p className="p-8 text-center text-slate-500">No targets assigned yet.</p>}</div>}</section>
+      {isWidgetVisible('hrm-sales-targets-list-pane') && <section className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b px-5 py-4"><div className="flex items-center justify-between gap-2"><h2 className="font-bold text-slate-900">{tab === 'performance' ? 'Target Performance' : tab === 'setup' ? 'Current Assignments' : tabs.find((item) => item.key === tab)?.label}</h2>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-list-pane', false)} className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Close ✕</button>}</div></div>{loading ? <div className="p-8 text-center text-slate-500">Loading targets...</div> : <div className="overflow-x-auto"><table className="min-w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase text-slate-500"><tr>{isWidgetVisible('hrm-sales-targets-list-table-headings') && <><th className="px-4 py-3">Scope</th><th className="px-4 py-3">Period</th><th className="px-4 py-3 text-right">Target Amount</th><th className="px-4 py-3 text-right">Achieved</th><th className="px-4 py-3 text-right">Progress</th><th className="px-4 py-3">Action</th></>}{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-list-table-headings') && <th className="px-4 py-3 text-right"><button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-list-table-headings', false)} className="rounded border border-slate-300 px-2 py-1 text-[11px] font-semibold normal-case text-slate-700 hover:bg-slate-100">Close ✕</button></th>}</tr></thead><tbody className="divide-y">{visibleTargets.map((target) => { const progress = Number(target.target_amount) > 0 ? Math.min(100, Number(target.achieved_amount || 0) / Number(target.target_amount) * 100) : 0; return <tr key={target.id}><td className="px-4 py-3 font-medium text-slate-900">{labelFor(target)}<div className="text-xs text-slate-500">{target.target_type}</div></td><td className="px-4 py-3 text-slate-600">{target.period_key}<div className="text-xs">{formatDateValue(target.period_start)} to {formatDateValue(target.period_end)}</div></td><td className="px-4 py-3 text-right text-slate-900">{formatAmount(target.target_amount)}</td><td className="px-4 py-3 text-right text-slate-900">{formatAmount(target.achieved_amount)}</td><td className="px-4 py-3 text-right"><span className="font-semibold text-emerald-700">{progress.toFixed(0)}%</span></td><td className="px-4 py-3">{isWidgetVisible('hrm-sales-targets-list-row-actions') && <button onClick={() => deleteTarget(target.id)} className="text-rose-600 hover:underline">Delete</button>}</td>{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-list-row-actions') && <td className="px-4 py-3 text-right"><button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-list-row-actions', false)} className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Close ✕</button></td>}</tr>; })}</tbody></table>{!visibleTargets.length && <p className="p-8 text-center text-slate-500">No targets assigned yet.</p>}</div>}</section>}
 
-      {alertModal.open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-md rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{alertModal.title}</h3></div><div className="px-5 py-4"><p className="text-sm text-slate-700">{alertModal.message}</p></div><div className="flex justify-end px-5 py-4"><button onClick={() => setAlertModal({ open: false, title: '', message: '' })} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white">OK</button></div></div></div>}
+      {showSuperAdminConfirmModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-lg rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{superAdminModalMode === 'unlock' ? 'Unlock Widget Controls' : superAdminModalMode === 'restore' ? 'Restore Hidden Widgets' : 'Fix Widget Visibility'}</h3></div><div className="space-y-4 px-5 py-4"><p className="text-sm text-slate-600">{superAdminModalMode === 'unlock' ? 'Enter Super Admin credentials to unlock widget controls.' : superAdminModalMode === 'restore' ? 'Authenticate and restore hidden widgets one by one.' : 'Authenticate and apply pending visibility changes.'}</p><div className="grid gap-3 md:grid-cols-2"><input type="email" value={superAdminEmail} onChange={(e) => setSuperAdminEmail(e.target.value)} placeholder="Super Admin Email" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /><input type="password" value={superAdminPassword} onChange={(e) => setSuperAdminPassword(e.target.value)} placeholder="Super Admin Password" className="rounded-lg border border-slate-300 p-2 text-sm text-slate-900" /></div>{superAdminModalMode === 'restore' && restoreWidgetListVisible && <div className="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-3">{salesTargetWidgetItems.filter((item) => widgetVisibility[item.id] === false).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2"><span className="text-sm text-slate-700">{item.name}</span><button type="button" onClick={() => restoreHiddenWidgetOneByOne(item.id)} disabled={restoreWidgetLoadingKey === item.id} className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-semibold text-white disabled:opacity-60">{restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}</button></div>)}{salesTargetWidgetItems.every((item) => widgetVisibility[item.id] !== false) && <p className="text-sm text-slate-500">No hidden widgets remain.</p>}</div>}</div><div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 px-5 py-4"><button type="button" onClick={rollbackPendingWidgetChanges} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Cancel</button>{superAdminModalMode === 'restore' && <button type="button" onClick={showRestoreWidgetList} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" disabled={superAdminConfirmLoading}>Show Hidden Widgets</button>}<button type="button" onClick={superAdminModalMode === 'unlock' ? unlockWidgetControls : applyWidgetVisibilityChanges} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" disabled={superAdminConfirmLoading}>{superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}</button></div></div></div>}
 
-      {confirmModal.open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-md rounded-xl bg-white shadow-2xl"><div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{confirmModal.title}</h3></div><div className="px-5 py-4"><p className="text-sm text-slate-700">{confirmModal.message}</p></div><div className="flex justify-end gap-2 px-5 py-4"><button onClick={() => { if (!confirmLoading) { setConfirmModal((current) => ({ ...current, open: false })); setConfirmAction(null); } }} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60" disabled={confirmLoading}>{confirmModal.cancelText}</button><button onClick={runConfirmAction} className={`rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-60 ${confirmModal.destructive ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`} disabled={confirmLoading}>{confirmLoading ? 'Processing...' : confirmModal.confirmText}</button></div></div></div>}
+      {isWidgetVisible('hrm-sales-targets-alert-modal-pane') && alertModal.open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-md rounded-xl bg-white shadow-2xl">{isWidgetVisible('hrm-sales-targets-alert-modal-heading') && <div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{alertModal.title}</h3></div>}<div className="px-5 py-4"><p className="text-sm text-slate-700">{alertModal.message}</p></div><div className="flex items-center justify-between px-5 py-4">{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-alert-modal-heading') && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-alert-modal-heading', false)} className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Close Heading ✕</button>}<button onClick={() => setAlertModal({ open: false, title: '', message: '' })} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white">OK</button></div></div></div>}
+
+      {isWidgetVisible('hrm-sales-targets-confirm-modal-pane') && confirmModal.open && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"><div className="w-full max-w-md rounded-xl bg-white shadow-2xl">{isWidgetVisible('hrm-sales-targets-confirm-modal-heading') && <div className="border-b border-slate-200 px-5 py-4"><h3 className="text-base font-semibold text-slate-900">{confirmModal.title}</h3></div>}<div className="px-5 py-4"><p className="text-sm text-slate-700">{confirmModal.message}</p></div><div className="flex items-center justify-between gap-2 px-5 py-4">{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-confirm-modal-heading') && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-confirm-modal-heading', false)} className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Close Heading ✕</button>}{isWidgetVisible('hrm-sales-targets-confirm-modal-action-buttons') && <div className="flex justify-end gap-2"><button onClick={() => { if (!confirmLoading) { setConfirmModal((current) => ({ ...current, open: false })); setConfirmAction(null); } }} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60" disabled={confirmLoading}>{confirmModal.cancelText}</button><button onClick={runConfirmAction} className={`rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-60 ${confirmModal.destructive ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'}`} disabled={confirmLoading}>{confirmLoading ? 'Processing...' : confirmModal.confirmText}</button></div>}{!widgetControlsLocked && isWidgetVisible('hrm-sales-targets-confirm-modal-action-buttons') && <button type="button" onClick={() => stageWidgetVisibilityChange('hrm-sales-targets-confirm-modal-action-buttons', false)} className="rounded border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Close Actions ✕</button>}</div></div></div>}
     </div>
   );
 }

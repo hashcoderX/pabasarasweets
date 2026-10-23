@@ -91,6 +91,13 @@ type CandidateFull = Candidate & {
   interviews?: Interview[];
 };
 
+type WidgetVisibilityChange = {
+  widget_key: string;
+  is_visible: boolean;
+};
+
+type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+
 export default function Candidates() {
   const [token, setToken] = useState('');
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -181,6 +188,17 @@ export default function Candidates() {
   const [noticeType, setNoticeType] = useState<'success' | 'error' | 'info'>('info');
   const [noticeTitle, setNoticeTitle] = useState<string>('');
   const [noticeMessage, setNoticeMessage] = useState<string>('');
+  const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
+  const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
+  const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
+  const [superAdminEmail, setSuperAdminEmail] = useState('');
+  const [superAdminPassword, setSuperAdminPassword] = useState('');
+  const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
+  const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
 
   const showSuccess = (message: string, title = 'Success') => {
     setNoticeType('success');
@@ -225,6 +243,7 @@ export default function Candidates() {
       fetchBranches(storedToken);
       fetchEmployees(storedToken);
       fetchUpcomingInterviews(storedToken);
+      fetchWidgetVisibility(storedToken);
     }
   }, [router]);
 
@@ -276,6 +295,25 @@ export default function Candidates() {
       setUpcomingInterviews(res.data || []);
     } catch (err: any) {
       console.error('Failed to load upcoming interviews', err?.response?.data || err?.message);
+    }
+  };
+
+  const fetchWidgetVisibility = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      const response = await axios.get(`${API_URL}/api/dashboard/widgets/me`, {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+      const widgetMap = response.data?.data?.widgets || {};
+      const controlsLocked = Boolean(response.data?.data?.widget_controls_locked);
+      setWidgetVisibility(widgetMap);
+      setWidgetControlsLocked(controlsLocked);
+    } catch (error) {
+      const err: any = error;
+      console.error('Error fetching candidate widget visibility:', err?.response?.status, err?.response?.data || err?.message);
+      setWidgetVisibility({});
+      setWidgetControlsLocked(false);
     }
   };
 
@@ -798,6 +836,218 @@ export default function Candidates() {
     }
   };
 
+  const candidateWidgetItems = [
+    { id: 'hrm-candidates-nav-back-button', name: 'Candidates Back Button' },
+    { id: 'hrm-candidates-nav-logout-button', name: 'Candidates Logout Button' },
+    { id: 'hrm-candidates-hero-card', name: 'Candidates Hero Card' },
+    { id: 'hrm-candidates-heading-title', name: 'Candidates Title Heading' },
+    { id: 'hrm-candidates-heading-subtitle', name: 'Candidates Subtitle Heading' },
+    { id: 'hrm-candidates-heading-actions', name: 'Candidates Header Action Buttons' },
+    { id: 'hrm-candidates-table-card', name: 'Candidates Table Card' },
+    { id: 'hrm-candidates-table-headings', name: 'Candidates Table Headings' },
+    { id: 'hrm-candidates-row-action-buttons', name: 'Candidates Row Action Buttons' },
+    { id: 'hrm-candidates-form-pane', name: 'Candidate Form Pane' },
+    { id: 'hrm-candidates-form-heading', name: 'Candidate Form Heading' },
+    { id: 'hrm-candidates-form-action-buttons', name: 'Candidate Form Action Buttons' },
+    { id: 'hrm-candidates-convert-pane', name: 'Convert to Employee Pane' },
+    { id: 'hrm-candidates-convert-heading', name: 'Convert to Employee Heading' },
+    { id: 'hrm-candidates-convert-action-buttons', name: 'Convert to Employee Action Buttons' },
+    { id: 'hrm-candidates-profile-pane', name: 'Candidate Profile Pane' },
+    { id: 'hrm-candidates-profile-heading', name: 'Candidate Profile Heading' },
+    { id: 'hrm-candidates-interview-pane', name: 'Schedule Interview Pane' },
+    { id: 'hrm-candidates-interview-heading', name: 'Schedule Interview Heading' },
+    { id: 'hrm-candidates-interview-action-buttons', name: 'Schedule Interview Action Buttons' },
+    { id: 'hrm-candidates-documents-pane', name: 'Documents Pane' },
+    { id: 'hrm-candidates-documents-heading', name: 'Documents Heading' },
+    { id: 'hrm-candidates-education-pane', name: 'Education Pane' },
+    { id: 'hrm-candidates-education-heading', name: 'Education Heading' },
+    { id: 'hrm-candidates-experience-pane', name: 'Experience Pane' },
+    { id: 'hrm-candidates-experience-heading', name: 'Experience Heading' },
+  ];
+  const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
+  const hiddenWidgetCount = candidateWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+
+  const stageWidgetVisibilityChange = (widgetKey: string, isVisible: boolean) => {
+    if (widgetControlsLocked) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: isVisible }));
+    setPendingWidgetChanges((prev) => {
+      const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
+      return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
+    });
+  };
+
+  const rollbackPendingWidgetChanges = () => {
+    if (widgetVisibilitySnapshot) setWidgetVisibility(widgetVisibilitySnapshot);
+    setPendingWidgetChanges([]);
+    setWidgetVisibilitySnapshot(null);
+    setShowSuperAdminConfirmModal(false);
+    setSuperAdminModalMode('apply');
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+  };
+
+  const openSuperAdminConfirmation = (
+    changes: WidgetVisibilityChange[] = [],
+    mode: SuperAdminModalMode = 'apply'
+  ) => {
+    if (mode !== 'unlock' && !changes.length) return;
+    setSuperAdminModalMode(mode);
+    setPendingWidgetChanges(changes);
+    setRestoreWidgetListVisible(false);
+    setRestoreWidgetLoadingKey(null);
+    setSuperAdminEmail('');
+    setSuperAdminPassword('');
+    setShowSuperAdminConfirmModal(true);
+  };
+
+  const applyWidgetVisibilityChanges = async () => {
+    if (superAdminModalMode !== 'apply') return;
+    if (!pendingWidgetChanges.length) return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showError('Please enter Super Admin email and password.', 'Super Admin Required');
+      return;
+    }
+    try {
+      setSuperAdminConfirmLoading(true);
+      for (const change of pendingWidgetChanges) {
+        await axios.put(
+          `${API_URL}/api/dashboard/widgets/me`,
+          {
+            widget_key: change.widget_key,
+            is_visible: change.is_visible,
+            super_admin_email: superAdminEmail.trim(),
+            super_admin_password: superAdminPassword,
+            lock_widget_controls: true,
+          },
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+        );
+      }
+      setWidgetControlsLocked(true);
+      setShowSuperAdminConfirmModal(false);
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+    } catch (error) {
+      const err: any = error;
+      console.error('Error applying candidate widget changes:', err?.response?.status, err?.response?.data || err?.message);
+      showError('Super Admin confirmation failed or widget update failed.', 'Widget Update Failed');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
+  const restoreAllHiddenWidgetsStaged = () => {
+    if (widgetControlsLocked) return;
+    const hiddenKeys = candidateWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) return;
+    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
+    setWidgetVisibility((prev) => {
+      const next = { ...prev };
+      hiddenKeys.forEach((key) => { next[key] = true; });
+      return next;
+    });
+    setPendingWidgetChanges((prev) => {
+      const next = [...prev];
+      hiddenKeys.forEach((key) => {
+        const remaining = next.filter((entry) => entry.widget_key !== key);
+        remaining.push({ widget_key: key, is_visible: true });
+        next.splice(0, next.length, ...remaining);
+      });
+      return next;
+    });
+  };
+
+  const restoreHiddenWidgetsAfterFix = () => {
+    const hiddenKeys = candidateWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
+    if (!hiddenKeys.length) {
+      showSuccess('All widgets are already visible.', 'Nothing to Restore');
+      return;
+    }
+    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
+  };
+
+  const showRestoreWidgetList = () => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showError('Please enter Super Admin email and password.', 'Super Admin Required');
+      return;
+    }
+    setRestoreWidgetListVisible(true);
+  };
+
+  const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showError('Please enter Super Admin email and password.', 'Super Admin Required');
+      return;
+    }
+    try {
+      setRestoreWidgetLoadingKey(widgetKey);
+      await axios.put(
+        `${API_URL}/api/dashboard/widgets/me`,
+        {
+          widget_key: widgetKey,
+          is_visible: true,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: true,
+        },
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+      );
+      setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+      setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
+    } catch (error) {
+      const err: any = error;
+      console.error('Error restoring candidate widget:', err?.response?.status, err?.response?.data || err?.message);
+      showError('Failed to restore widget.', 'Restore Failed');
+    } finally {
+      setRestoreWidgetLoadingKey(null);
+    }
+  };
+
+  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
+
+  const unlockWidgetControls = async () => {
+    if (superAdminModalMode !== 'unlock') return;
+    if (!superAdminEmail.trim() || !superAdminPassword) {
+      showError('Please enter Super Admin email and password.', 'Super Admin Required');
+      return;
+    }
+    const fallbackWidgetKey = candidateWidgetItems[0]?.id ?? 'hrm-candidates-hero-card';
+    const fallbackVisibility = isWidgetVisible(fallbackWidgetKey);
+    try {
+      setSuperAdminConfirmLoading(true);
+      await axios.put(
+        `${API_URL}/api/dashboard/widgets/me`,
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+          super_admin_email: superAdminEmail.trim(),
+          super_admin_password: superAdminPassword,
+          lock_widget_controls: false,
+        },
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+      );
+      setWidgetControlsLocked(false);
+      setShowSuperAdminConfirmModal(false);
+      setSuperAdminModalMode('apply');
+      setRestoreWidgetListVisible(false);
+      setRestoreWidgetLoadingKey(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
+      setPendingWidgetChanges([]);
+      setWidgetVisibilitySnapshot(null);
+    } catch (error) {
+      const err: any = error;
+      console.error('Error unlocking candidate widgets:', err?.response?.status, err?.response?.data || err?.message);
+      showError('Failed to unlock widget controls.', 'Unlock Failed');
+    } finally {
+      setSuperAdminConfirmLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-cyan-50 to-teal-50 relative overflow-hidden">
       {/* Background Pattern */}
@@ -812,15 +1062,17 @@ export default function Candidates() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
-              <button
-                onClick={() => router.push('/dashboard/hrm')}
-                className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-                <span className="font-medium text-sm sm:text-base">Back to HRM</span>
-              </button>
+              {isWidgetVisible('hrm-candidates-nav-back-button') && (
+                <button
+                  onClick={() => router.push('/dashboard/hrm')}
+                  className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                  <span className="font-medium text-sm sm:text-base">Back to HRM</span>
+                </button>
+              )}
             </div>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4">
               <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
@@ -833,15 +1085,17 @@ export default function Candidates() {
                 </div>
                 <span className="font-medium text-gray-900">Candidate Management</span>
               </div>
-              <button
-                onClick={() => {
-                  localStorage.removeItem('token');
-                  router.push('/');
-                }}
-                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-              >
-                Logout
-              </button>
+              {isWidgetVisible('hrm-candidates-nav-logout-button') && (
+                <button
+                  onClick={() => {
+                    localStorage.removeItem('token');
+                    router.push('/');
+                  }}
+                  className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
+                >
+                  Logout
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -854,25 +1108,111 @@ export default function Candidates() {
           </div>
         )}
         {/* Hero Section */}
-        <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-6">
-          <div>
-            <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">Candidates</h1>
-            <p className="text-sm sm:text-base md:text-lg text-gray-600">Manage applicants, interviews and conversions</p>
+        {isWidgetVisible('hrm-candidates-hero-card') && (
+          <div className="mb-8 rounded-2xl border border-gray-200 bg-white/90 shadow-sm p-6 relative">
+            {!widgetControlsLocked && (
+              <button
+                onClick={() => stageWidgetVisibilityChange('hrm-candidates-hero-card', false)}
+                className="absolute top-3 right-3 w-8 h-8 rounded-full bg-red-500 text-white hover:bg-red-600 flex items-center justify-center text-sm"
+                title="Hide this widget"
+              >
+                ×
+              </button>
+            )}
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+              <div>
+                {isWidgetVisible('hrm-candidates-heading-title') && (
+                  <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">Candidates</h1>
+                )}
+                {isWidgetVisible('hrm-candidates-heading-subtitle') && (
+                  <p className="text-sm sm:text-base md:text-lg text-gray-600">Manage applicants, interviews and conversions</p>
+                )}
+              </div>
+              {isWidgetVisible('hrm-candidates-heading-actions') && (
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => { resetForm(); resetEditForm(); setShowForm(true); }}
+                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                  >
+                    Add Candidate
+                  </button>
+                  <button onClick={() => fetchCandidates()} className="px-4 py-2 rounded-lg border">Refresh</button>
+                </div>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => { resetForm(); resetEditForm(); setShowForm(true); }}
-              className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
-            >
-              Add Candidate
-            </button>
-            <button onClick={() => fetchCandidates()} className="px-4 py-2 rounded-lg border">Refresh</button>
+        )}
+
+        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-blue-900">
+                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
+              </p>
+              <p className="text-xs text-blue-700">
+                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {!widgetControlsLocked && (
+                <button
+                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
+                  disabled={!pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Fix Widget
+                </button>
+              )}
+              {!widgetControlsLocked && (
+                <button
+                  onClick={restoreAllHiddenWidgetsStaged}
+                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
+                >
+                  Stage Restore All
+                </button>
+              )}
+              {!widgetControlsLocked && (
+                <button
+                  onClick={rollbackPendingWidgetChanges}
+                  disabled={!pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Rollback
+                </button>
+              )}
+              <button
+                onClick={restoreHiddenWidgetsAfterFix}
+                disabled={!hiddenWidgetCount}
+                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Restore Widgets
+              </button>
+              {widgetControlsLocked && (
+                <button
+                  onClick={openUnlockWidgetsAfterFix}
+                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
+                >
+                  Unlock Widgets
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Candidates Table */}
-        <div className="bg-white/80 backdrop-blur rounded-xl shadow-sm border">
+        {isWidgetVisible('hrm-candidates-table-card') && (
+        <div className="bg-white/80 backdrop-blur rounded-xl shadow-sm border relative">
+          {!widgetControlsLocked && (
+            <button
+              onClick={() => stageWidgetVisibilityChange('hrm-candidates-table-card', false)}
+              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-red-500 text-white hover:bg-red-600 flex items-center justify-center text-sm z-10"
+              title="Hide this widget"
+            >
+              ×
+            </button>
+          )}
           <table className="min-w-full">
+            {isWidgetVisible('hrm-candidates-table-headings') && (
             <thead className="bg-gray-50">
               <tr>
                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600">Code</th>
@@ -884,6 +1224,7 @@ export default function Candidates() {
                 <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600">Actions</th>
               </tr>
             </thead>
+            )}
             <tbody>
               {candidates.map((candidate) => (
                 <tr key={candidate.id} className="border-t">
@@ -896,6 +1237,7 @@ export default function Candidates() {
                     <span className={`px-2 py-1 rounded-full text-xs ${getStatusColor(candidate.status)}`}>{candidate.status}</span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    {isWidgetVisible('hrm-candidates-row-action-buttons') && (
                     <div className="relative inline-block" ref={openMenuFor === candidate.id ? menuRef : undefined}>
                       <button
                         aria-haspopup="menu"
@@ -977,13 +1319,122 @@ export default function Candidates() {
                         </div>
                       )}
                     </div>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        )}
       </main>
+
+      {showSuperAdminConfirmModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => {
+              if (!superAdminConfirmLoading) rollbackPendingWidgetChanges();
+            }}
+          />
+          <div className="relative w-full max-w-lg rounded-2xl bg-white shadow-2xl border border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-semibold text-gray-900">
+                {superAdminModalMode === 'apply' && 'Super Admin Confirmation'}
+                {superAdminModalMode === 'restore' && 'Restore Hidden Widgets'}
+                {superAdminModalMode === 'unlock' && 'Unlock Widget Controls'}
+              </h3>
+              <p className="mt-1 text-sm text-gray-600">
+                {superAdminModalMode === 'apply' && 'Confirm credentials to apply and lock widget controls.'}
+                {superAdminModalMode === 'restore' && 'Confirm credentials to list and restore hidden widgets.'}
+                {superAdminModalMode === 'unlock' && 'Confirm credentials to unlock widget controls.'}
+              </p>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Super Admin Email</label>
+                <input
+                  type="email"
+                  value={superAdminEmail}
+                  onChange={(e) => setSuperAdminEmail(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="superadmin@company.com"
+                  disabled={superAdminConfirmLoading}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Super Admin Password</label>
+                <input
+                  type="password"
+                  value={superAdminPassword}
+                  onChange={(e) => setSuperAdminPassword(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                  placeholder="Enter password"
+                  disabled={superAdminConfirmLoading}
+                />
+              </div>
+
+              {superAdminModalMode === 'restore' && restoreWidgetListVisible && (
+                <div className="max-h-56 overflow-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+                  {candidateWidgetItems
+                    .filter((item) => widgetVisibility[item.id] === false)
+                    .map((item) => (
+                      <div key={item.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                        <div className="text-sm text-gray-800">{item.name}</div>
+                        <button
+                          onClick={() => restoreHiddenWidgetOneByOne(item.id)}
+                          disabled={restoreWidgetLoadingKey === item.id}
+                          className="px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {restoreWidgetLoadingKey === item.id ? 'Restoring...' : 'Restore'}
+                        </button>
+                      </div>
+                    ))}
+                  {candidateWidgetItems.filter((item) => widgetVisibility[item.id] === false).length === 0 && (
+                    <div className="px-3 py-3 text-sm text-gray-500">All widgets are visible.</div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+              <button
+                onClick={rollbackPendingWidgetChanges}
+                disabled={superAdminConfirmLoading}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              {superAdminModalMode === 'apply' && (
+                <button
+                  onClick={applyWidgetVisibilityChanges}
+                  disabled={superAdminConfirmLoading || !pendingWidgetChanges.length}
+                  className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {superAdminConfirmLoading ? 'Applying...' : 'Confirm & Lock'}
+                </button>
+              )}
+              {superAdminModalMode === 'restore' && !restoreWidgetListVisible && (
+                <button
+                  onClick={showRestoreWidgetList}
+                  disabled={superAdminConfirmLoading}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  Show Hidden Widgets
+                </button>
+              )}
+              {superAdminModalMode === 'unlock' && (
+                <button
+                  onClick={unlockWidgetControls}
+                  disabled={superAdminConfirmLoading}
+                  className="px-4 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50"
+                >
+                  {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Notification Modal */}
       {showNotice && (
@@ -1012,7 +1463,7 @@ export default function Candidates() {
       )}
 
       {/* Add/Edit Candidate Modal */}
-      {showForm && (
+      {showForm && isWidgetVisible('hrm-candidates-form-pane') && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
             <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
@@ -1022,12 +1473,16 @@ export default function Candidates() {
                     🎯
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-white">
-                      {editingCandidate ? 'Edit Candidate' : 'Add New Candidate'}
-                    </h3>
-                    <p className="text-white/80">
-                      {editingCandidate ? 'Update candidate information' : 'Create a new candidate record'}
-                    </p>
+                    {isWidgetVisible('hrm-candidates-form-heading') && (
+                      <>
+                        <h3 className="text-xl font-bold text-white">
+                          {editingCandidate ? 'Edit Candidate' : 'Add New Candidate'}
+                        </h3>
+                        <p className="text-white/80">
+                          {editingCandidate ? 'Update candidate information' : 'Create a new candidate record'}
+                        </p>
+                      </>
+                    )}
                   </div>
                 </div>
                 <button
@@ -1257,6 +1712,7 @@ export default function Candidates() {
                   />
                 </div>
 
+                {isWidgetVisible('hrm-candidates-form-action-buttons') && (
                 <div className="flex justify-end space-x-3 pt-6 border-t border-gray-100">
                   <button
                     type="button"
@@ -1284,6 +1740,7 @@ export default function Candidates() {
                     )}
                   </button>
                 </div>
+                )}
               </form>
             </div>
           </div>
@@ -1291,7 +1748,7 @@ export default function Candidates() {
       )}
 
       {/* Convert to Employee Modal */}
-      {showConvertForm && convertingCandidate && (
+      {showConvertForm && convertingCandidate && isWidgetVisible('hrm-candidates-convert-pane') && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
             <div className="bg-gradient-to-r from-green-500 to-emerald-500 p-6">
@@ -1301,12 +1758,16 @@ export default function Candidates() {
                     👔
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-white">
-                      Convert to Employee
-                    </h3>
-                    <p className="text-white/80">
-                      Transform candidate into employee
-                    </p>
+                    {isWidgetVisible('hrm-candidates-convert-heading') && (
+                      <>
+                        <h3 className="text-xl font-bold text-white">
+                          Convert to Employee
+                        </h3>
+                        <p className="text-white/80">
+                          Transform candidate into employee
+                        </p>
+                      </>
+                    )}
                   </div>
                 </div>
                 <button
@@ -1437,6 +1898,7 @@ export default function Candidates() {
                   />
                 </div>
 
+                {isWidgetVisible('hrm-candidates-convert-action-buttons') && (
                 <div className="flex justify-end space-x-3 pt-6 border-t border-gray-100">
                   <button
                     type="button"
@@ -1463,6 +1925,7 @@ export default function Candidates() {
                     )}
                   </button>
                 </div>
+                )}
               </form>
             </div>
           </div>
@@ -1470,12 +1933,13 @@ export default function Candidates() {
       )}
 
       {/* Full Profile Modal */}
-      {showProfileModal && (
+      {showProfileModal && isWidgetVisible('hrm-candidates-profile-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowProfileModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-5xl p-6">
             <div className="flex items-start justify-between mb-4">
               <div>
+                {isWidgetVisible('hrm-candidates-profile-heading') && (
                 <h3 className="text-xl font-semibold text-gray-900 flex items-center gap-3">
                   {(profileCandidate?.photo_url || profileCandidate?.photo_path) ? (
                     <img
@@ -1490,6 +1954,7 @@ export default function Candidates() {
                   )}
                   {profileCandidate ? `${profileCandidate.first_name} ${profileCandidate.last_name}` : 'Loading...'}
                 </h3>
+                )}
                 {profileCandidate && (
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
                     <span className="px-2 py-0.5 rounded-md bg-gray-100 text-gray-700 font-mono">{profileCandidate.candidate_code}</span>
@@ -1783,12 +2248,14 @@ export default function Candidates() {
       )}
 
       {/* Schedule Interview Modal */}
-      {showInterviewModal && activeCandidate && (
+      {showInterviewModal && activeCandidate && isWidgetVisible('hrm-candidates-interview-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowInterviewModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Schedule Interview - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              {isWidgetVisible('hrm-candidates-interview-heading') && (
+                <h3 className="text-lg font-semibold text-gray-900">Schedule Interview - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              )}
               <button onClick={() => setShowInterviewModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
             <form onSubmit={handleScheduleInterview} className="space-y-4">
@@ -1827,22 +2294,26 @@ export default function Candidates() {
                   )}
                 </div>
               </div>
+              {isWidgetVisible('hrm-candidates-interview-action-buttons') && (
               <div className="flex justify-end gap-3">
                 <button type="button" onClick={()=>setShowInterviewModal(false)} className="px-4 py-2 border rounded-lg">Cancel</button>
                 <button type="submit" className="px-4 py-2 rounded-lg bg-yellow-600 text-white hover:bg-yellow-700">Schedule</button>
               </div>
+              )}
             </form>
           </div>
         </div>
       )}
 
       {/* Documents Modal */}
-      {showDocsModal && activeCandidate && (
+      {showDocsModal && activeCandidate && isWidgetVisible('hrm-candidates-documents-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowDocsModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-2xl p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Documents - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              {isWidgetVisible('hrm-candidates-documents-heading') && (
+                <h3 className="text-lg font-semibold text-gray-900">Documents - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              )}
               <button onClick={() => setShowDocsModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
             <form onSubmit={uploadDocument} className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
@@ -1885,12 +2356,14 @@ export default function Candidates() {
       )}
 
       {/* Education Modal */}
-      {showEduModal && activeCandidate && (
+      {showEduModal && activeCandidate && isWidgetVisible('hrm-candidates-education-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowEduModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-3xl p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Education - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              {isWidgetVisible('hrm-candidates-education-heading') && (
+                <h3 className="text-lg font-semibold text-gray-900">Education - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              )}
               <button onClick={() => setShowEduModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
             <form onSubmit={addEducation} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
@@ -1932,12 +2405,14 @@ export default function Candidates() {
       )}
 
       {/* Experience Modal */}
-      {showExpModal && activeCandidate && (
+      {showExpModal && activeCandidate && isWidgetVisible('hrm-candidates-experience-pane') && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowExpModal(false)} />
           <div className="relative bg-white rounded-2xl shadow-xl w-full max-w-3xl p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Career History - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              {isWidgetVisible('hrm-candidates-experience-heading') && (
+                <h3 className="text-lg font-semibold text-gray-900">Career History - {activeCandidate.first_name} {activeCandidate.last_name}</h3>
+              )}
               <button onClick={() => setShowExpModal(false)} className="text-gray-500 hover:text-gray-700">✕</button>
             </div>
             <form onSubmit={addExperience} className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">

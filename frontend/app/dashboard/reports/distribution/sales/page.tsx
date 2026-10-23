@@ -217,7 +217,9 @@ export default function DistributionSalesReportPage() {
 
   const fetchPaginated = useCallback(async <T,>(endpoint: string, authToken: string) => {
     const rows: T[] = [];
-    let nextUrl: string | null = `${API_URL}/api/${endpoint}?per_page=200`;
+    const normalizedEndpoint = endpoint.replace(/^\/+/, '');
+    const queryJoiner = normalizedEndpoint.includes('?') ? '&' : '?';
+    let nextUrl: string | null = `${API_URL}/api/${normalizedEndpoint}${queryJoiner}per_page=200`;
     let pageCount = 0;
     const visitedUrls = new Set<string>();
 
@@ -400,7 +402,7 @@ export default function DistributionSalesReportPage() {
       setErrorMessage('');
 
       const [invoiceRows, paymentRows, loadRows] = await Promise.all([
-        fetchPaginated<InvoiceRow>('distribution/invoices', tokenToUse),
+        fetchPaginated<InvoiceRow>('distribution/invoices?exclude_cancelled=1', tokenToUse),
         fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
         axios
           .get(`${API_URL}/api/vehicle-loading/loads`, {
