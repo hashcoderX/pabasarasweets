@@ -755,19 +755,6 @@ export default function DistributionCustomersPage() {
       </nav>
 
       <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
 
         {isWidgetVisible('distribution-customers-hero-card') && <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>

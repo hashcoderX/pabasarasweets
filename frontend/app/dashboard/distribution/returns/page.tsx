@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -45,6 +45,7 @@ type InventoryOption = {
 type ReturnLineItem = {
   lineId: string;
   inventory_item_id: string;
+  item_search: string;
   quantity: string;
   amount: string;
 };
@@ -58,6 +59,11 @@ export default function DistributionReturnsPage() {
   const [returns, setReturns] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [invoices, setInvoices] = useState<any[]>([]);
+  const [assignedRouteIds, setAssignedRouteIds] = useState<string[]>([]);
+  const [serverAllocatedRouteIds, setServerAllocatedRouteIds] = useState<string[] | null>(null);
+  const [customerPickerSearch, setCustomerPickerSearch] = useState('');
+  const [showCustomerPicker, setShowCustomerPicker] = useState(false);
+  const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
   const [inventory, setInventory] = useState<InventoryOption[]>([]);
   const [viewReturn, setViewReturn] = useState<any | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
@@ -66,8 +72,10 @@ export default function DistributionReturnsPage() {
   const [isOnline, setIsOnline] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [returnLineItems, setReturnLineItems] = useState<ReturnLineItem[]>([
-    { lineId: `line-${Date.now()}`, inventory_item_id: '', quantity: '', amount: '' },
+    { lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' },
   ]);
+  const [activeItemPickerLineId, setActiveItemPickerLineId] = useState<string | null>(null);
+  const [highlightedItemIndex, setHighlightedItemIndex] = useState(-1);
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
   const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
@@ -92,8 +100,14 @@ export default function DistributionReturnsPage() {
     notes: '',
     inventory_item_id: '',
   });
+  const customerPickerRef = useRef<HTMLDivElement | null>(null);
 
   const router = useRouter();
+
+  const normalizeRouteIds = (routeIdsRaw: unknown): string[] => {
+    if (!Array.isArray(routeIdsRaw)) return [];
+    return Array.from(new Set(routeIdsRaw.map((routeId) => String(routeId || '').trim()).filter(Boolean)));
+  };
 
   const resetReturnForm = () => {
     setForm({
@@ -108,11 +122,22 @@ export default function DistributionReturnsPage() {
       notes: '',
       inventory_item_id: '',
     });
-    setReturnLineItems([{ lineId: `line-${Date.now()}`, inventory_item_id: '', quantity: '', amount: '' }]);
+    setReturnLineItems([{ lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' }]);
+    setActiveItemPickerLineId(null);
+    setHighlightedItemIndex(-1);
+    setCustomerPickerSearch('');
+    setShowCustomerPicker(false);
+    setHighlightedCustomerIndex(-1);
   };
 
   const getInventoryCode = (item: InventoryOption) =>
     String(item.code || item.item_code || item.product_code || item.sku || '').trim();
+
+  const getInventoryLabel = (item: InventoryOption) => {
+    const code = getInventoryCode(item) || '-';
+    const name = String(item.name || '-');
+    return `${code} - ${name}`;
+  };
 
   const isRawMaterialInventory = (item: InventoryOption) => {
     const code = getInventoryCode(item).toLowerCase();
@@ -277,6 +302,30 @@ export default function DistributionReturnsPage() {
   }, [router]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const cachedRouteIdsRaw = window.localStorage.getItem('distribution_assigned_route_ids');
+    const cachedRouteId = window.localStorage.getItem('distribution_assigned_route_id');
+
+    if (cachedRouteIdsRaw) {
+      try {
+        const parsed = JSON.parse(cachedRouteIdsRaw);
+        const normalized = normalizeRouteIds(parsed);
+        if (normalized.length > 0) {
+          setAssignedRouteIds(normalized);
+          return;
+        }
+      } catch {
+        // Ignore malformed cached route list.
+      }
+    }
+
+    if (cachedRouteId && String(cachedRouteId).trim()) {
+      setAssignedRouteIds([String(cachedRouteId).trim()]);
+    }
+  }, []);
+
+  useEffect(() => {
     if (token) {
       fetchData();
       fetchWidgetVisibility(token);
@@ -309,12 +358,20 @@ export default function DistributionReturnsPage() {
   const fetchData = useCallback(async () => {
     try {
       setLoading(true);
+      const profileRes = await axios.get('/api/me', {
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => null);
+
       const [returnsRes, customersRes, invoicesRes, inventoryRes] = await Promise.all([
         axios.get('/api/distribution/returns', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
         axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
         axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
         axios.get('/api/stock/inventory', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
       ]);
+
+      const profileRoot = profileRes?.data?.data ?? profileRes?.data ?? {};
+      const allocatedRouteIds = normalizeRouteIds((profileRoot as { allocated_route_ids?: unknown[] })?.allocated_route_ids);
+      setServerAllocatedRouteIds(allocatedRouteIds.length > 0 ? allocatedRouteIds : null);
 
       setReturns(returnsRes.data?.data?.data || []);
       setCustomers(customersRes.data?.data?.data || []);
@@ -333,6 +390,131 @@ export default function DistributionReturnsPage() {
       setLoading(false);
     }
   }, [token]);
+
+  const effectiveAllocatedRouteIds = useMemo(
+    () => serverAllocatedRouteIds ?? assignedRouteIds,
+    [serverAllocatedRouteIds, assignedRouteIds]
+  );
+
+  const scopedCustomers = useMemo(() => {
+    if (effectiveAllocatedRouteIds.length === 0) return customers;
+    const routeIdSet = new Set(effectiveAllocatedRouteIds);
+    return customers.filter((customer) => routeIdSet.has(String(customer?.route_id || '')));
+  }, [customers, effectiveAllocatedRouteIds]);
+
+  const selectedCustomer = useMemo(
+    () => scopedCustomers.find((customer) => Number(customer?.id) === Number(form.customer_id)) || null,
+    [scopedCustomers, form.customer_id]
+  );
+
+  const customerSuggestions = useMemo(() => {
+    const term = customerPickerSearch.trim().toLowerCase();
+    const source = scopedCustomers;
+    const filtered = !term
+      ? source
+      : source.filter((customer) => {
+          const shopName = String(customer?.shop_name || '').toLowerCase();
+          const code = String(customer?.customer_code || '').toLowerCase();
+          return shopName.includes(term) || code.includes(term);
+        });
+    return filtered.slice(0, 12);
+  }, [scopedCustomers, customerPickerSearch]);
+
+  const customerRouteById = useMemo(() => {
+    const map = new Map<number, string>();
+    customers.forEach((customer) => {
+      map.set(Number(customer?.id), String(customer?.route_id || ''));
+    });
+    return map;
+  }, [customers]);
+
+  const scopedInvoices = useMemo(() => {
+    if (effectiveAllocatedRouteIds.length === 0) return invoices;
+    const routeIdSet = new Set(effectiveAllocatedRouteIds);
+    return invoices.filter((invoice) => {
+      const routeFromInvoice = String(invoice?.customer?.route_id || customerRouteById.get(Number(invoice?.customer_id)) || '');
+      return routeIdSet.has(routeFromInvoice);
+    });
+  }, [invoices, effectiveAllocatedRouteIds, customerRouteById]);
+
+  const linkedInvoiceOptions = useMemo(() => {
+    const selectedCustomerId = Number(form.customer_id || 0);
+    const rows = selectedCustomerId
+      ? scopedInvoices.filter((invoice) => Number(invoice?.customer_id || 0) === selectedCustomerId)
+      : scopedInvoices;
+    return [...rows].sort((a, b) => {
+      const aDate = new Date(String(a?.invoice_date || 0)).getTime();
+      const bDate = new Date(String(b?.invoice_date || 0)).getTime();
+      if (aDate !== bDate) return bDate - aDate;
+      return Number(b?.id || 0) - Number(a?.id || 0);
+    });
+  }, [scopedInvoices, form.customer_id]);
+
+  const returnItemOptions = useMemo(
+    () => inventory.filter((item) => !isRawMaterialInventory(item)),
+    [inventory]
+  );
+
+  const getReturnItemSuggestions = useCallback(
+    (line: ReturnLineItem) => {
+      const term = String(line.item_search || '').trim().toLowerCase();
+      const rows = !term
+        ? returnItemOptions
+        : returnItemOptions.filter((item) => {
+            const code = getInventoryCode(item).toLowerCase();
+            const name = String(item.name || '').toLowerCase();
+            return code.includes(term) || name.includes(term);
+          });
+      return rows.slice(0, 12);
+    },
+    [returnItemOptions]
+  );
+
+  useEffect(() => {
+    setReturnLineItems((prev) => {
+      let changed = false;
+      const next = prev.map((line) => {
+        if (line.item_search) return line;
+        const picked = returnItemOptions.find((item) => Number(item.id) === Number(line.inventory_item_id));
+        if (!picked) return line;
+        changed = true;
+        return { ...line, item_search: getInventoryLabel(picked) };
+      });
+      return changed ? next : prev;
+    });
+  }, [returnItemOptions]);
+
+  useEffect(() => {
+    if (!showCreateModal || !form.customer_id || customerPickerSearch.trim()) return;
+    if (!selectedCustomer) return;
+    const label = selectedCustomer.customer_code
+      ? `${selectedCustomer.shop_name} (${selectedCustomer.customer_code})`
+      : String(selectedCustomer.shop_name || '');
+    setCustomerPickerSearch(label);
+  }, [showCreateModal, form.customer_id, customerPickerSearch, selectedCustomer]);
+
+  useEffect(() => {
+    if (!showCreateModal || !showCustomerPicker) return;
+    const onDocumentClick = (event: MouseEvent) => {
+      if (!customerPickerRef.current) return;
+      const target = event.target as Node;
+      if (!customerPickerRef.current.contains(target)) {
+        setShowCustomerPicker(false);
+        setHighlightedCustomerIndex(-1);
+      }
+    };
+
+    document.addEventListener('mousedown', onDocumentClick);
+    return () => document.removeEventListener('mousedown', onDocumentClick);
+  }, [showCreateModal, showCustomerPicker]);
+
+  useEffect(() => {
+    if (!form.distribution_invoice_id) return;
+    const exists = linkedInvoiceOptions.some((invoice) => Number(invoice?.id) === Number(form.distribution_invoice_id));
+    if (!exists) {
+      setForm((prev) => ({ ...prev, distribution_invoice_id: '' }));
+    }
+  }, [form.distribution_invoice_id, linkedInvoiceOptions]);
 
   const syncOfflineReturns = useCallback(async () => {
     if (!token || syncingOfflineReturns || pendingOfflineReturns.length === 0) return;
@@ -391,6 +573,19 @@ export default function DistributionReturnsPage() {
 
   const createReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!form.customer_id) {
+      alert('Please select a customer.');
+      return;
+    }
+
+    if (effectiveAllocatedRouteIds.length > 0) {
+      const isScopedCustomer = scopedCustomers.some((customer) => Number(customer?.id) === Number(form.customer_id));
+      if (!isScopedCustomer) {
+        alert('Selected customer is not in your allocated route.');
+        return;
+      }
+    }
 
     const validLineItems = returnLineItems.filter((line) => {
       const qty = Number(line.quantity || 0);
@@ -507,19 +702,6 @@ export default function DistributionReturnsPage() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
 
         {isWidgetVisible('distribution-returns-offline-status-card') && <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
@@ -659,17 +841,96 @@ export default function DistributionReturnsPage() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
-                  <select
-                    value={form.customer_id}
-                    onChange={(e) => setForm({ ...form, customer_id: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                    required
-                  >
-                    <option value="">Select Customer</option>
-                    {customers.map((customer) => (
-                      <option key={customer.id} value={customer.id}>{customer.shop_name}</option>
-                    ))}
-                  </select>
+                  <div ref={customerPickerRef} className="relative">
+                    <input
+                      type="text"
+                      value={customerPickerSearch}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setCustomerPickerSearch(value);
+                        setForm((prev) => ({ ...prev, customer_id: '', distribution_invoice_id: '' }));
+                        setShowCustomerPicker(true);
+                        setHighlightedCustomerIndex(-1);
+                      }}
+                      onFocus={() => {
+                        setShowCustomerPicker(true);
+                        setHighlightedCustomerIndex(-1);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          setShowCustomerPicker(true);
+                          setHighlightedCustomerIndex((prev) => {
+                            const next = prev + 1;
+                            return next >= customerSuggestions.length ? 0 : next;
+                          });
+                        } else if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          setShowCustomerPicker(true);
+                          setHighlightedCustomerIndex((prev) => {
+                            const next = prev - 1;
+                            return next < 0 ? customerSuggestions.length - 1 : next;
+                          });
+                        } else if (e.key === 'Enter') {
+                          if (showCustomerPicker && customerSuggestions.length > 0) {
+                            e.preventDefault();
+                            const pickedIndex = highlightedCustomerIndex >= 0 ? highlightedCustomerIndex : 0;
+                            const picked = customerSuggestions[pickedIndex];
+                            if (picked) {
+                              const label = picked.customer_code
+                                ? `${picked.shop_name} (${picked.customer_code})`
+                                : String(picked.shop_name || '');
+                              setForm((prev) => ({ ...prev, customer_id: String(picked.id), distribution_invoice_id: '' }));
+                              setCustomerPickerSearch(label);
+                              setShowCustomerPicker(false);
+                              setHighlightedCustomerIndex(-1);
+                            }
+                          }
+                        } else if (e.key === 'Escape') {
+                          setShowCustomerPicker(false);
+                          setHighlightedCustomerIndex(-1);
+                        }
+                      }}
+                      placeholder="Type customer name or code"
+                      className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                      required
+                    />
+                    <input type="hidden" value={form.customer_id} required />
+
+                    {showCustomerPicker && customerSuggestions.length > 0 && (
+                      <div className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+                        {customerSuggestions.map((customer, index) => {
+                          const isHighlighted = index === highlightedCustomerIndex;
+                          return (
+                            <button
+                              key={customer.id}
+                              type="button"
+                              onMouseEnter={() => setHighlightedCustomerIndex(index)}
+                              onClick={() => {
+                                const label = customer.customer_code
+                                  ? `${customer.shop_name} (${customer.customer_code})`
+                                  : String(customer.shop_name || '');
+                                setForm((prev) => ({ ...prev, customer_id: String(customer.id), distribution_invoice_id: '' }));
+                                setCustomerPickerSearch(label);
+                                setShowCustomerPicker(false);
+                                setHighlightedCustomerIndex(-1);
+                              }}
+                              className={`block w-full px-3 py-2 text-left text-sm ${isHighlighted ? 'bg-emerald-50 text-emerald-900' : 'text-gray-800 hover:bg-gray-50'}`}
+                            >
+                              <span className="font-medium">{customer.shop_name}</span>
+                              {customer.customer_code && <span className="ml-1 text-xs text-gray-500">({customer.customer_code})</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {showCustomerPicker && customerSuggestions.length === 0 && customerPickerSearch.trim() && (
+                      <div className="absolute z-20 mt-1 w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-500 shadow-lg">
+                        No customers found in your allocated routes.
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Linked Invoice (optional)</label>
@@ -679,7 +940,7 @@ export default function DistributionReturnsPage() {
                     className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
                   >
                     <option value="">Select Invoice</option>
-                    {invoices.map((invoice) => (
+                    {linkedInvoiceOptions.map((invoice) => (
                       <option key={invoice.id} value={invoice.id}>{invoice.invoice_number}</option>
                     ))}
                   </select>
@@ -707,7 +968,7 @@ export default function DistributionReturnsPage() {
                     onClick={() =>
                       setReturnLineItems((prev) => [
                         ...prev,
-                        { lineId: `line-${Date.now()}-${prev.length}`, inventory_item_id: '', quantity: '', amount: '' },
+                        { lineId: `line-${Date.now()}-${prev.length}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' },
                       ])
                     }
                     className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"
@@ -721,23 +982,120 @@ export default function DistributionReturnsPage() {
                     <div key={line.lineId} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end rounded-md border border-gray-200 p-2">
                       <div className="md:col-span-6">
                         <label className="block text-xs font-medium text-gray-700 mb-1">Item</label>
-                        <select
-                          value={line.inventory_item_id}
-                          onChange={(e) =>
-                            setReturnLineItems((prev) =>
-                              prev.map((row) =>
-                                row.lineId === line.lineId ? { ...row, inventory_item_id: e.target.value } : row
-                              )
-                            )
-                          }
-                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-                          required={index === 0}
-                        >
-                          <option value="">Select Item</option>
-                          {inventory.filter((item) => !isRawMaterialInventory(item)).map((item) => (
-                            <option key={item.id} value={item.id}>{getInventoryCode(item) || '-'} - {item.name || '-'}</option>
-                          ))}
-                        </select>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={line.item_search}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setReturnLineItems((prev) =>
+                                prev.map((row) =>
+                                  row.lineId === line.lineId
+                                    ? { ...row, item_search: value, inventory_item_id: '' }
+                                    : row
+                                )
+                              );
+                              setActiveItemPickerLineId(line.lineId);
+                              setHighlightedItemIndex(-1);
+                            }}
+                            onFocus={() => {
+                              setActiveItemPickerLineId(line.lineId);
+                              setHighlightedItemIndex(-1);
+                            }}
+                            onBlur={() => {
+                              window.setTimeout(() => {
+                                setActiveItemPickerLineId((prev) => (prev === line.lineId ? null : prev));
+                                setHighlightedItemIndex(-1);
+                              }, 120);
+                            }}
+                            onKeyDown={(e) => {
+                              const suggestions = getReturnItemSuggestions(line);
+                              if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setActiveItemPickerLineId(line.lineId);
+                                setHighlightedItemIndex((prev) => {
+                                  const next = prev + 1;
+                                  return next >= suggestions.length ? 0 : next;
+                                });
+                              } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setActiveItemPickerLineId(line.lineId);
+                                setHighlightedItemIndex((prev) => {
+                                  const next = prev - 1;
+                                  return next < 0 ? suggestions.length - 1 : next;
+                                });
+                              } else if (e.key === 'Enter') {
+                                if (activeItemPickerLineId === line.lineId && suggestions.length > 0) {
+                                  e.preventDefault();
+                                  const pickedIndex = highlightedItemIndex >= 0 ? highlightedItemIndex : 0;
+                                  const picked = suggestions[pickedIndex];
+                                  if (picked) {
+                                    setReturnLineItems((prev) =>
+                                      prev.map((row) =>
+                                        row.lineId === line.lineId
+                                          ? {
+                                              ...row,
+                                              inventory_item_id: String(picked.id),
+                                              item_search: getInventoryLabel(picked),
+                                            }
+                                          : row
+                                      )
+                                    );
+                                    setActiveItemPickerLineId(null);
+                                    setHighlightedItemIndex(-1);
+                                  }
+                                }
+                              } else if (e.key === 'Escape') {
+                                setActiveItemPickerLineId(null);
+                                setHighlightedItemIndex(-1);
+                              }
+                            }}
+                            className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                            placeholder="Select Item"
+                            required={index === 0}
+                          />
+                          <input type="hidden" value={line.inventory_item_id} required={index === 0} />
+
+                          {activeItemPickerLineId === line.lineId && getReturnItemSuggestions(line).length > 0 && (
+                            <div className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+                              {getReturnItemSuggestions(line).map((item, suggestionIndex) => {
+                                const isHighlighted = highlightedItemIndex === suggestionIndex;
+                                return (
+                                  <button
+                                    key={`${line.lineId}-${item.id}`}
+                                    type="button"
+                                    onMouseEnter={() => setHighlightedItemIndex(suggestionIndex)}
+                                    onMouseDown={(e) => {
+                                      e.preventDefault();
+                                      setReturnLineItems((prev) =>
+                                        prev.map((row) =>
+                                          row.lineId === line.lineId
+                                            ? {
+                                                ...row,
+                                                inventory_item_id: String(item.id),
+                                                item_search: getInventoryLabel(item),
+                                              }
+                                            : row
+                                        )
+                                      );
+                                      setActiveItemPickerLineId(null);
+                                      setHighlightedItemIndex(-1);
+                                    }}
+                                    className={`block w-full px-3 py-2 text-left text-sm ${isHighlighted ? 'bg-emerald-50 text-emerald-900' : 'text-gray-800 hover:bg-gray-50'}`}
+                                  >
+                                    {getInventoryLabel(item)}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {activeItemPickerLineId === line.lineId && getReturnItemSuggestions(line).length === 0 && line.item_search.trim() && (
+                            <div className="absolute z-20 mt-1 w-full rounded-md border border-gray-200 bg-white px-3 py-2 text-xs text-gray-500 shadow-lg">
+                              No items found.
+                            </div>
+                          )}
+                        </div>
                       </div>
                       <div className="md:col-span-2">
                         <label className="block text-xs font-medium text-gray-700 mb-1">Qty</label>

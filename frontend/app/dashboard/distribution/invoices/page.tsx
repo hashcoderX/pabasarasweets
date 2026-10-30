@@ -40,6 +40,7 @@ interface LoadItemSuggestion {
 interface InvoiceItem {
   id: number;
   inventory_item_id: number | null;
+  source_load_item_id?: number | null;
   item_code: string;
   item_name: string;
   unit: string | null;
@@ -227,6 +228,16 @@ type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
 type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 const OFFLINE_INVOICE_STORAGE_KEY = 'distribution_offline_invoices';
+const INVOICES_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_API_TIMEOUT_MS = 30000;
+const LONG_API_TIMEOUT_MS = 45000;
+
+type InvoicesPageCache = {
+  savedAt: number;
+  items: Item[];
+  invoices: InvoiceRecord[];
+};
+
 export default function DistributionInvoicesPage() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
@@ -286,7 +297,7 @@ export default function DistributionInvoicesPage() {
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'check' | 'bank_transfer' | 'bill_to_bill'>('cash');
   const [paymentAmount, setPaymentAmount] = useState('');
   const [outstandingPaymentAmount, setOutstandingPaymentAmount] = useState('');
-  const [lastBillAmount, setLastBillAmount] = useState('');
+  const [billToBillPaidAmount, setBillToBillPaidAmount] = useState('');
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentChequeDate, setPaymentChequeDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentReference, setPaymentReference] = useState('');
@@ -340,9 +351,50 @@ export default function DistributionInvoicesPage() {
   const pageSize = 10;
 
   const [editingInvoiceId, setEditingInvoiceId] = useState<number | null>(null);
+  const [originalLoadReservedByLoadItemId, setOriginalLoadReservedByLoadItemId] = useState<Record<number, number>>({});
 
   const router = useRouter();
   const createLineId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const getInvoicesPageCacheKey = (authToken: string) => `distribution_invoices_page_cache_${authToken.slice(-16)}`;
+
+  const hydrateInvoicesPageFromCache = (authToken?: string): boolean => {
+    if (typeof window === 'undefined') return false;
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return false;
+
+    try {
+      const raw = window.localStorage.getItem(getInvoicesPageCacheKey(tokenToUse));
+      if (!raw) return false;
+
+      const parsed = JSON.parse(raw) as InvoicesPageCache | null;
+      if (!parsed || !Array.isArray(parsed.items) || !Array.isArray(parsed.invoices)) return false;
+
+      const age = Date.now() - Number(parsed.savedAt || 0);
+      if (age > INVOICES_PAGE_CACHE_TTL_MS) return false;
+
+      setItems(parsed.items);
+      setInvoices(parsed.invoices);
+      setInvoiceNumber(generateInvoiceNumber());
+      setLoading(false);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const saveInvoicesPageToCache = (nextItems: Item[], nextInvoices: InvoiceRecord[]) => {
+    if (typeof window === 'undefined' || !token) return;
+    try {
+      const payload: InvoicesPageCache = {
+        savedAt: Date.now(),
+        items: nextItems,
+        invoices: nextInvoices,
+      };
+      window.localStorage.setItem(getInvoicesPageCacheKey(token), JSON.stringify(payload));
+    } catch (error) {
+      console.error('Failed to persist invoices page cache:', error);
+    }
+  };
   const invoiceWidgetItems = [
     { id: 'distribution-invoices-nav-back-button', name: 'Invoices Back Button' },
     { id: 'distribution-invoices-hero-card', name: 'Invoices Hero Card' },
@@ -368,6 +420,7 @@ export default function DistributionInvoicesPage() {
     try {
       const response = await axios.get('/api/dashboard/widgets/me', {
         headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+        timeout: DEFAULT_API_TIMEOUT_MS,
       });
       setWidgetVisibility(response.data?.data?.widgets || {});
       setWidgetControlsLocked(Boolean(response.data?.data?.widget_controls_locked));
@@ -475,6 +528,13 @@ export default function DistributionInvoicesPage() {
     return apiError.response?.data?.message;
   };
 
+  const isTimeoutError = (error: unknown) => {
+    const apiError = toApiErrorLike(error);
+    const code = String(apiError.code || '');
+    const message = error instanceof Error ? error.message.toLowerCase() : '';
+    return code === 'ECONNABORTED' || message.includes('timeout');
+  };
+
   const unlockWidgetControls = async () => {
     if (!token || !superAdminEmail.trim() || !superAdminPassword) return;
     const fallbackWidgetKey = invoiceWidgetItems[0]?.id || 'distribution-invoices-nav-back-button';
@@ -532,6 +592,7 @@ export default function DistributionInvoicesPage() {
 
   useEffect(() => {
     if (token) {
+      hydrateInvoicesPageFromCache(token);
       resolveAssignedRoute();
       fetchData();
       fetchWidgetVisibility(token);
@@ -609,6 +670,7 @@ export default function DistributionInvoicesPage() {
     try {
       const userRes = await axios.get('/api/user', {
         headers: { Authorization: `Bearer ${token}` },
+        timeout: DEFAULT_API_TIMEOUT_MS,
       });
 
       const employeeId = Number(userRes.data?.employee_id || userRes.data?.employee?.id || 0);
@@ -627,6 +689,7 @@ export default function DistributionInvoicesPage() {
 
       const loadsRes = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` },
+        timeout: LONG_API_TIMEOUT_MS,
       });
 
       const loads: LoadApiRecord[] = Array.isArray(loadsRes.data)
@@ -712,7 +775,11 @@ export default function DistributionInvoicesPage() {
         localStorage.setItem('distribution_assigned_route_ids', JSON.stringify([routeFromQuery]));
       }
     } catch (error) {
-      console.error('Error resolving assigned route on invoices page:', error);
+      if (isTimeoutError(error)) {
+        console.warn('Resolve assigned route request timed out; using cached/default route state.');
+      } else {
+        console.error('Error resolving assigned route on invoices page:', error);
+      }
     }
   };
 
@@ -911,6 +978,7 @@ export default function DistributionInvoicesPage() {
       const response = await axios.get('/api/vehicle-loading/load-items', {
         headers: { Authorization: `Bearer ${token}` },
         params: { load_id: loadId },
+        timeout: DEFAULT_API_TIMEOUT_MS,
       });
       const raw = Array.isArray(response.data) ? response.data : (response.data?.data || []);
       const mapped: LoadItemInfo[] = raw.map((li: { id?: unknown; load_id?: unknown; product_code?: unknown; name?: unknown; loaded_qty?: unknown; qty?: unknown; sell_price?: unknown }) => ({
@@ -924,7 +992,11 @@ export default function DistributionInvoicesPage() {
       }));
       setLoadItems(mapped);
     } catch (error) {
-      console.error('Error fetching active load items for invoices:', error);
+      if (isTimeoutError(error)) {
+        console.warn('Load items request timed out; showing empty load item suggestions.');
+      } else {
+        console.error('Error fetching active load items for invoices:', error);
+      }
       setLoadItems([]);
     }
   };
@@ -953,6 +1025,7 @@ export default function DistributionInvoicesPage() {
           per_page: 50,
           ...(activeLoadId ? { load_id: Number(activeLoadId) } : {}),
         },
+        timeout: DEFAULT_API_TIMEOUT_MS,
       });
 
       if (requestId !== customerLookupRequestRef.current) return;
@@ -973,9 +1046,12 @@ export default function DistributionInvoicesPage() {
       setCustomers(rows as Customer[]);
     } catch (error) {
       if (requestId !== customerLookupRequestRef.current) return;
-      console.error('Error searching distribution customers:', error);
+      if (isTimeoutError(error)) {
+        console.warn('Customer search request timed out; try a shorter search term.');
+      } else {
+        console.error('Error searching distribution customers:', error);
+      }
       setCustomers([]);
-      setServerAllocatedRouteIds(null);
       setServerAllocatedRouteIds(null);
     }
   };
@@ -983,8 +1059,12 @@ export default function DistributionInvoicesPage() {
   const fetchData = async () => {
     if (!token) return;
 
+    const cacheHydrated = hydrateInvoicesPageFromCache(token);
+
     try {
-      setLoading(true);
+      if (!cacheHydrated) {
+        setLoading(true);
+      }
       const [inventoryRes, invoicesRes] = await Promise.all([
         axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${token}` },
@@ -1007,18 +1087,18 @@ export default function DistributionInvoicesPage() {
           ? inventoryPayload
           : [];
 
-      setItems(
-        inventoryRows
-          .filter((item: { status?: unknown }) => item.status === 'active')
-          .map((item: { id?: unknown; name?: unknown; code?: unknown; unit?: unknown; sell_price?: unknown; current_stock?: unknown }) => ({
-            id: item.id,
-            name: item.name,
-            code: item.code,
-            unit: item.unit,
-            sell_price: Number(item.sell_price) || 0,
-            current_stock: Number(item.current_stock) || 0,
-          })),
-      );
+      const mappedItems: Item[] = inventoryRows
+        .filter((item: { status?: unknown }) => item.status === 'active')
+        .map((item: { id?: unknown; name?: unknown; code?: unknown; unit?: unknown; sell_price?: unknown; current_stock?: unknown }) => ({
+          id: Number(item.id) || 0,
+          name: String(item.name || ''),
+          code: String(item.code || ''),
+          unit: String(item.unit || ''),
+          sell_price: Number(item.sell_price) || 0,
+          current_stock: Number(item.current_stock) || 0,
+        }));
+
+      setItems(mappedItems);
 
       const invoicePayload = invoicesRes.data?.data;
       const invoiceRows = Array.isArray(invoicePayload?.data)
@@ -1026,8 +1106,10 @@ export default function DistributionInvoicesPage() {
         : Array.isArray(invoicePayload)
           ? invoicePayload
           : [];
-      setInvoices(invoiceRows as InvoiceRecord[]);
+      const mappedInvoices = invoiceRows as InvoiceRecord[];
+      setInvoices(mappedInvoices);
       setInvoiceNumber(generateInvoiceNumber());
+      saveInvoicesPageToCache(mappedItems, mappedInvoices);
     } catch (error) {
       const errorCode = typeof error === 'object' && error !== null && 'code' in error
         ? String((error as Record<string, unknown>).code || '')
@@ -1063,6 +1145,7 @@ export default function DistributionInvoicesPage() {
           do_only: 1,
           ...(loadId ? { load_id: Number(loadId) } : {}),
         },
+        timeout: LONG_API_TIMEOUT_MS,
       });
 
       const payload = doRes.data?.data;
@@ -1105,7 +1188,11 @@ export default function DistributionInvoicesPage() {
       if (requestId !== deliveryOrderRequestRef.current) return;
       const status = toApiErrorLike(error).response?.status;
       if (status !== 401 && status !== 403) {
-        console.error('Error loading delivery orders for invoices page:', error);
+        if (isTimeoutError(error)) {
+          console.warn('Delivery orders request timed out; keeping existing delivery order list.');
+        } else {
+          console.error('Error loading delivery orders for invoices page:', error);
+        }
       }
       setDeliveryOrders([]);
     }
@@ -1193,7 +1280,8 @@ export default function DistributionInvoicesPage() {
         .filter((line) => line.source_load_item_id === matchingLoad.id)
         .reduce((sum, line) => sum + line.quantity, 0);
 
-      const remainingFromLoad = Number(matchingLoad.qty) - alreadyOnInvoice;
+      const originalReserved = Number(originalLoadReservedByLoadItemId[matchingLoad.id] || 0);
+      const remainingFromLoad = Number(matchingLoad.qty) + originalReserved - alreadyOnInvoice;
 
       if (remainingFromLoad <= 0) {
         setQtyWarningMessage(
@@ -1323,7 +1411,8 @@ export default function DistributionInvoicesPage() {
           .filter((l) => l.source_load_item_id === matchingLoad.id && l.line_id !== line.line_id)
           .reduce((sum, l) => sum + l.quantity, 0);
 
-        const remainingFromLoad = Number(matchingLoad.qty) - otherLinesTotal;
+        const originalReserved = Number(originalLoadReservedByLoadItemId[matchingLoad.id] || 0);
+        const remainingFromLoad = Number(matchingLoad.qty) + originalReserved - otherLinesTotal;
 
         if (remainingFromLoad <= 0) {
           setQtyWarningMessage(
@@ -1422,6 +1511,36 @@ export default function DistributionInvoicesPage() {
         const amount = updates.amount !== undefined ? Math.max(0, Number(updates.amount) || 0) : line.amount;
         const isDamaged = updates.is_damaged !== undefined ? Boolean(updates.is_damaged) : line.is_damaged;
 
+        if (inlineReturnMode === 'exchange') {
+          const activeLoadNumeric = Number(activeLoadId) || undefined;
+          const matchingLoad = loadItems.find(
+            (li) =>
+              li.product_code === line.item_code &&
+              (!activeLoadNumeric || li.load_id === activeLoadNumeric)
+          );
+
+          if (!matchingLoad) {
+            setQtyWarningMessage(
+              `No load stock entry found for ${line.item_code}. Select a load with this item before using exchange.`
+            );
+            setQtyWarningOpen(true);
+            return line;
+          }
+
+          const reservedByOtherExchangeLines = prev
+            .filter((entry) => entry.inventory_item_id !== itemId && entry.item_code === line.item_code)
+            .reduce((sum, entry) => sum + Number(entry.quantity || 0), 0);
+
+          const remainingFromLoad = Number(matchingLoad.qty) - reservedByOtherExchangeLines;
+          if (qty > remainingFromLoad + 1e-9) {
+            setQtyWarningMessage(
+              `Exchange stock not enough for ${line.item_code}. Available from load: ${remainingFromLoad.toFixed(2)} ${line.unit}.`
+            );
+            setQtyWarningOpen(true);
+            return line;
+          }
+        }
+
         return {
           ...line,
           quantity: qty,
@@ -1481,6 +1600,36 @@ export default function DistributionInvoicesPage() {
       return Boolean(belongsToActiveLoad || belongsToAllocatedRoute);
     });
   }, [invoices, assignedRouteIds, isAdmin, activeLoadId]);
+
+  const customerOutstandingPreview = useMemo(() => {
+    const selectedCustomerId = Number(customerId || 0);
+    if (!selectedCustomerId) {
+      return null;
+    }
+
+    const customerInvoiceRows = scopedInvoices.filter(
+      (invoice) => Number(invoice.customer_id || 0) === selectedCustomerId
+    );
+
+    const dueRows = customerInvoiceRows.filter((invoice) => {
+      const status = String(invoice?.status || '').toLowerCase();
+      return status !== 'paid' && status !== 'cancelled' && getInvoiceDueBalance(invoice) > 0;
+    });
+
+    const totalDue = dueRows.reduce((sum, invoice) => sum + getInvoiceDueBalance(invoice), 0);
+    const lastDueInvoice = [...dueRows].sort((a, b) => {
+      const aDate = new Date(String(a?.invoice_date || a?.due_date || 0)).getTime();
+      const bDate = new Date(String(b?.invoice_date || b?.due_date || 0)).getTime();
+      if (aDate !== bDate) return bDate - aDate;
+      return Number(b?.id || 0) - Number(a?.id || 0);
+    })[0] || null;
+
+    return {
+      dueInvoices: dueRows.length,
+      totalDue,
+      lastDueInvoiceNo: lastDueInvoice?.invoice_number || null,
+    };
+  }, [customerId, scopedInvoices]);
 
   const effectiveLoadFilter = useMemo(
     () => (isAdmin ? selectedLoadFilter : activeLoadId),
@@ -1611,6 +1760,7 @@ export default function DistributionInvoicesPage() {
         const loadQty = Number(loadItem.loaded_qty) || Number(loadItem.qty) || 0;
         const currentAvailableFromServer = Number(loadItem.qty) || 0;
         const usedQty = lineQtyByLoadItemId.get(loadItem.id) || 0;
+        const originalReserved = Number(originalLoadReservedByLoadItemId[loadItem.id] || 0);
 
         return {
           load_item_id: loadItem.id,
@@ -1619,7 +1769,7 @@ export default function DistributionInvoicesPage() {
           item_name: loadItem.name || matchedInventory?.name || loadItem.product_code,
           unit: matchedInventory?.unit || 'qty',
           load_qty: loadQty,
-          load_available_qty: Math.max(0, currentAvailableFromServer - usedQty),
+          load_available_qty: Math.max(0, currentAvailableFromServer + originalReserved - usedQty),
           sell_price: loadItem.sell_price > 0 ? loadItem.sell_price : Number(matchedInventory?.sell_price || 0),
           warehouse_stock: Number(matchedInventory?.current_stock || 0),
         } as LoadItemSuggestion;
@@ -1628,7 +1778,7 @@ export default function DistributionInvoicesPage() {
         item.item_code.toLowerCase().includes(search) || item.item_name.toLowerCase().includes(search)
       )
       .slice(0, 8);
-  }, [itemSearch, loadItems, items, activeLoadId, lines]);
+  }, [itemSearch, loadItems, items, activeLoadId, lines, originalLoadReservedByLoadItemId]);
   const selectedItem = useMemo(() => {
     if (selectedLoadItemId) {
       const selectedLoadRow = loadItems.find((li) => String(li.id) === String(selectedLoadItemId));
@@ -1717,7 +1867,7 @@ export default function DistributionInvoicesPage() {
     setPaymentMethod('cash');
     setPaymentAmount('');
     setOutstandingPaymentAmount('');
-    setLastBillAmount('');
+    setBillToBillPaidAmount('');
     setPaymentDate(new Date().toISOString().split( 'T')[0]);
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
@@ -1726,6 +1876,7 @@ export default function DistributionInvoicesPage() {
     setRefGpsSnapshot(null);
     setBillingGpsSnapshot(null);
     setCapturingGpsTarget(null);
+    setOriginalLoadReservedByLoadItemId({});
   };
 
   const openViewInvoice = (invoice: InvoiceRecord) => {
@@ -1738,10 +1889,17 @@ export default function DistributionInvoicesPage() {
     void axios.get('/api/companies', {
       headers: { Authorization: `Bearer ${token}` },
       params: { per_page: 1 },
+      timeout: DEFAULT_API_TIMEOUT_MS,
     }).then((response) => {
       const rows = Array.isArray(response.data) ? response.data : (response.data?.data || []);
       if (Array.isArray(rows) && rows[0]) setReceiptCompany(rows[0] as CompanyProfile);
-    }).catch((error) => console.error('Error loading company details for POS receipt:', error));
+    }).catch((error) => {
+      if (isTimeoutError(error)) {
+        console.warn('Company details request timed out for receipt preview.');
+      } else {
+        console.error('Error loading company details for POS receipt:', error);
+      }
+    });
   };
 
   const printReceiptPreview = () => {
@@ -1757,6 +1915,7 @@ export default function DistributionInvoicesPage() {
       const response = await axios.get(`/api/distribution/invoices/${invoice.id}/receipt`, {
         headers: { Authorization: `Bearer ${token}` },
         responseType: 'blob',
+        timeout: LONG_API_TIMEOUT_MS,
       });
       const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
       const link = document.createElement('a');
@@ -1813,7 +1972,7 @@ export default function DistributionInvoicesPage() {
     setAddPayment(false);
     setPaymentMethod('cash');
     setPaymentAmount('');
-    setLastBillAmount('');
+    setBillToBillPaidAmount('');
     setPaymentDate(new Date().toISOString().split('T')[0]);
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
@@ -1851,10 +2010,19 @@ export default function DistributionInvoicesPage() {
     );
     setCapturingGpsTarget(null);
 
+    const activeLoadNumeric = Number(activeLoadId) || undefined;
     const mappedLines: InvoiceLine[] = (invoice.items || []).map((it, index) => {
       const qty = Number(it.quantity) || 0;
       const unitPrice = Number(it.unit_price) || 0;
       const itemDiscount = Number(it.discount) || 0;
+      const sourceLoadItemFromApi = Number((it as InvoiceItem).source_load_item_id || 0) || null;
+      const sourceLoadItemByCode = sourceLoadItemFromApi
+        ? null
+        : loadItems.find(
+            (li) =>
+              li.product_code === it.item_code &&
+              (!activeLoadNumeric || li.load_id === activeLoadNumeric)
+          ) || null;
       return {
         line_id: `${invoice.id}-${index}`,
         inventory_item_id: it.inventory_item_id ?? 0,
@@ -1867,11 +2035,18 @@ export default function DistributionInvoicesPage() {
         item_discount: itemDiscount,
         free_quantity: 0,
         paid_quantity: qty,
-        source_load_item_id: null,
+        source_load_item_id: sourceLoadItemFromApi || sourceLoadItemByCode?.id || null,
       };
     });
 
     setLines(mappedLines);
+    const baseline = mappedLines.reduce((map, line) => {
+      if (!line.source_load_item_id) return map;
+      const key = Number(line.source_load_item_id);
+      map[key] = (map[key] || 0) + Number(line.quantity || 0);
+      return map;
+    }, {} as Record<number, number>);
+    setOriginalLoadReservedByLoadItemId(baseline);
 
     setShowModal(true);
   };
@@ -1913,26 +2088,42 @@ export default function DistributionInvoicesPage() {
     setShowModal(true);
   };
 
-  useEffect(() => {
-    if (!showModal || !addPayment || paymentMethod !== 'bill_to_bill') return;
-
+  const billToBillTargetInvoice = useMemo(() => {
+    if (!showModal || !addPayment || paymentMethod !== 'bill_to_bill') return null;
     const selectedCustomerId = Number(customerId || 0);
-    if (!selectedCustomerId) {
-      setLastBillAmount('');
-      return;
-    }
-
-    const lastInvoice = getLastUnpaidInvoiceForCustomer(selectedCustomerId, editingInvoiceId);
-    if (!lastInvoice) {
-      setLastBillAmount('');
-      return;
-    }
-
-    const due = getInvoiceDueBalance(lastInvoice);
-    if (due > 0) {
-      setLastBillAmount(due.toFixed(2));
-    }
+    if (!selectedCustomerId) return null;
+    return getLastUnpaidInvoiceForCustomer(selectedCustomerId, editingInvoiceId);
   }, [showModal, addPayment, paymentMethod, customerId, invoices, editingInvoiceId]);
+
+  const billToBillPreviousDue = useMemo(
+    () => (billToBillTargetInvoice ? getInvoiceDueBalance(billToBillTargetInvoice) : 0),
+    [billToBillTargetInvoice]
+  );
+
+  const billToBillPaidAmountValue = useMemo(
+    () => Math.max(0, Number(billToBillPaidAmount || 0)),
+    [billToBillPaidAmount]
+  );
+
+  const billToBillPreviousSettlementAmount = useMemo(
+    () => Math.min(billToBillPaidAmountValue, billToBillPreviousDue),
+    [billToBillPaidAmountValue, billToBillPreviousDue]
+  );
+
+  const billToBillCurrentInvoicePaidAmount = useMemo(
+    () => Math.min(invoiceFinalTotal, Math.max(0, billToBillPaidAmountValue - billToBillPreviousSettlementAmount)),
+    [invoiceFinalTotal, billToBillPaidAmountValue, billToBillPreviousSettlementAmount]
+  );
+
+  const billToBillCurrentInvoiceOutstanding = useMemo(
+    () => Math.max(0, invoiceFinalTotal - billToBillCurrentInvoicePaidAmount),
+    [invoiceFinalTotal, billToBillCurrentInvoicePaidAmount]
+  );
+
+  const billToBillOverPaymentAmount = useMemo(
+    () => Math.max(0, billToBillPaidAmountValue - billToBillPreviousSettlementAmount - billToBillCurrentInvoicePaidAmount),
+    [billToBillPaidAmountValue, billToBillPreviousSettlementAmount, billToBillCurrentInvoicePaidAmount]
+  );
 
   const outstandingInvoiceCandidate = useMemo(() => {
     if (!showModal || !addPayment || paymentMethod === 'bill_to_bill') return null;
@@ -2016,8 +2207,8 @@ export default function DistributionInvoicesPage() {
     const isEditing = editingInvoiceId !== null;
     const selectedLoadId = activeLoadId || (isAdmin ? selectedLoadFilter : '');
     const effectiveLoadId = selectedLoadId ? Number(selectedLoadId) : null;
-    const billToBillAmount = Number(lastBillAmount || 0);
-    const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillAmount > 0;
+    const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillPreviousSettlementAmount > 0;
+    const hasBillToBillCurrentInvoicePayment = addPayment && paymentMethod === 'bill_to_bill' && billToBillCurrentInvoicePaidAmount > 0;
     const outstandingSettlementAmount = Number(outstandingPaymentAmount || 0);
     const hasOutstandingSettlement = addPayment && paymentMethod !== 'bill_to_bill' && outstandingSettlementAmount > 0;
     const chequeEntries = [
@@ -2032,6 +2223,37 @@ export default function DistributionInvoicesPage() {
       setQtyWarningMessage('Select customer and add at least one item line.');
       setQtyWarningOpen(true);
       return;
+    }
+
+    if (inlineReturnMode === 'exchange' && returnLines.length > 0) {
+      const activeLoadNumeric = Number(activeLoadId) || undefined;
+      const exchangeQtyByCode = returnLines.reduce((map, line) => {
+        const code = String(line.item_code || '');
+        if (!code) return map;
+        map.set(code, (map.get(code) || 0) + Number(line.quantity || 0));
+        return map;
+      }, new Map<string, number>());
+
+      for (const [itemCode, requestedQty] of exchangeQtyByCode.entries()) {
+        const matchingLoad = loadItems.find(
+          (li) => li.product_code === itemCode && (!activeLoadNumeric || li.load_id === activeLoadNumeric)
+        );
+
+        if (!matchingLoad) {
+          setQtyWarningMessage(`No load stock entry found for exchange item ${itemCode}.`);
+          setQtyWarningOpen(true);
+          return;
+        }
+
+        const availableQty = Number(matchingLoad.qty || 0);
+        if (requestedQty > availableQty + 1e-9) {
+          setQtyWarningMessage(
+            `Exchange stock not enough for ${itemCode}. Requested ${requestedQty.toFixed(2)}, available ${availableQty.toFixed(2)}.`
+          );
+          setQtyWarningOpen(true);
+          return;
+        }
+      }
     }
 
     if (!isEditing && !refGpsSnapshot && !bypassRefGpsCheckOnce) {
@@ -2073,29 +2295,28 @@ export default function DistributionInvoicesPage() {
       }
     }
 
-    if (hasBillToBillSettlement) {
+    if (addPayment && paymentMethod === 'bill_to_bill') {
       if (isEditing) {
         setQtyWarningMessage('Bill To Bill option is available for new invoices only.');
         setQtyWarningOpen(true);
         return;
       }
 
-      const lastInvoice = getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId);
-      if (!lastInvoice) {
+      const lastInvoice = billToBillTargetInvoice;
+      if (!lastInvoice && billToBillPaidAmountValue > 0) {
         setQtyWarningMessage('No previous unpaid bill found for this customer.');
         setQtyWarningOpen(true);
         return;
       }
 
-      const due = getInvoiceDueBalance(lastInvoice);
-      if (due <= 0) {
+      if (lastInvoice && billToBillPreviousDue <= 0) {
         setQtyWarningMessage('Last bill has no due balance to settle.');
         setQtyWarningOpen(true);
         return;
       }
 
-      if (billToBillAmount > due + 1e-9) {
-        setQtyWarningMessage(`Last bill due is ${due.toFixed(2)}. Enter an amount up to due balance.`);
+      if (billToBillOverPaymentAmount > 1e-9) {
+        setQtyWarningMessage(`Paid amount exceeds previous due + current invoice total. Excess: ${billToBillOverPaymentAmount.toFixed(2)}.`);
         setQtyWarningOpen(true);
         return;
       }
@@ -2172,17 +2393,17 @@ export default function DistributionInvoicesPage() {
           parts.push('[PAYMENT EVIDENCE]');
 
           if (paymentMethod === 'bill_to_bill') {
-            const settlementAmount = Number(lastBillAmount || 0);
-            const previousInvoice = settlementAmount > 0
-              ? getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId)
-              : null;
-
-            if (settlementAmount > 0) {
+            if (billToBillPaidAmountValue > 0) {
               parts.push('Payment mode: BILL TO BILL');
-              parts.push(`Last bill amount paid: ${settlementAmount.toFixed(2)}`);
-              if (previousInvoice?.invoice_number) {
-                parts.push(`Settled invoice: ${previousInvoice.invoice_number}`);
+              parts.push(`Total paid amount: ${billToBillPaidAmountValue.toFixed(2)}`);
+              if (billToBillPreviousSettlementAmount > 0) {
+                parts.push(`Applied to previous due: ${billToBillPreviousSettlementAmount.toFixed(2)}`);
+                if (billToBillTargetInvoice?.invoice_number) {
+                  parts.push(`Settled invoice: ${billToBillTargetInvoice.invoice_number}`);
+                }
               }
+              parts.push(`Applied to this invoice: ${billToBillCurrentInvoicePaidAmount.toFixed(2)}`);
+              parts.push(`Remaining new invoice outstanding: ${billToBillCurrentInvoiceOutstanding.toFixed(2)}`);
               parts.push(`Payment date: ${paymentDate || invoiceDate}`);
               if (paymentReference.trim()) {
                 parts.push(`Reference: ${paymentReference.trim()}`);
@@ -2291,66 +2512,79 @@ export default function DistributionInvoicesPage() {
       items: itemsPayload,
     };
 
-    const targetLastInvoice = hasBillToBillSettlement
-      ? getLastUnpaidInvoiceForCustomer(Number(customerId), editingInvoiceId)
-      : null;
+    const paymentPayloads: PaymentEntry[] = [];
 
-    const paymentPayload: PaymentEntry | null = (() => {
-      if (!addPayment) return null;
+    if (addPayment) {
+      if (paymentMethod === 'check' && hasNormalPayment) {
+        paymentPayloads.push(
+          ...chequeEntries.map((entry) => ({
+            amount: Number(entry.amount),
+            method: 'check' as const,
+            date: paymentDate || invoiceDate,
+            cheque_date: entry.chequeDate || null,
+            reference: entry.reference || null,
+            bank_name: entry.bankName || null,
+            target_invoice_id: null,
+            is_outstanding_settlement: false,
+          }))
+        );
+      } else if (paymentMethod === 'bill_to_bill') {
+        if (hasBillToBillCurrentInvoicePayment) {
+          paymentPayloads.push({
+            amount: billToBillCurrentInvoicePaidAmount,
+            method: paymentMethod,
+            date: paymentDate || invoiceDate,
+            cheque_date: null,
+            reference: paymentReference || null,
+            bank_name: paymentBankName || null,
+            target_invoice_id: null,
+            is_outstanding_settlement: false,
+          });
+        }
 
-      if (paymentMethod === 'bill_to_bill') {
-        if (!hasBillToBillSettlement) return null;
-        return {
-          amount: billToBillAmount,
-          method: paymentMethod,
-          date: paymentDate || invoiceDate,
-          cheque_date: null,
-          reference: paymentReference || null,
-          bank_name: paymentBankName || null,
-          target_invoice_id: Number(targetLastInvoice?.id || 0),
-          is_outstanding_settlement: true,
-        };
+        if (hasBillToBillSettlement && billToBillTargetInvoice) {
+          paymentPayloads.push({
+            amount: billToBillPreviousSettlementAmount,
+            method: paymentMethod,
+            date: paymentDate || invoiceDate,
+            cheque_date: null,
+            reference: paymentReference || null,
+            bank_name: paymentBankName || null,
+            target_invoice_id: Number(billToBillTargetInvoice.id || 0),
+            is_outstanding_settlement: true,
+          });
+        }
+      } else {
+        if (hasNormalPayment) {
+          paymentPayloads.push({
+            amount: normalPaymentAmount,
+            method: paymentMethod,
+            date: paymentDate || invoiceDate,
+            cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
+            reference: paymentReference || null,
+            bank_name: paymentBankName || null,
+            target_invoice_id: null,
+            is_outstanding_settlement: false,
+          });
+        }
+
+        if (hasOutstandingSettlement && outstandingTargetInvoice) {
+          const outstandingMethod: 'cash' | 'check' | 'bank_transfer' = paymentMethod;
+          paymentPayloads.push({
+            amount: outstandingSettlementAmount,
+            method: outstandingMethod,
+            date: paymentDate || invoiceDate,
+            cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
+            reference: paymentReference || null,
+            bank_name: paymentBankName || null,
+            target_invoice_id: Number(outstandingTargetInvoice.id || 0),
+            is_outstanding_settlement: true,
+          });
+        }
       }
-
-      return {
-        amount: normalPaymentAmount,
-        method: paymentMethod,
-        date: paymentDate || invoiceDate,
-        cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
-        reference: paymentReference || null,
-        bank_name: paymentBankName || null,
-        target_invoice_id: null,
-        is_outstanding_settlement: false,
-      };
-    })();
-    const paymentPayloads: PaymentEntry[] = addPayment && paymentMethod === 'check' && hasNormalPayment
-      ? chequeEntries.map((entry) => ({
-          amount: Number(entry.amount),
-          method: 'check' as const,
-          date: paymentDate || invoiceDate,
-          cheque_date: entry.chequeDate || null,
-          reference: entry.reference || null,
-          bank_name: entry.bankName || null,
-          target_invoice_id: null,
-          is_outstanding_settlement: false,
-        }))
-      : paymentPayload && hasNormalPayment
-        ? [paymentPayload]
-        : [];
-
-    if (hasOutstandingSettlement && outstandingTargetInvoice) {
-      const outstandingMethod: 'cash' | 'check' | 'bank_transfer' = paymentMethod;
-      paymentPayloads.push({
-        amount: outstandingSettlementAmount,
-        method: outstandingMethod,
-        date: paymentDate || invoiceDate,
-        cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
-        reference: paymentReference || null,
-        bank_name: paymentBankName || null,
-        target_invoice_id: Number(outstandingTargetInvoice.id || 0),
-        is_outstanding_settlement: true,
-      });
     }
+
+    const paymentPayload: PaymentEntry | null = paymentPayloads.find((payment) => !payment.target_invoice_id) || null;
 
     const queueOfflineAndFinish = () => {
       const hasReturns = returnLines.length > 0;
@@ -2601,6 +2835,36 @@ export default function DistributionInvoicesPage() {
       return;
     }
 
+    if (inlineReturnMode === 'exchange') {
+      const activeLoadNumeric = Number(activeLoadId) || undefined;
+      const matchingLoad = loadItems.find(
+        (li) =>
+          li.product_code === selected.code &&
+          (!activeLoadNumeric || li.load_id === activeLoadNumeric)
+      );
+
+      if (!matchingLoad) {
+        setQtyWarningMessage(
+          `No load stock entry found for ${selected.code}. Select a load with this item before using exchange.`
+        );
+        setQtyWarningOpen(true);
+        return;
+      }
+
+      const alreadyReservedForExchange = returnLines
+        .filter((line) => line.item_code === selected.code)
+        .reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+
+      const remainingFromLoad = Number(matchingLoad.qty) - alreadyReservedForExchange;
+      if (qty > remainingFromLoad + 1e-9) {
+        setQtyWarningMessage(
+          `Exchange stock not enough for ${selected.code}. Available from load: ${remainingFromLoad.toFixed(2)} ${selected.unit}.`
+        );
+        setQtyWarningOpen(true);
+        return;
+      }
+    }
+
     const normalizedAmount = enteredAmount > 0
       ? enteredAmount
       : qty * Number(selected.sell_price || 0);
@@ -2652,6 +2916,12 @@ export default function DistributionInvoicesPage() {
   const removeReturnLine = (id: number) => {
     setReturnLines((prev) => prev.filter((line) => line.inventory_item_id !== id));
   };
+
+  useEffect(() => {
+    if (inlineReturnMode !== 'exchange') return;
+    setReturnDamageInput(false);
+    setReturnLines((prev) => prev.map((line) => ({ ...line, is_damaged: false })));
+  }, [inlineReturnMode]);
 
   const openReturnModal = (invoice: InvoiceRecord) => {
     setReturnInvoice(invoice);
@@ -2727,7 +2997,7 @@ export default function DistributionInvoicesPage() {
     }
   };
 
-  if (loading) {
+  if (loading && items.length === 0 && invoices.length === 0) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex items-center justify-center">
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600"></div>
@@ -2771,19 +3041,6 @@ export default function DistributionInvoicesPage() {
       </nav>
 
       <div className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={restoreHiddenWidgetsAfterFix} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
 
         {isWidgetVisible('distribution-invoices-hero-card') && <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
@@ -2904,7 +3161,7 @@ export default function DistributionInvoicesPage() {
             {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-delivery-orders-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
@@ -2944,13 +3201,40 @@ export default function DistributionInvoicesPage() {
             </table>
           </div>
 
+          <div className="md:hidden divide-y divide-gray-200">
+            {filteredDeliveryOrders.length === 0 ? (
+              <div className="px-4 py-6 text-center text-sm text-gray-500">
+                No DO records found for the current filters.
+              </div>
+            ) : (
+              filteredDeliveryOrders.map((record) => (
+                <div key={record.id} className="space-y-1.5 px-4 py-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-cyan-700">{record.do_number || '-'}</p>
+                    <p className="text-xs text-gray-500">{record.sale_date ? new Date(record.sale_date).toLocaleDateString() : '-'}</p>
+                  </div>
+                  <p className="text-xs text-gray-500">Sale: {record.sale_number}</p>
+                  <p className="text-sm text-gray-700">{record.customer_name || 'Walk-in Customer'}</p>
+                  <div className="flex items-center justify-between gap-2 text-sm">
+                    <span className="text-gray-600">{record.load_id ? `Load #${record.load_id}` : '-'}</span>
+                    <span className="font-semibold text-gray-900">{Number(record.total_amount || 0).toFixed(2)}</span>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {record.outlet?.name || '-'}
+                    {record.outlet?.code ? ` (${record.outlet.code})` : ''}
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+
           <div className="px-4 py-2 border-t border-gray-100 text-xs text-gray-500">
             Showing {filteredDeliveryOrders.length} DO record(s)
           </div>
         </div>}
 
         {isWidgetVisible('distribution-invoices-records-card') && <div className="rounded-xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               {isWidgetVisible('distribution-invoices-records-table-headings') && <thead className="bg-gradient-to-r from-emerald-50 to-cyan-50">
                 <tr>
@@ -3251,6 +3535,23 @@ export default function DistributionInvoicesPage() {
                         <p className="mt-1 text-xs text-gray-500">
                           Selected: {selectedCustomer.shop_name} ({selectedCustomer.customer_code})
                         </p>
+                      )}
+                      {customerOutstandingPreview && (
+                        <div className={`mt-2 rounded-lg border px-2.5 py-2 text-xs ${customerOutstandingPreview.totalDue > 0 ? 'border-amber-200 bg-amber-50/70 text-amber-900' : 'border-emerald-200 bg-emerald-50/70 text-emerald-900'}`}>
+                          <p className="font-semibold">
+                            Outstanding Balance: {customerOutstandingPreview.totalDue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className={`rounded-full border px-2 py-0.5 ${customerOutstandingPreview.totalDue > 0 ? 'border-amber-300 bg-white text-amber-800' : 'border-emerald-300 bg-white text-emerald-800'}`}>
+                              Due invoices: {customerOutstandingPreview.dueInvoices}
+                            </span>
+                            {customerOutstandingPreview.lastDueInvoiceNo && (
+                              <span className={`rounded-full border px-2 py-0.5 ${customerOutstandingPreview.totalDue > 0 ? 'border-amber-300 bg-white text-amber-800' : 'border-emerald-300 bg-white text-emerald-800'}`}>
+                                Latest due: {customerOutstandingPreview.lastDueInvoiceNo}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                     <div>
@@ -3860,6 +4161,26 @@ export default function DistributionInvoicesPage() {
 
             </section>
 
+            {selectedCustomer && customerOutstandingPreview && (
+              <section className="rounded-xl border border-amber-100 bg-gradient-to-r from-amber-50/70 to-white p-3 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm">
+                  <div>
+                    <p className="font-semibold text-slate-800">Customer Outstanding Preview</p>
+                    <p className="text-slate-600">
+                      {selectedCustomer.shop_name} ({selectedCustomer.customer_code})
+                    </p>
+                  </div>
+                  <div className={`rounded-lg border px-3 py-2 ${customerOutstandingPreview.totalDue > 0 ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+                    <p>Outstanding: <span className="font-semibold">{customerOutstandingPreview.totalDue.toFixed(2)}</span></p>
+                    <p>Due invoices: <span className="font-semibold">{customerOutstandingPreview.dueInvoices}</span></p>
+                    {customerOutstandingPreview.lastDueInvoiceNo && (
+                      <p>Latest due: <span className="font-semibold">{customerOutstandingPreview.lastDueInvoiceNo}</span></p>
+                    )}
+                  </div>
+                </div>
+              </section>
+            )}
+
             <section className="mt-3 rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50/70 via-white to-emerald-50/45 p-4 shadow-sm sm:mt-4 sm:p-5">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
                 <div className="rounded-xl border border-amber-100 bg-white/90 p-4 shadow-sm sm:p-5">
@@ -3906,7 +4227,7 @@ export default function DistributionInvoicesPage() {
                         </span>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
+                    <div className={`grid grid-cols-1 gap-3 ${inlineReturnMode === 'deduct' ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
                       <div className="sm:col-span-2">
                         <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Return Item</label>
                         <div className="relative">
@@ -3974,19 +4295,20 @@ export default function DistributionInvoicesPage() {
                           placeholder="0.00"
                         />
                       </div>
-                      <div>
-                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Damage</label>
-                        <div className="flex h-[44px] w-full items-center rounded-xl border border-amber-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm">
-                          <input
-                            type="checkbox"
-                            aria-label="Damage mark"
-                            className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-2 focus:ring-amber-300 disabled:cursor-not-allowed disabled:opacity-60"
-                            checked={returnDamageInput}
-                            disabled={inlineReturnMode !== 'deduct'}
-                            onChange={(e) => setReturnDamageInput(e.target.checked)}
-                          />
+                      {inlineReturnMode === 'deduct' && (
+                        <div>
+                          <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Damage</label>
+                          <div className="flex h-[44px] w-full items-center rounded-xl border border-amber-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 shadow-sm">
+                            <input
+                              type="checkbox"
+                              aria-label="Damage mark"
+                              className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-2 focus:ring-amber-300"
+                              checked={returnDamageInput}
+                              onChange={(e) => setReturnDamageInput(e.target.checked)}
+                            />
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
 
                     <div className="flex justify-end pt-1">
@@ -4311,6 +4633,7 @@ export default function DistributionInvoicesPage() {
                               setPaymentMethod(nextMethod);
                               if (nextMethod === 'bill_to_bill') {
                                 setPaymentAmount('');
+                                setBillToBillPaidAmount('');
                                 setOutstandingPaymentAmount('');
                               } else if (addPayment) {
                                 setPaymentAmount(invoiceFinalTotal.toFixed(2));
@@ -4356,17 +4679,40 @@ export default function DistributionInvoicesPage() {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {paymentMethod === 'bill_to_bill' ? (
                           <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">Last Bill Amount</label>
+                            <label className="block text-xs font-medium text-gray-700 mb-1">Paid Amount</label>
                             <input
                               type="number"
                               step="0.01"
-                              value={lastBillAmount}
-                              onChange={(e) => setLastBillAmount(e.target.value)}
+                              min="0"
+                              value={billToBillPaidAmount}
+                              onChange={(e) => setBillToBillPaidAmount(e.target.value)}
                               className="w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                              placeholder="0.00"
                             />
                             <p className="mt-1 text-[11px] text-emerald-700">
-                              Leave empty or 0 to create this invoice as credit. Enter amount to settle previous bill.
+                              Enter total paid now. It is auto-applied to previous due first, then this invoice.
                             </p>
+                            <div className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/60 p-2 text-[11px] text-emerald-900">
+                              <p>
+                                Previous due ({billToBillTargetInvoice?.invoice_number || 'No due invoice'}):
+                                <span className="font-semibold"> {billToBillPreviousDue.toFixed(2)}</span>
+                              </p>
+                              <p>
+                                Applied to previous due:
+                                <span className="font-semibold"> {billToBillPreviousSettlementAmount.toFixed(2)}</span>
+                              </p>
+                              <p>
+                                Applied to this invoice:
+                                <span className="font-semibold"> {billToBillCurrentInvoicePaidAmount.toFixed(2)}</span>
+                              </p>
+                              <p>
+                                New invoice outstanding:
+                                <span className="font-semibold"> {billToBillCurrentInvoiceOutstanding.toFixed(2)}</span>
+                              </p>
+                              {billToBillOverPaymentAmount > 0 && (
+                                <p className="font-semibold text-amber-700">Excess entered: {billToBillOverPaymentAmount.toFixed(2)}</p>
+                              )}
+                            </div>
                           </div>
                         ) : (
                           <div>
@@ -4978,6 +5324,37 @@ export default function DistributionInvoicesPage() {
         const invoice = receiptPreviewInvoice;
         const notes = String(invoice.notes || '');
         const noteLines = notes.split('\n');
+
+        const paymentEvidenceHeaderIndex = noteLines.findIndex((line) => line.trim() === '[PAYMENT EVIDENCE]');
+        const paymentEvidenceLines: string[] = [];
+        if (paymentEvidenceHeaderIndex >= 0) {
+          for (let i = paymentEvidenceHeaderIndex + 1; i < noteLines.length; i += 1) {
+            const line = noteLines[i];
+            if (line.trim().startsWith('[')) break;
+            paymentEvidenceLines.push(line.trim());
+          }
+        }
+        const parsePaymentEvidenceAmount = (prefix: string): number => {
+          const line = paymentEvidenceLines.find((entry) => entry.startsWith(prefix));
+          if (!line) return 0;
+          const amountPart = line.slice(prefix.length).trim();
+          const parsed = Number.parseFloat(amountPart.replace(/[^0-9.\-]/g, ''));
+          return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const billToBillTotalPaid = parsePaymentEvidenceAmount('Total paid amount:');
+        const billToBillAppliedPrevious = parsePaymentEvidenceAmount('Applied to previous due:');
+        const billToBillAppliedCurrent = parsePaymentEvidenceAmount('Applied to this invoice:');
+        const billToBillRemaining = parsePaymentEvidenceAmount('Remaining new invoice outstanding:');
+        const billToBillSettledInvoice = paymentEvidenceLines
+          .find((line) => line.startsWith('Settled invoice:'))
+          ?.replace('Settled invoice:', '')
+          .trim();
+        const hasBillToBillEvidence =
+          billToBillTotalPaid > 0 ||
+          billToBillAppliedPrevious > 0 ||
+          billToBillAppliedCurrent > 0 ||
+          Boolean(billToBillSettledInvoice);
+
         const itemReturnsHeaderIndex = noteLines.findIndex((line) => line.trim() === '[ITEM RETURNS]');
         const itemReturnsLines: string[] = [];
         if (itemReturnsHeaderIndex >= 0) {
@@ -4993,8 +5370,9 @@ export default function DistributionInvoicesPage() {
         const hasReturnSection = returnLines.length > 0 || Boolean(returnTotalLine) || Boolean(returnModeLine);
         const subtotal = Number(invoice.subtotal ?? invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0));
         const paid = Number(invoice.paid_amount || 0);
+        const effectivePaid = Math.max(paid, billToBillAppliedCurrent);
         const total = Number(invoice.total || 0);
-        const outstanding = Math.max(0, total - paid);
+        const outstanding = Math.max(0, total - effectivePaid);
 
         return (
           <div className="receipt-preview-modal fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-3 sm:p-6">
@@ -5061,13 +5439,28 @@ export default function DistributionInvoicesPage() {
 
                   <section>
                     <h2>Payment Details</h2>
-                    {(invoice.payments || []).length === 0 ? <p>No payments recorded.</p> : invoice.payments?.map((payment) => (
-                      <div key={payment.id} className="receipt-item">
-                        <div className="flex justify-between gap-2"><span>{String(payment.payment_method || '').toUpperCase()} {payment.reference_no ? `(${payment.reference_no})` : ''}</span><strong>{Number(payment.amount || 0).toFixed(2)}</strong></div>
-                        <div>Date: {payment.payment_date || '-'}{payment.cheque_date ? ` | Cheque date: ${payment.cheque_date}` : ''}</div>
-                        {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
-                      </div>
-                    ))}
+                    {(invoice.payments || []).length === 0 && !hasBillToBillEvidence ? <p>No payments recorded.</p> : (
+                      <>
+                        {invoice.payments?.map((payment) => (
+                          <div key={payment.id} className="receipt-item">
+                            <div className="flex justify-between gap-2"><span>{String(payment.payment_method || '').toUpperCase()} {payment.reference_no ? `(${payment.reference_no})` : ''}</span><strong>{Number(payment.amount || 0).toFixed(2)}</strong></div>
+                            <div>Date: {payment.payment_date || '-'}{payment.cheque_date ? ` | Cheque date: ${payment.cheque_date}` : ''}</div>
+                            {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
+                          </div>
+                        ))}
+                        {hasBillToBillEvidence && (
+                          <div className="receipt-item">
+                            <div className="flex justify-between gap-2">
+                              <span>BILL TO BILL {billToBillSettledInvoice ? `(${billToBillSettledInvoice})` : ''}</span>
+                              <strong>{billToBillTotalPaid.toFixed(2)}</strong>
+                            </div>
+                            <div>Last bill payment: {billToBillAppliedPrevious.toFixed(2)}</div>
+                            <div>Paid on this bill: {billToBillAppliedCurrent.toFixed(2)}</div>
+                            <div>Outstanding on this bill: {billToBillRemaining.toFixed(2)}</div>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </section>
 
                   <div className="receipt-divider" />
@@ -5075,7 +5468,8 @@ export default function DistributionInvoicesPage() {
                     <p><span>Subtotal</span><strong>{subtotal.toFixed(2)}</strong></p>
                     <p><span>Discount</span><strong>-{Number(invoice.discount || 0).toFixed(2)}</strong></p>
                     <p className="receipt-total"><span>Total</span><strong>{total.toFixed(2)}</strong></p>
-                    <p><span>Paid</span><strong>{paid.toFixed(2)}</strong></p>
+                    {hasBillToBillEvidence && <p><span>Last Bill Payment</span><strong>{billToBillAppliedPrevious.toFixed(2)}</strong></p>}
+                    <p><span>Paid</span><strong>{effectivePaid.toFixed(2)}</strong></p>
                     <p><span>Outstanding</span><strong>{outstanding.toFixed(2)}</strong></p>
                   </section>
                   <footer className="receipt-footer">Thank you</footer>

@@ -144,7 +144,7 @@ export default function DistributionPage() {
     returns: 0,
   });
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
-  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(true);
   const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
   const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
   const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
@@ -345,7 +345,7 @@ export default function DistributionPage() {
   };
 
   const applyWidgetVisibilityChanges = async () => {
-    if (superAdminModalMode !== 'apply' || !pendingWidgetChanges.length) return;
+    if (!['apply', 'restore'].includes(superAdminModalMode) || !pendingWidgetChanges.length) return;
     if (!superAdminEmail.trim() || !superAdminPassword) return;
     try {
       setSuperAdminConfirmLoading(true);
@@ -358,10 +358,21 @@ export default function DistributionPage() {
           lock_widget_controls: true,
         });
       }
+      setWidgetVisibility((prev) => {
+        const next = { ...prev };
+        pendingWidgetChanges.forEach((change) => {
+          next[change.widget_key] = change.is_visible;
+        });
+        return next;
+      });
       setWidgetControlsLocked(true);
       setShowSuperAdminConfirmModal(false);
       setPendingWidgetChanges([]);
       setWidgetVisibilitySnapshot(null);
+      setRestoreWidgetListVisible(false);
+      setRestoreWidgetLoadingKey(null);
+      setSuperAdminEmail('');
+      setSuperAdminPassword('');
     } catch (error) {
       if (handleUnauthorized(error)) return;
       console.error('Failed to apply widget visibility changes:', error);
@@ -393,6 +404,7 @@ export default function DistributionPage() {
         lock_widget_controls: true,
       });
       setWidgetVisibility((prev) => ({ ...prev, [widgetKey]: true }));
+      setPendingWidgetChanges((prev) => prev.filter((entry) => entry.widget_key !== widgetKey));
     } catch (error) {
       if (handleUnauthorized(error)) return;
       console.error('Failed to restore widget visibility:', error);
@@ -1034,47 +1046,6 @@ export default function DistributionPage() {
           )}
         </div>}
 
-        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden items, and unlock when required.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
-                disabled={widgetControlsLocked || pendingWidgetChanges.length === 0}
-                className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-              >
-                Fix Widgets
-              </button>
-              <button
-                type="button"
-                onClick={restoreHiddenWidgetsAfterFix}
-                disabled={hiddenWidgetCount === 0}
-                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
-              >
-                Restore Widgets
-              </button>
-              <button
-                type="button"
-                onClick={openUnlockWidgetsAfterFix}
-                className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700"
-              >
-                Unlock Widgets
-              </button>
-            </div>
-          </div>
-          <p className="mt-3 text-xs text-slate-600">
-            Hidden widgets: <span className="font-semibold">{hiddenWidgetCount}</span> · Pending changes:{' '}
-            <span className="font-semibold">{pendingWidgetChanges.length}</span> · Controls:{' '}
-            <span className={`font-semibold ${widgetControlsLocked ? 'text-rose-600' : 'text-emerald-600'}`}>
-              {widgetControlsLocked ? 'Locked' : 'Editable'}
-            </span>
-          </p>
-        </section>
-
         {isWidgetVisible('distribution-modules-grid') && <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           {modules
             .filter((module) => isWidgetVisible(module.widgetKey))
@@ -1613,7 +1584,7 @@ export default function DistributionPage() {
                   className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
                   disabled={superAdminConfirmLoading}
                 >
-                  {superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore' : 'Confirm and Fix'}
+                  {superAdminConfirmLoading ? 'Processing...' : superAdminModalMode === 'unlock' ? 'Unlock Widgets' : superAdminModalMode === 'restore' ? 'Confirm Restore & Fix' : 'Confirm and Fix'}
                 </button>
               </div>
             </div>
