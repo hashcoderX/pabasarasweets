@@ -293,24 +293,60 @@ class LoadController extends Controller
             $routeIds = [$load->route_id];
         }
 
-        $invoices = DistributionInvoice::with(['customer:id,shop_name,customer_code,route_id', 'items'])
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->whereHas('customer', function ($q) use ($routeIds) {
-                $q->whereIn('route_id', $routeIds);
-            })
-            ->get(['id', 'invoice_number', 'customer_id', 'invoice_date', 'total', 'status', 'paid_amount']);
+        $invoiceQuery = DistributionInvoice::with(['customer:id,shop_name,customer_code,route_id', 'items'])
+            ->whereNotIn('status', ['cancelled', 'deleted']);
+
+        if (Schema::hasColumn('distribution_invoices', 'load_id')) {
+            // Primary source: invoices explicitly linked to this load.
+            $invoiceQuery->where('load_id', $load->id);
+        } else {
+            // Legacy fallback when load_id column does not exist.
+            $invoiceQuery
+                ->whereBetween('invoice_date', [$fromDate, $toDate])
+                ->whereHas('customer', function ($q) use ($routeIds) {
+                    $q->whereIn('route_id', $routeIds);
+                });
+        }
+
+        $invoices = $invoiceQuery
+            ->get(['id', 'invoice_number', 'customer_id', 'invoice_date', 'subtotal', 'discount', 'total', 'status', 'paid_amount']);
 
         $invoiceTotal = (float) $invoices->sum('total');
         $invoiceCount = $invoices->count();
+        $invoiceOutstanding = (float) $invoices->reduce(function ($sum, $invoice) {
+            $due = max(0, (float) $invoice->total - (float) $invoice->paid_amount);
+            return $sum + $due;
+        }, 0);
 
-        $customerIds = $invoices->pluck('customer_id')->filter()->unique()->values();
+        $invoiceIds = $invoices->pluck('id')->filter()->unique()->values();
 
-        $payments = $customerIds->isEmpty()
-            ? collect([])
-            : DistributionPayment::whereIn('customer_id', $customerIds)
-                ->whereBetween('payment_date', [$fromDate, $toDate])
-                ->where('status', '!=', 'bounced')
-                ->get(['id', 'payment_number', 'payment_date', 'amount', 'payment_method', 'reference_no', 'bank_name', 'status']);
+        if ($invoiceIds->isEmpty()) {
+            $payments = collect([]);
+        } else {
+            $paymentQuery = DistributionPayment::query()
+                ->whereNotIn('status', ['bounced', 'returned', 'closed'])
+                ->where(function ($q) use ($invoiceIds, $load) {
+                    $q->whereIn('distribution_invoice_id', $invoiceIds->all());
+
+                    if (Schema::hasColumn('distribution_payments', 'load_id')) {
+                        $q->orWhere(function ($sub) use ($load) {
+                            $sub->where('load_id', $load->id)
+                                ->whereNull('distribution_invoice_id');
+                        });
+                    }
+                });
+
+            $payments = $paymentQuery->get([
+                'id',
+                'payment_number',
+                'payment_date',
+                'amount',
+                'payment_method',
+                'reference_no',
+                'bank_name',
+                'status',
+            ]);
+        }
 
         $totalCollected = (float) $payments->sum('amount');
 
@@ -326,6 +362,20 @@ class LoadController extends Controller
         // Aggregate item-level sales from invoices (quantity and value) keyed by item_code
         $itemSales = [];
         foreach ($invoices as $invoice) {
+            $invoiceDiscount = (float) ($invoice->discount ?? 0);
+            $lineValueMap = [];
+            $invoiceLineNetBeforeHeaderDiscount = 0.0;
+
+            foreach ($invoice->items as $item) {
+                $itemId = (int) ($item->id ?? 0);
+                $grossLineValue = (float) $item->quantity * (float) $item->unit_price;
+                $itemLevelDiscount = (float) ($item->discount ?? 0);
+                $lineValueAfterItemDiscount = max(0, $grossLineValue - $itemLevelDiscount);
+
+                $lineValueMap[$itemId] = $lineValueAfterItemDiscount;
+                $invoiceLineNetBeforeHeaderDiscount += $lineValueAfterItemDiscount;
+            }
+
             foreach ($invoice->items as $item) {
                 $code = $item->item_code;
                 if (!isset($itemSales[$code])) {
@@ -345,18 +395,45 @@ class LoadController extends Controller
                 }
 
                 $itemSales[$code]['sold_qty'] += (float) $item->quantity;
-                $lineValue = (float) $item->quantity * (float) $item->unit_price;
-                $itemSales[$code]['sold_value'] += $lineValue;
+
+                $itemId = (int) ($item->id ?? 0);
+                $lineValueAfterItemDiscount = (float) ($lineValueMap[$itemId] ?? 0.0);
+                $headerDiscountShare = $invoiceLineNetBeforeHeaderDiscount > 0
+                    ? ($invoiceDiscount * ($lineValueAfterItemDiscount / $invoiceLineNetBeforeHeaderDiscount))
+                    : 0.0;
+                $netLineValue = max(0, $lineValueAfterItemDiscount - $headerDiscountShare);
+
+                $itemSales[$code]['sold_value'] += $netLineValue;
             }
         }
 
-        // Fetch returns within the same period for customers on this route
-        $returns = $customerIds->isEmpty()
+        // Returns should match the same load-linked invoices.
+        $returns = $invoiceIds->isEmpty()
             ? collect([])
-            : \App\Models\DistributionReturn::whereIn('customer_id', $customerIds)
-                ->whereBetween('return_date', [$fromDate, $toDate])
-                ->with('returnedItem:id,code')
-                ->get(['id', 'customer_id', 'returned_inventory_item_id', 'return_date', 'total_quantity', 'total_amount']);
+            : \App\Models\DistributionReturn::whereIn('distribution_invoice_id', $invoiceIds->all())
+                ->with([
+                    'customer:id,shop_name,customer_code',
+                    'invoice:id,invoice_number',
+                    'returnedItem:id,name,code,unit',
+                    'exchangeItem:id,name,code,unit',
+                ])
+                ->get([
+                    'id',
+                    'return_number',
+                    'distribution_invoice_id',
+                    'customer_id',
+                    'returned_inventory_item_id',
+                    'exchange_inventory_item_id',
+                    'return_date',
+                    'total_quantity',
+                    'total_amount',
+                    'settlement_type',
+                    'settlement_amount',
+                    'exchange_quantity',
+                    'reason',
+                    'status',
+                    'notes',
+                ]);
 
         foreach ($returns as $return) {
             $code = $return->returnedItem?->code;
@@ -384,12 +461,12 @@ class LoadController extends Controller
             $itemSales[$code]['return_value'] += (float) $return->total_amount;
         }
 
-        // Map to collection for further calculations
+        // Map to collection for further calculations.
         $itemSalesCollection = collect($itemSales);
 
-        // Attach cost from load items (out_price) and compute profit per item
+        // Attach cost from load items (out_price) and compute profit per item.
         $loadItems = $load->loadItems()->get(['product_code', 'out_price', 'sell_price']);
-        foreach ($itemSalesCollection as $code => &$row) {
+        $itemSalesCollection = $itemSalesCollection->map(function (array $row, string $code) use ($loadItems) {
             $loadItem = $loadItems->firstWhere('product_code', $code);
             $netQty = (float) $row['sold_qty'] - (float) $row['return_qty'];
             $netValue = (float) $row['sold_value'] - (float) $row['return_value'];
@@ -401,8 +478,9 @@ class LoadController extends Controller
             $row['net_value'] = $netValue;
             $row['cost_value'] = $costValue;
             $row['profit'] = $profit;
-        }
-        unset($row);
+
+            return $row;
+        });
 
         $totalCost = (float) $itemSalesCollection->sum('cost_value');
         $totalProfit = (float) $itemSalesCollection->sum('profit');
@@ -426,6 +504,7 @@ class LoadController extends Controller
                 'invoices' => [
                     'count' => $invoiceCount,
                     'total_amount' => $invoiceTotal,
+                    'total_outstanding' => $invoiceOutstanding,
                     'total_cost' => $totalCost,
                     'total_profit' => $totalProfit,
                 ],
@@ -434,6 +513,7 @@ class LoadController extends Controller
                     'by_method' => $byMethod,
                     'cheques' => $cheques,
                 ],
+                'returns' => $returns->values(),
                 'items' => $itemSalesCollection->values(),
             ],
         ]);

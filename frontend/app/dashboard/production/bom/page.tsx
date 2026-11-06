@@ -707,20 +707,6 @@ export default function BomPage() {
       </nav>}
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
-
         {isWidgetVisible('production-bom-workflow-card') && <section className="rounded-2xl border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-800 shadow-sm">
           <p className="font-semibold">Recommended workflow</p>
           <p className="mt-1 text-blue-900/90">Follow these steps in order to avoid wrong recipes, wrong stock checks, and incorrect production deductions.</p>
@@ -1073,13 +1059,17 @@ export default function BomPage() {
             ))}
           </div>
 
-          <div className="mt-4 flex items-center gap-2">
-            <button type="button" onClick={addBomLine} className="px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm hover:bg-emerald-100">
-              Add Material Line
-            </button>
-            <button type="button" disabled={saving} onClick={handleCreateBom} className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-sm font-medium hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50">
-              Save BOM Recipe
-            </button>
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={addBomLine} className="px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm hover:bg-emerald-100">
+                Add Material Line
+              </button>
+            </div>
+            <div className="flex items-center sm:justify-end">
+              <button type="button" disabled={saving} onClick={handleCreateBom} className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-sm font-medium hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50">
+                Save BOM Recipe
+              </button>
+            </div>
           </div>
         </section>
 

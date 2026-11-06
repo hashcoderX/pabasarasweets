@@ -23,6 +23,38 @@ use Barryvdh\DomPDF\Facade\Pdf;
 
 class DistributionInvoiceController extends Controller
 {
+    private function resolvePaymentCloseStatus(): string
+    {
+        try {
+            if (!Schema::hasColumn('distribution_payments', 'status')) {
+                return 'pending';
+            }
+
+            $column = DB::selectOne("SHOW COLUMNS FROM distribution_payments WHERE Field = 'status'");
+            $statusType = is_object($column) && isset($column->Type)
+                ? (string) $column->Type
+                : '';
+
+            if ($statusType !== '' && str_contains($statusType, "'closed'")) {
+                return 'closed';
+            }
+
+            if ($statusType !== '' && str_contains($statusType, "'cleared'")) {
+                return 'cleared';
+            }
+
+            if ($statusType !== '' && str_contains($statusType, "'returned'")) {
+                return 'returned';
+            }
+        } catch (\Throwable $exception) {
+            Log::warning('Failed to inspect distribution_payments.status enum, falling back to pending.', [
+                'error' => $exception->getMessage(),
+            ]);
+        }
+
+        return 'pending';
+    }
+
     private function resolveAccessibleEmployeeIds(int $employeeId): array
     {
         $accessible = [$employeeId];
@@ -596,7 +628,7 @@ class DistributionInvoiceController extends Controller
         ]);
     }
 
-    public function destroy(string $id): JsonResponse
+    public function destroy(Request $request, string $id): JsonResponse
     {
         $invoice = DistributionInvoice::with(['items', 'payments', 'customer'])->find($id);
 
@@ -607,9 +639,10 @@ class DistributionInvoiceController extends Controller
             ], 404);
         }
 
-        $result = DB::transaction(function () use ($invoice) {
+        $result = DB::transaction(function () use ($invoice, $request) {
             $restoredToLoadQty = 0;
             $restoredToInventoryQty = 0;
+            $restoreLoadId = (int) ($request->input('restore_load_id') ?? 0);
 
             foreach ($invoice->items as $item) {
                 $quantity = (float) $item->quantity;
@@ -618,6 +651,9 @@ class DistributionInvoiceController extends Controller
                 }
 
                 $lineLoadId = $item->load_id ?: $invoice->load_id;
+                if (empty($lineLoadId) && $restoreLoadId > 0) {
+                    $lineLoadId = $restoreLoadId;
+                }
                 $restored = false;
 
                 if (!empty($lineLoadId)) {
@@ -683,20 +719,44 @@ class DistributionInvoiceController extends Controller
 
             $pendingAmount = max(0, (float) $invoice->total - (float) $invoice->paid_amount);
 
+            $returnedPaymentCount = 0;
+            $returnedPaymentAmount = 0.0;
+            $payments = DistributionPayment::where('distribution_invoice_id', $invoice->id)
+                ->lockForUpdate()
+                ->get();
+
+            $returnStatus = $this->resolvePaymentCloseStatus();
+
+            foreach ($payments as $payment) {
+                $existingNotes = trim((string) ($payment->notes ?? ''));
+                $returnNote = sprintf(
+                    'Payment marked as closed due to invoice deletion: %s',
+                    (string) $invoice->invoice_number
+                );
+
+                $payment->status = $returnStatus;
+                $payment->notes = $existingNotes !== ''
+                    ? ($existingNotes . "\n" . $returnNote)
+                    : $returnNote;
+                $payment->save();
+
+                $returnedPaymentCount++;
+                $returnedPaymentAmount += (float) ($payment->amount ?? 0);
+            }
+
             if ($invoice->customer) {
                 $currentOutstanding = (float) ($invoice->customer->outstanding ?? 0);
                 $invoice->customer->outstanding = max(0, $currentOutstanding - $pendingAmount);
                 $invoice->customer->save();
             }
 
-            $deletedPayments = DistributionPayment::where('distribution_invoice_id', $invoice->id)->delete();
-
             $invoice->delete();
 
             return [
                 'restored_to_load_qty' => round($restoredToLoadQty, 2),
                 'restored_to_inventory_qty' => round($restoredToInventoryQty, 2),
-                'deleted_payments' => $deletedPayments,
+                'returned_payment_count' => $returnedPaymentCount,
+                'returned_payment_amount' => round($returnedPaymentAmount, 2),
                 'outstanding_reduced_by' => round($pendingAmount, 2),
             ];
         });
@@ -704,7 +764,7 @@ class DistributionInvoiceController extends Controller
         return response()->json([
             'success' => true,
             'data' => $result,
-            'message' => 'Distribution invoice deleted and stock/outstanding rolled back successfully',
+            'message' => 'Distribution invoice deleted, stock rolled back, and related payments marked as returned',
         ]);
     }
 }

@@ -33,6 +33,8 @@ interface InventoryItem {
   expiry_date: string | null;
   status: 'active' | 'inactive';
   additional_info?: {
+    is_packaging_material?: boolean;
+    isPackagingMaterial?: boolean;
     store_tag?: string;
     stock_source?: string;
     last_batch_no?: string;
@@ -124,10 +126,12 @@ export default function Inventory() {
   const [stockFilter, setStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_stock'>('all');
   const [recordStatusFilter, setRecordStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [rawQualityFilter, setRawQualityFilter] = useState<'all' | 'pending' | 'accepted' | 'rejected' | 'partial'>('all');
+  const [rawPackagingFilter, setRawPackagingFilter] = useState<'all' | 'packaging' | 'non_packaging'>('all');
   const [tablePage, setTablePage] = useState(1);
   const [tablePageSize, setTablePageSize] = useState(10);
   const [dbCategorySuggestions, setDbCategorySuggestions] = useState<string[]>([]);
   const [savingCategory, setSavingCategory] = useState(false);
+  const [packagingMarkingId, setPackagingMarkingId] = useState<number | null>(null);
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
   const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
@@ -194,6 +198,7 @@ export default function Inventory() {
     setStockFilter('all');
     setRecordStatusFilter('all');
     setRawQualityFilter('all');
+    setRawPackagingFilter('all');
     setTablePage(1);
   }, [activeTab]);
 
@@ -699,6 +704,59 @@ export default function Inventory() {
     return info as Record<string, unknown>;
   };
 
+  const isPackagingMaterialItem = (item: InventoryItem): boolean => {
+    if (item.type !== 'raw_material') return false;
+    const info = resolveAdditionalInfo(item);
+    const marker = info.is_packaging_material ?? info.isPackagingMaterial;
+    if (typeof marker === 'boolean') return marker;
+    return String(item.category || '').toLowerCase().includes('packaging');
+  };
+
+  const togglePackagingMaterial = async (item: InventoryItem, markAsPackaging: boolean) => {
+    if (!token || item.type !== 'raw_material') return;
+
+    const baseItemId = Number(item.inventory_item_id || item.id || 0);
+    if (!baseItemId) return;
+
+    try {
+      setPackagingMarkingId(baseItemId);
+      const info = resolveAdditionalInfo(item);
+      const nextAdditionalInfo = {
+        ...info,
+        is_packaging_material: markAsPackaging,
+      };
+
+      await axios.put(`/api/stock/inventory/${baseItemId}`, {
+        name: item.name,
+        code: item.code,
+        description: item.description || '',
+        type: 'raw_material',
+        category: item.category || '',
+        unit: item.unit,
+        current_stock: toSafeNumber(item.current_stock),
+        minimum_stock: toSafeNumber(item.minimum_stock),
+        maximum_stock: toSafeNumber(item.maximum_stock),
+        unit_price: resolveItemPrice(item),
+        sell_price: item.sell_price ?? null,
+        supplier_name: item.supplier_name || '',
+        supplier_id: item.supplier_id ?? null,
+        location: item.location || '',
+        expiry_date: item.expiry_date || null,
+        status: item.status || 'active',
+        additional_info: nextAdditionalInfo,
+      }, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      await fetchItems();
+    } catch (error) {
+      console.error('Error updating packaging material marker:', error);
+      alert('Failed to update packaging marker for this item.');
+    } finally {
+      setPackagingMarkingId(null);
+    }
+  };
+
   const modalLabelClass = 'block text-xs font-semibold uppercase tracking-wide text-gray-600';
   const modalInputClass = 'mt-1.5 block w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm transition-all duration-200 placeholder:text-gray-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
   const modalSelectClass = 'mt-1.5 block w-full rounded-xl border border-orange-100 bg-gradient-to-b from-white to-orange-50/30 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm transition-all duration-200 focus:border-orange-400 focus:ring-4 focus:ring-orange-100 focus:outline-none';
@@ -740,9 +798,15 @@ export default function Inventory() {
         }
       }
 
+      if (activeTab === 'raw_material' && rawPackagingFilter !== 'all') {
+        const isPackaging = isPackagingMaterialItem(item);
+        if (rawPackagingFilter === 'packaging' && !isPackaging) return false;
+        if (rawPackagingFilter === 'non_packaging' && isPackaging) return false;
+      }
+
       return true;
     });
-  }, [visibleItems, itemFilterQuery, recordStatusFilter, stockFilter, activeTab, rawQualityFilter]);
+  }, [visibleItems, itemFilterQuery, recordStatusFilter, stockFilter, activeTab, rawQualityFilter, rawPackagingFilter]);
   const totalTablePages = Math.max(1, Math.ceil(filteredVisibleItems.length / tablePageSize));
   const safeTablePage = Math.min(tablePage, totalTablePages);
   const tableStartIndex = (safeTablePage - 1) * tablePageSize;
@@ -757,7 +821,7 @@ export default function Inventory() {
 
   useEffect(() => {
     setTablePage(1);
-  }, [itemFilterQuery, stockFilter, recordStatusFilter, rawQualityFilter]);
+  }, [itemFilterQuery, stockFilter, recordStatusFilter, rawQualityFilter, rawPackagingFilter]);
 
   useEffect(() => {
     if (tablePage > totalTablePages) {
@@ -775,20 +839,6 @@ export default function Inventory() {
 
   return (
     <div className="min-h-screen space-y-6 bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.14),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)] p-4 sm:p-6 lg:p-8">
-      <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-            <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-            <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
-            <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
-          </div>
-        </div>
-      </section>
-
       {/* Header */}
       {isWidgetVisible('stock-inventory-hero-card') && <div className="overflow-hidden rounded-[30px] border border-white/70 bg-white/75 shadow-[0_26px_90px_-45px_rgba(194,65,12,0.5)] backdrop-blur-xl">
         <div className="grid gap-8 px-5 py-6 sm:px-6 lg:grid-cols-[1.3fr_1fr] lg:px-8">
@@ -977,6 +1027,7 @@ export default function Inventory() {
                   setStockFilter('all');
                   setRecordStatusFilter('all');
                   setRawQualityFilter('all');
+                  setRawPackagingFilter('all');
                 }}
                 className="text-xs font-semibold text-slate-600 underline hover:text-slate-800"
               >
@@ -984,7 +1035,7 @@ export default function Inventory() {
               </button>}
               {!widgetControlsLocked && isWidgetVisible('stock-inventory-filter-reset-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('stock-inventory-filter-reset-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
-            <div className={`grid grid-cols-1 gap-3 ${activeTab === 'raw_material' ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
+            <div className={`grid grid-cols-1 gap-3 ${activeTab === 'raw_material' ? 'md:grid-cols-5' : 'md:grid-cols-3'}`}>
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-600">Search</label>
                 <input
@@ -1036,6 +1087,21 @@ export default function Inventory() {
                     <option value="pending">Pending</option>
                     <option value="partial">Partial</option>
                     <option value="rejected">Rejected</option>
+                  </select>
+                </div>
+              )}
+
+              {activeTab === 'raw_material' && (
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Packaging Use</label>
+                  <select
+                    value={rawPackagingFilter}
+                    onChange={(e) => setRawPackagingFilter(e.target.value as 'all' | 'packaging' | 'non_packaging')}
+                    className="w-full rounded-xl border border-orange-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-orange-400 focus:outline-none focus:ring-4 focus:ring-orange-100"
+                  >
+                    <option value="all">All</option>
+                    <option value="packaging">Packaging Materials</option>
+                    <option value="non_packaging">Non Packaging</option>
                   </select>
                 </div>
               )}
@@ -1167,6 +1233,13 @@ export default function Inventory() {
                               <div className="text-sm text-gray-500">
                                 Total Item Stock: {toSafeNumber(item.current_stock).toFixed(2)} {item.unit}
                               </div>
+                              {isPackagingMaterialItem(item) && (
+                                <div className="mt-1">
+                                  <span className="inline-flex rounded-full bg-fuchsia-100 px-2 py-0.5 text-[11px] font-semibold text-fuchsia-800">
+                                    Packaging Material
+                                  </span>
+                                </div>
+                              )}
                               <div className="text-xs text-gray-500">
                                 Min: {toSafeNumber(item.minimum_stock).toFixed(2)} {item.unit}
                               </div>
@@ -1236,6 +1309,24 @@ export default function Inventory() {
                           </span>
                         </td>}
                         {isWidgetVisible('stock-inventory-column-actions') && <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                          {activeTab === 'raw_material' && <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void togglePackagingMaterial(item, !isPackagingMaterialItem(item));
+                            }}
+                            disabled={packagingMarkingId === baseItemId}
+                            className={`mr-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-50 ${
+                              isPackagingMaterialItem(item)
+                                ? 'border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100'
+                                : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            {packagingMarkingId === baseItemId
+                              ? 'Saving...'
+                              : isPackagingMaterialItem(item)
+                                ? 'Unmark Packaging'
+                                : 'Mark Packaging'}
+                          </button>}
                           {isWidgetVisible('stock-inventory-row-edit-button') && <button
                             onClick={(e) => {
                               e.stopPropagation();

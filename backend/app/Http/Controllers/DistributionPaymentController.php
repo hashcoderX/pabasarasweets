@@ -114,7 +114,7 @@ class DistributionPaymentController extends Controller
             'payment_method' => 'required|in:check,cash,bank_transfer',
             'reference_no' => 'nullable|string|max:100',
             'bank_name' => 'nullable|string|max:255',
-            'status' => 'nullable|in:received,cleared,bounced,pending',
+            'status' => 'nullable|in:received,cleared,bounced,pending,returned,closed',
             'notes' => 'nullable|string',
         ]);
 
@@ -217,7 +217,7 @@ class DistributionPaymentController extends Controller
             'payments.*.payment_method' => 'required|in:check,cash,bank_transfer',
             'payments.*.reference_no' => 'nullable|string|max:100',
             'payments.*.bank_name' => 'nullable|string|max:255',
-            'payments.*.status' => 'nullable|in:received,cleared,bounced,pending',
+            'payments.*.status' => 'nullable|in:received,cleared,bounced,pending,returned,closed',
             'payments.*.notes' => 'nullable|string',
         ]);
 
@@ -330,7 +330,7 @@ class DistributionPaymentController extends Controller
             'cheque_date' => 'nullable|date|required_if:payment_method,check',
             'reference_no' => 'nullable|string|max:100',
             'bank_name' => 'nullable|string|max:255',
-            'status' => 'nullable|in:received,cleared,bounced,pending',
+            'status' => 'nullable|in:received,cleared,bounced,pending,returned,closed',
             'notes' => 'nullable|string',
         ]);
 

@@ -70,12 +70,28 @@ type PackagingRow = {
 
 type RawMaterialOption = {
   id: number;
+  grnItem?: {
+    purchaseOrderItem?: {
+      unit_price?: number | null;
+    };
+  };
+  grn_item?: {
+    purchase_order_item?: {
+      unit_price?: number | null;
+    };
+  };
   inventoryItem?: {
     id: number;
     code: string;
     name: string;
     unit: string;
     current_stock: number;
+    unit_price?: number | null;
+    purchase_price?: number | null;
+    additional_info?: {
+      is_packaging_material?: boolean;
+      isPackagingMaterial?: boolean;
+    };
   };
   inventory_item?: {
     id: number;
@@ -83,12 +99,26 @@ type RawMaterialOption = {
     name: string;
     unit: string;
     current_stock: number;
+    unit_price?: number | null;
+    purchase_price?: number | null;
+    additional_info?: {
+      is_packaging_material?: boolean;
+      isPackagingMaterial?: boolean;
+    };
   };
 };
 
 type PackagingMaterialLine = {
   raw_material_id: number;
   quantity_per_pack: string;
+};
+
+type PackagingCostEstimate = {
+  unitCostPerPack: number;
+  totalCost: number;
+  pricedLineCount: number;
+  missingPriceCount: number;
+  overAllocatedQty: number;
 };
 
 type PackagingSummary = {
@@ -170,6 +200,8 @@ export default function PackagingManagementPage() {
   const [toDate, setToDate] = useState('');
   const [statusFilter, setStatusFilter] = useState<'planned' | 'packed' | 'dispatched' | ''>('');
   const [search, setSearch] = useState('');
+  const [packagingCurrentPage, setPackagingCurrentPage] = useState(1);
+  const packagingPageSize = 10;
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
   const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
@@ -423,11 +455,81 @@ export default function PackagingManagementPage() {
 
   const resolveRawInventory = (raw: RawMaterialOption) => raw.inventoryItem || raw.inventory_item;
 
+  const toSafeNumber = (value: unknown): number => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const resolveRawUnitPrice = (raw: RawMaterialOption): number => {
+    const inventory = resolveRawInventory(raw);
+    const candidates = [
+      raw?.grnItem?.purchaseOrderItem?.unit_price,
+      raw?.grn_item?.purchase_order_item?.unit_price,
+      inventory?.purchase_price,
+      inventory?.unit_price,
+    ];
+
+    for (const candidate of candidates) {
+      const price = toSafeNumber(candidate);
+      if (price > 0) return price;
+    }
+
+    return 0;
+  };
+
+  const estimatePackagingCost = (
+    lines: PackagingMaterialLine[],
+    packedQtyValue: string,
+    allocatedQtyValue?: number
+  ): PackagingCostEstimate => {
+    let unitCostPerPack = 0;
+    let pricedLineCount = 0;
+    let missingPriceCount = 0;
+
+    for (const line of lines) {
+      const rawMaterialId = Number(line.raw_material_id || 0);
+      const qtyPerPack = toSafeNumber(line.quantity_per_pack);
+      if (rawMaterialId <= 0 || qtyPerPack <= 0) continue;
+
+      const raw = uniqueRawMaterialOptions.find((option) => Number(option.id) === rawMaterialId);
+      if (!raw) continue;
+
+      const unitPrice = resolveRawUnitPrice(raw);
+      if (unitPrice <= 0) {
+        missingPriceCount += 1;
+        continue;
+      }
+
+      unitCostPerPack += qtyPerPack * unitPrice;
+      pricedLineCount += 1;
+    }
+
+    const packedQtyNumber = Math.max(0, toSafeNumber(packedQtyValue));
+    const allocatedQty = Math.max(0, toSafeNumber(allocatedQtyValue));
+    const effectiveQty = allocatedQty > 0 ? Math.min(packedQtyNumber, allocatedQty) : packedQtyNumber;
+    const overAllocatedQty = allocatedQty > 0 ? Math.max(0, packedQtyNumber - allocatedQty) : 0;
+
+    return {
+      unitCostPerPack,
+      totalCost: unitCostPerPack * effectiveQty,
+      pricedLineCount,
+      missingPriceCount,
+      overAllocatedQty,
+    };
+  };
+
+  const isPackagingMaterialOption = (raw: RawMaterialOption) => {
+    const info = resolveRawInventory(raw)?.additional_info;
+    return Boolean(info?.is_packaging_material || info?.isPackagingMaterial);
+  };
+
   const uniqueRawMaterialOptions = useMemo(() => {
     const seen = new Set<string>();
     const unique: RawMaterialOption[] = [];
 
     for (const raw of rawMaterialOptions) {
+      if (!isPackagingMaterialOption(raw)) continue;
+
       const inv = resolveRawInventory(raw);
       const codeKey = String(inv?.code || '').trim().toLowerCase();
       const nameKey = String(inv?.name || '').trim().toLowerCase();
@@ -443,6 +545,19 @@ export default function PackagingManagementPage() {
 
     return unique;
   }, [rawMaterialOptions]);
+
+  const selectedQc = approvedQc.find((qc) => qc.id === selectedQcId) || null;
+  const selectedQcBalance = Number(selectedQc?.balance_quantity ?? selectedQc?.approved_quantity ?? 0);
+
+  const createCostEstimate = useMemo(
+    () => estimatePackagingCost(createMaterialLines, packedQty, selectedQcBalance),
+    [createMaterialLines, packedQty, selectedQcBalance, uniqueRawMaterialOptions]
+  );
+
+  const updateCostEstimate = useMemo(
+    () => estimatePackagingCost(updateMaterialLines, updatePackedQty),
+    [updateMaterialLines, updatePackedQty, uniqueRawMaterialOptions]
+  );
 
   const normalizeMaterialLines = (lines: PackagingMaterialLine[]) => {
     return lines
@@ -489,8 +604,6 @@ export default function PackagingManagementPage() {
     }
   }, [selectedQcId, approvedQc, finalProductName]);
 
-  const selectedQc = approvedQc.find((qc) => qc.id === selectedQcId) || null;
-  const selectedQcBalance = Number(selectedQc?.balance_quantity ?? selectedQc?.approved_quantity ?? 0);
   const transferTargetOptions = approvedQc.filter((qc) => qc.id !== selectedQcId);
 
   const openTransferModal = () => {
@@ -564,8 +677,22 @@ export default function PackagingManagementPage() {
 
   const applyFilters = async () => {
     if (!token) return;
+    setPackagingCurrentPage(1);
     await loadData(token);
   };
+
+  const sortedPackagingRows = useMemo(
+    () => [...rows].sort((a, b) => Number(b.id || 0) - Number(a.id || 0)),
+    [rows]
+  );
+
+  const packagingTotalPages = Math.max(1, Math.ceil(sortedPackagingRows.length / packagingPageSize));
+  const packagingStartIndex = (packagingCurrentPage - 1) * packagingPageSize;
+  const pagedPackagingRows = sortedPackagingRows.slice(packagingStartIndex, packagingStartIndex + packagingPageSize);
+
+  useEffect(() => {
+    setPackagingCurrentPage((prev) => Math.min(prev, packagingTotalPages));
+  }, [packagingTotalPages]);
 
   const createBatch = async () => {
     if (!token) return;
@@ -815,20 +942,6 @@ export default function PackagingManagementPage() {
       </nav>}
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
-
         {message && <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{message}</div>}
 
         {isWidgetVisible('production-packaging-summary-cards') && <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
@@ -952,8 +1065,18 @@ export default function PackagingManagementPage() {
                 <input type="number" min="0" step="0.001" value={packedQty} onChange={(e) => setPackedQty(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Costing Price (LKR)</label>
+                <label className="mb-1 block text-xs font-medium text-gray-600">
+                  Costing Price (LKR)
+                  <span className="ml-2 text-[11px] font-semibold text-emerald-700">
+                    Est: {createCostEstimate.unitCostPerPack.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </label>
                 <input type="number" min="0" step="0.01" value={costingPrice} onChange={(e) => setCostingPrice(e.target.value)} className={inputClass} />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Estimated total: LKR {createCostEstimate.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {createCostEstimate.overAllocatedQty > 0 ? ` | Over allocated by ${createCostEstimate.overAllocatedQty.toFixed(3)} units` : ''}
+                  {createCostEstimate.missingPriceCount > 0 ? ` | ${createCostEstimate.missingPriceCount} item(s) missing price` : ''}
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Selling Price (LKR)</label>
@@ -1096,8 +1219,17 @@ export default function PackagingManagementPage() {
                 <input type="number" min="0" step="0.001" value={updatePackedQty} onChange={(e) => setUpdatePackedQty(e.target.value)} className={inputClass} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Costing Price (LKR)</label>
+                <label className="mb-1 block text-xs font-medium text-gray-600">
+                  Costing Price (LKR)
+                  <span className="ml-2 text-[11px] font-semibold text-emerald-700">
+                    Est: {updateCostEstimate.unitCostPerPack.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </label>
                 <input type="number" min="0" step="0.01" value={updateCostingPrice} onChange={(e) => setUpdateCostingPrice(e.target.value)} className={inputClass} />
+                <p className="mt-1 text-[11px] text-gray-500">
+                  Estimated total: LKR {updateCostEstimate.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {updateCostEstimate.missingPriceCount > 0 ? ` | ${updateCostEstimate.missingPriceCount} item(s) missing price` : ''}
+                </p>
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Selling Price (LKR)</label>
@@ -1145,49 +1277,71 @@ export default function PackagingManagementPage() {
         </div>
 
         <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-200/80 bg-gradient-to-r from-rose-50 to-pink-50 text-sm font-semibold text-gray-800">Packaging Batches</div>
+          <div className="border-b border-gray-200/80 bg-gradient-to-r from-rose-50 to-pink-50 px-4 py-3">
+            <p className="text-sm font-semibold text-gray-800">Packaging Batches</p>
+            <p className="mt-0.5 text-xs text-gray-600">Latest batches appear first. Use filters above to narrow records quickly.</p>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Batch</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Batch No</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Order</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Final Product Name</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Material</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Packed Qty</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Costing Price</th>
-                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Selling Price</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Expiry</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Label</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Barcode / QR</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Batch ID</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Production Batch</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Order No</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Product</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Final Pack Name</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Material Per Pack</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">Packed Qty</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">Cost (LKR)</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">Sell (LKR)</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Expiry Date</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Label Code</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Barcode / QR</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Status</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {rows.length === 0 ? (
                   <tr><td colSpan={14} className="px-4 py-8 text-center text-sm text-gray-500">No packaging batches found.</td></tr>
                 ) : (
-                  rows.map((row) => {
+                  pagedPackagingRows.map((row) => {
                     const order = resolveOrder(row);
                     return (
                       <tr key={row.id} className="hover:bg-rose-50/40 transition-colors">
-                        <td className="px-4 py-2.5 text-sm text-gray-800 font-medium">#{row.id}</td>
-                        <td className="px-4 py-2.5 text-xs text-indigo-700 font-semibold">{row.batch_no || order?.batch_no || '-'}</td>
+                        <td className="px-4 py-2.5 text-sm font-medium text-gray-800">#{row.id}</td>
+                        <td className="px-4 py-2.5 text-xs font-semibold text-indigo-700">{row.batch_no || order?.batch_no || '-'}</td>
                         <td className="px-4 py-2.5 text-sm text-indigo-700">{order?.plan?.order_number || '-'}</td>
-                        <td className="px-4 py-2.5 text-sm text-gray-700">{order?.product?.code || '-'} - {order?.product?.name || '-'}</td>
-                        <td className="px-4 py-2.5 text-sm text-gray-700 font-semibold">{row.final_product_name || '-'}</td>
-                        <td className="px-4 py-2.5 text-sm text-gray-700">{row.packaging_material_name} ({Number(row.packaging_material_quantity || 0).toFixed(3)} {row.packaging_material_unit})</td>
+                        <td className="px-4 py-2.5 text-sm text-gray-700">
+                          <div className="font-medium text-gray-800">{order?.product?.name || '-'}</div>
+                          <div className="text-xs text-gray-500">{order?.product?.code || '-'}</div>
+                        </td>
+                        <td className="px-4 py-2.5 text-sm font-semibold text-gray-700">{row.final_product_name || '-'}</td>
+                        <td className="px-4 py-2.5 text-sm text-gray-700">
+                          <div>{row.packaging_material_name}</div>
+                          <div className="text-xs text-gray-500">{Number(row.packaging_material_quantity || 0).toFixed(3)} {row.packaging_material_unit}</div>
+                        </td>
                         <td className="px-4 py-2.5 text-sm text-right text-rose-700 font-semibold">{Number(row.packed_quantity || 0).toFixed(3)}</td>
-                        <td className="px-4 py-2.5 text-sm text-right text-gray-700">LKR {Number(row.unit_price || 0).toFixed(2)}</td>
-                        <td className="px-4 py-2.5 text-sm text-right text-gray-700">LKR {Number(row.selling_price || 0).toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-sm text-right text-gray-700">{Number(row.unit_price || 0).toFixed(2)}</td>
+                        <td className="px-4 py-2.5 text-sm text-right text-gray-700">{Number(row.selling_price || 0).toFixed(2)}</td>
                         <td className="px-4 py-2.5 text-xs text-gray-700">{row.expiry_date ? String(row.expiry_date).slice(0, 10) : '-'}</td>
-                        <td className="px-4 py-2.5 text-xs text-gray-700 font-semibold">{row.label_code}</td>
-                        <td className="px-4 py-2.5 text-xs text-gray-600">BAR: {row.barcode_value || '-'}<br />QR: {row.qr_value || '-'}</td>
+                        <td className="px-4 py-2.5 text-xs font-semibold text-gray-700">{row.label_code}</td>
+                        <td className="px-4 py-2.5 text-xs text-gray-600">
+                          <div>BAR: {row.barcode_value || '-'}</div>
+                          <div>QR: {row.qr_value || '-'}</div>
+                        </td>
                         <td className="px-4 py-2.5 text-sm font-semibold">
-                          <span className={row.status === 'dispatched' ? 'text-indigo-700' : row.status === 'packed' ? 'text-emerald-700' : 'text-slate-700'}>{row.status}</span>
+                          <span
+                            className={`inline-flex rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                              row.status === 'dispatched'
+                                ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
+                                : row.status === 'packed'
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                  : 'border-slate-200 bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            {row.status}
+                          </span>
                         </td>
                         <td className="px-4 py-2.5 text-sm">
                           <button
@@ -1206,6 +1360,38 @@ export default function PackagingManagementPage() {
               </tbody>
             </table>
           </div>
+          {rows.length > 0 && (
+            <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-600 sm:px-6">
+              <p>
+                Showing {packagingStartIndex + 1}
+                {' '}-{' '}
+                {Math.min(packagingStartIndex + packagingPageSize, sortedPackagingRows.length)}
+                {' '}of{' '}
+                {sortedPackagingRows.length} batches
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPackagingCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={packagingCurrentPage <= 1}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-[11px] text-gray-500">
+                  Page {packagingCurrentPage} of {packagingTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPackagingCurrentPage((prev) => Math.min(packagingTotalPages, prev + 1))}
+                  disabled={packagingCurrentPage >= packagingTotalPages}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
         {!widgetControlsLocked && <div><button type="button" onClick={() => stageWidgetVisibilityChange('production-packaging-content-panels', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
         </>}

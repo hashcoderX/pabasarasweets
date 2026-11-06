@@ -87,6 +87,13 @@ export default function DistributionReturnsPage() {
   const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
   const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
   const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+  const [returnsCurrentPage, setReturnsCurrentPage] = useState(1);
+  const returnsPageSize = 10;
+  const [returnsFilterSearch, setReturnsFilterSearch] = useState('');
+  const [returnsFilterStatus, setReturnsFilterStatus] = useState('all');
+  const [returnsFilterCustomerId, setReturnsFilterCustomerId] = useState('all');
+  const [returnsFilterDateFrom, setReturnsFilterDateFrom] = useState('');
+  const [returnsFilterDateTo, setReturnsFilterDateTo] = useState('');
 
   const [form, setForm] = useState({
     return_number: '',
@@ -516,6 +523,68 @@ export default function DistributionReturnsPage() {
     }
   }, [form.distribution_invoice_id, linkedInvoiceOptions]);
 
+  const returnStatusOptions = useMemo(() => {
+    const statuses = Array.from(
+      new Set(
+        returns
+          .map((row) => String(row?.status || '').trim())
+          .filter(Boolean)
+      )
+    ).sort((a, b) => a.localeCompare(b));
+    return statuses;
+  }, [returns]);
+
+  const filteredReturns = useMemo(() => {
+    const searchTerm = returnsFilterSearch.trim().toLowerCase();
+    const fromDateTime = returnsFilterDateFrom ? new Date(`${returnsFilterDateFrom}T00:00:00`).getTime() : null;
+    const toDateTime = returnsFilterDateTo ? new Date(`${returnsFilterDateTo}T23:59:59`).getTime() : null;
+
+    return returns.filter((row) => {
+      const status = String(row?.status || '').trim().toLowerCase();
+      if (returnsFilterStatus !== 'all' && status !== returnsFilterStatus.toLowerCase()) return false;
+
+      if (returnsFilterCustomerId !== 'all' && Number(row?.customer_id || 0) !== Number(returnsFilterCustomerId || 0)) return false;
+
+      const rowDateTime = row?.return_date ? new Date(String(row.return_date)).getTime() : NaN;
+      if (fromDateTime !== null && !Number.isNaN(rowDateTime) && rowDateTime < fromDateTime) return false;
+      if (toDateTime !== null && !Number.isNaN(rowDateTime) && rowDateTime > toDateTime) return false;
+      if ((fromDateTime !== null || toDateTime !== null) && Number.isNaN(rowDateTime)) return false;
+
+      if (!searchTerm) return true;
+      const linkedInvoice = row.invoice || invoices.find((inv) => Number(inv.id) === Number(row.distribution_invoice_id));
+      const haystack = [
+        row?.return_number,
+        row?.customer?.shop_name,
+        row?.customer?.customer_code,
+        linkedInvoice?.invoice_number,
+        row?.reason,
+        row?.notes,
+      ]
+        .map((value) => String(value || '').toLowerCase())
+        .join(' ');
+
+      return haystack.includes(searchTerm);
+    });
+  }, [returns, invoices, returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo]);
+
+  const returnsTotalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredReturns.length / returnsPageSize)),
+    [filteredReturns.length]
+  );
+
+  const pagedReturns = useMemo(() => {
+    const start = (returnsCurrentPage - 1) * returnsPageSize;
+    return filteredReturns.slice(start, start + returnsPageSize);
+  }, [filteredReturns, returnsCurrentPage]);
+
+  useEffect(() => {
+    setReturnsCurrentPage(1);
+  }, [returns.length]);
+
+  useEffect(() => {
+    setReturnsCurrentPage(1);
+  }, [returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo]);
+
   const syncOfflineReturns = useCallback(async () => {
     if (!token || syncingOfflineReturns || pendingOfflineReturns.length === 0) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
@@ -743,6 +812,67 @@ export default function DistributionReturnsPage() {
             </div>
             {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-records-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
+          <div className="border-b border-gray-100 px-4 py-3 sm:px-6">
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-5">
+              <input
+                type="text"
+                value={returnsFilterSearch}
+                onChange={(e) => setReturnsFilterSearch(e.target.value)}
+                placeholder="Search return/customer/invoice"
+                className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              />
+              <select
+                value={returnsFilterStatus}
+                onChange={(e) => setReturnsFilterStatus(e.target.value)}
+                className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              >
+                <option value="all">All status</option>
+                {returnStatusOptions.map((status) => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+              <select
+                value={returnsFilterCustomerId}
+                onChange={(e) => setReturnsFilterCustomerId(e.target.value)}
+                className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              >
+                <option value="all">All customers</option>
+                {scopedCustomers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>
+                    {customer.shop_name}
+                    {customer.customer_code ? ` (${customer.customer_code})` : ''}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="date"
+                value={returnsFilterDateFrom}
+                onChange={(e) => setReturnsFilterDateFrom(e.target.value)}
+                className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+              />
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={returnsFilterDateTo}
+                  onChange={(e) => setReturnsFilterDateTo(e.target.value)}
+                  className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReturnsFilterSearch('');
+                    setReturnsFilterStatus('all');
+                    setReturnsFilterCustomerId('all');
+                    setReturnsFilterDateFrom('');
+                    setReturnsFilterDateTo('');
+                  }}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               {isWidgetVisible('distribution-returns-records-table-headings') && <thead className="bg-gray-50">
@@ -762,12 +892,12 @@ export default function DistributionReturnsPage() {
                   <tr>
                     <td colSpan={8} className="px-4 py-8 text-center text-gray-500">Loading...</td>
                   </tr>
-                ) : returns.length === 0 ? (
+                ) : filteredReturns.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-gray-500">No returns yet.</td>
+                    <td colSpan={8} className="px-4 py-8 text-center text-gray-500">No returns match the filters.</td>
                   </tr>
                 ) : (
-                  returns.map((row) => {
+                  pagedReturns.map((row) => {
                     const linkedInvoice = row.invoice || invoices.find((inv) => Number(inv.id) === Number(row.distribution_invoice_id));
                     return (
                       <tr key={row.id} className="hover:bg-gray-50">
@@ -808,6 +938,38 @@ export default function DistributionReturnsPage() {
               </tbody>
             </table>
           </div>
+          {!loading && filteredReturns.length > 0 && (
+            <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-600 sm:px-6">
+              <p>
+                Showing {(returnsCurrentPage - 1) * returnsPageSize + 1}
+                {' '}-{' '}
+                {Math.min(returnsCurrentPage * returnsPageSize, filteredReturns.length)}
+                {' '}of{' '}
+                {filteredReturns.length} returns
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReturnsCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={returnsCurrentPage <= 1}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-[11px] text-gray-500">
+                  Page {returnsCurrentPage} of {returnsTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setReturnsCurrentPage((prev) => Math.min(returnsTotalPages, prev + 1))}
+                  disabled={returnsCurrentPage >= returnsTotalPages}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>}
       </main>
 
@@ -1279,6 +1441,7 @@ export default function DistributionReturnsPage() {
                 const settlementType: string | undefined = viewReturn.settlement_type;
                 const settlementAmount = Number(viewReturn.settlement_amount || 0);
                 const exchangeQty = Number(viewReturn.exchange_quantity || 0);
+                const noteText = String(viewReturn.notes || '');
 
                 const settlementLabel = settlementType === 'bill_deduction'
                   ? 'Deduct bill amount'
@@ -1288,12 +1451,63 @@ export default function DistributionReturnsPage() {
                   ? 'Item exchange'
                   : settlementType || 'Not specified';
 
+                const parsedReturnedItems: Array<{ item: string; qty?: string; amount?: string }> = [];
+                const noteLines = noteText.split('\n');
+
+                const returnItemsStart = noteLines.findIndex((line) => line.trim() === '[RETURN ITEMS]');
+                const returnItemsEnd = noteLines.findIndex((line) => line.trim() === '[/RETURN ITEMS]');
+                if (returnItemsStart >= 0 && returnItemsEnd > returnItemsStart) {
+                  noteLines.slice(returnItemsStart + 1, returnItemsEnd).forEach((line) => {
+                    const text = line.trim();
+                    if (!text) return;
+
+                    const cleaned = text.replace(/^\d+\.\s*/, '');
+                    const parts = cleaned.split('|').map((part) => part.trim());
+                    const itemLabel = parts[0] || cleaned;
+                    const qty = parts.find((part) => part.toLowerCase().startsWith('qty:'))?.split(':')[1]?.trim();
+                    const amount = parts.find((part) => part.toLowerCase().startsWith('amount:'))?.split(':')[1]?.trim();
+
+                    parsedReturnedItems.push({ item: itemLabel, qty, amount });
+                  });
+                }
+
+                if (parsedReturnedItems.length === 0) {
+                  const itemReturnsStart = noteLines.findIndex((line) => line.trim() === '[ITEM RETURNS]');
+                  if (itemReturnsStart >= 0) {
+                    for (let i = itemReturnsStart + 1; i < noteLines.length; i += 1) {
+                      const text = noteLines[i].trim();
+                      if (!text || text.startsWith('[')) break;
+                      if (!text.startsWith('-')) continue;
+
+                      const cleaned = text.replace(/^-\s*/, '');
+                      parsedReturnedItems.push({ item: cleaned });
+                    }
+                  }
+                }
+
+                const hasParsedReturnItems = parsedReturnedItems.length > 0;
+
                 return (
                   <div className="space-y-3 mt-2">
                     <div className="border border-gray-200 rounded-lg overflow-hidden">
-                      <div className="bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-600">Returned Item</div>
+                      <div className="bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-600">Returned Item{hasParsedReturnItems ? 's' : ''}</div>
                       <div className="px-3 py-2 text-xs sm:text-sm">
-                        {returned ? (
+                        {hasParsedReturnItems ? (
+                          <div className="space-y-2">
+                            {parsedReturnedItems.map((entry, idx) => (
+                              <div key={`returned-item-${idx}`} className="rounded-md border border-gray-100 bg-gray-50/40 px-2 py-1.5">
+                                <div className="font-medium text-gray-800">{entry.item}</div>
+                                {(entry.qty || entry.amount) && (
+                                  <div className="mt-0.5 text-[11px] text-gray-600">
+                                    {entry.qty ? `Qty: ${entry.qty}` : ''}
+                                    {entry.qty && entry.amount ? ' | ' : ''}
+                                    {entry.amount ? `Amount: ${entry.amount}` : ''}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        ) : returned ? (
                           <>
                             <div className="flex justify-between">
                               <div className="font-medium text-gray-800">{returned.name}</div>

@@ -123,6 +123,7 @@ export default function LoadItemsPage() {
   const [itemSearch, setItemSearch] = useState('');
   const [showItemDropdown, setShowItemDropdown] = useState(false);
   const [highlightedItemIndex, setHighlightedItemIndex] = useState(-1);
+  const [loadSelectionPage, setLoadSelectionPage] = useState(1);
   const itemInputRef = useRef<HTMLInputElement | null>(null);
   const itemDropdownRef = useRef<HTMLDivElement | null>(null);
   const [formData, setFormData] = useState({
@@ -136,6 +137,11 @@ export default function LoadItemsPage() {
   const router = useRouter();
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
   const hiddenWidgetCount = vehicleLoadingLoadItemsWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+  const loadSelectionPageSize = 5;
+  const loadSelectionTotalPages = Math.max(1, Math.ceil(loads.length / loadSelectionPageSize));
+  const safeLoadSelectionPage = Math.min(loadSelectionPage, loadSelectionTotalPages);
+  const loadSelectionStartIndex = (safeLoadSelectionPage - 1) * loadSelectionPageSize;
+  const pagedLoads = loads.slice(loadSelectionStartIndex, loadSelectionStartIndex + loadSelectionPageSize);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -153,6 +159,10 @@ export default function LoadItemsPage() {
       fetchWidgetVisibility(token);
     }
   }, [token]);
+
+  useEffect(() => {
+    setLoadSelectionPage((prev) => Math.min(prev, loadSelectionTotalPages));
+  }, [loadSelectionTotalPages]);
 
   const fetchWidgetVisibility = async (authToken?: string) => {
     const tokenToUse = authToken || token;
@@ -898,7 +908,7 @@ export default function LoadItemsPage() {
         {isWidgetVisible('vehicle-loading-load-items-load-selection-card') && <div className={`${sectionCardClass} p-6 mb-6`}>
           <h2 className="text-xl font-semibold text-slate-900 mb-4">Select Load</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {loads.map((load) => (
+            {pagedLoads.map((load) => (
               <div
                 key={load.id}
                 onClick={() => setSelectedLoad(load)}
@@ -919,6 +929,34 @@ export default function LoadItemsPage() {
               </div>
             ))}
           </div>
+          {loads.length > 0 && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <p className="text-xs text-slate-600">
+                Showing {loadSelectionStartIndex + 1} - {Math.min(loadSelectionStartIndex + loadSelectionPageSize, loads.length)} of {loads.length} loads
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLoadSelectionPage((prev) => Math.max(1, prev - 1))}
+                  disabled={safeLoadSelectionPage === 1}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-xs font-semibold text-slate-700">
+                  Page {safeLoadSelectionPage} of {loadSelectionTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setLoadSelectionPage((prev) => Math.min(loadSelectionTotalPages, prev + 1))}
+                  disabled={safeLoadSelectionPage === loadSelectionTotalPages}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
           {!widgetControlsLocked && <div className="mt-3"><button type="button" onClick={() => stageWidgetVisibilityChange('vehicle-loading-load-items-load-selection-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
         </div>}
 

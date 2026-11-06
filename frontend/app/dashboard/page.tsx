@@ -767,6 +767,21 @@ export default function Dashboard() {
     openSuperAdminConfirmation([], 'unlock');
   };
 
+  const openLockWidgetsAfterUnlock = () => {
+    const fallbackWidgetKey = allWidgetItems[0]?.id ?? 'hrm';
+    const fallbackVisibility = widgetVisibility[fallbackWidgetKey] !== false;
+
+    openSuperAdminConfirmation(
+      [
+        {
+          widget_key: fallbackWidgetKey,
+          is_visible: fallbackVisibility,
+        },
+      ],
+      'apply'
+    );
+  };
+
   const hiddenWidgetCount = allWidgetItems.filter((card) => widgetVisibility[card.id] === false).length;
 
   const handleModuleClick = (module: DashboardModule) => {
@@ -860,6 +875,15 @@ export default function Dashboard() {
                 className="rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
               >
                 Restore Hidden Widgets ({hiddenWidgetCount})
+              </button>
+            )}
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={openLockWidgetsAfterUnlock}
+                className="rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+              >
+                Lock Widgets
               </button>
             )}
             {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (

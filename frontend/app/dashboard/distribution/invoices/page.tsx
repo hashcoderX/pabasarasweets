@@ -2065,8 +2065,10 @@ export default function DistributionInvoicesPage() {
     if (!deleteConfirmInvoice) return;
 
     try {
+      const restoreLoadId = Number(activeLoadId || 0);
       await axios.delete(`/api/distribution/invoices/${deleteConfirmInvoice.id}`, {
         headers: { Authorization: `Bearer ${token}` },
+        params: restoreLoadId > 0 ? { restore_load_id: restoreLoadId } : undefined,
       });
 
       setDeleteConfirmInvoice(null);

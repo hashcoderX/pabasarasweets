@@ -167,6 +167,8 @@ interface DistributionInvoiceItemRecord {
   item_name: string;
   quantity: number;
   unit_price: number;
+  discount?: number;
+  line_total?: number;
 }
 
 interface SoldItemProfitRow {
@@ -342,6 +344,29 @@ export default function LoadsPage() {
     );
   }, [soldItemProfitRows]);
 
+  const loadSummaryPreview = useMemo(() => {
+    const sales = Number(soldItemProfitRows.length > 0
+      ? soldProfitTotals.net
+      : (deliverySummary?.invoices?.total_amount || 0));
+    const cost = Number(soldItemProfitRows.length > 0
+      ? soldProfitTotals.cost
+      : (deliverySummary?.invoices?.total_cost || 0));
+    const profit = Number(soldItemProfitRows.length > 0
+      ? soldProfitTotals.profit
+      : (deliverySummary?.invoices?.total_profit || 0));
+    const collected = Number(deliverySummary?.payments?.total_collected || 0);
+    const marginPct = sales > 0 ? (profit / sales) * 100 : 0;
+
+    return {
+      sales,
+      cost,
+      profit,
+      collected,
+      balance: sales - collected,
+      marginPct,
+    };
+  }, [deliverySummary, soldItemProfitRows.length, soldProfitTotals]);
+
   const loadBalanceRows = useMemo<LoadBalanceRow[]>(() => {
     const soldByCode = new Map<string, SoldItemProfitRow>();
     soldItemProfitRows.forEach((row) => {
@@ -410,6 +435,9 @@ export default function LoadsPage() {
       const customerId = Number(pay.customer_id || 0);
       if (!customerId) return;
 
+      const paymentStatus = String(pay.status || '').trim().toLowerCase();
+      if (paymentStatus === 'closed') return;
+
       const existing = grouped.get(customerId) || {
         customer_id: customerId,
         customer_name: pay.customer?.shop_name || `Customer #${customerId}`,
@@ -431,6 +459,14 @@ export default function LoadsPage() {
       }))
       .sort((a, b) => b.total_sale - a.total_sale);
   }, [loadInvoices, loadPayments]);
+
+  const collectedLoadPaymentsTotal = useMemo(() => {
+    return loadPayments.reduce((sum, pay) => {
+      const status = String(pay.status || '').trim().toLowerCase();
+      if (status === 'closed') return sum;
+      return sum + Number(pay.amount || 0);
+    }, 0);
+  }, [loadPayments]);
 
   const asRecord = useCallback((value: unknown): Record<string, unknown> | null => {
     if (!value || typeof value !== 'object') return null;
@@ -901,21 +937,43 @@ export default function LoadsPage() {
 
     invoices.forEach((inv) => {
       const items = Array.isArray(inv.items) ? inv.items : [];
-      const grossTotal = items.reduce(
-        (sum, it) => sum + (Number(it.quantity) || 0) * (Number(it.unit_price) || 0),
-        0
-      );
-      const invoiceDiscount = Math.max(0, Number(inv.discount) || 0);
-
-      items.forEach((it) => {
-        const code = String(it.item_code || '').trim();
-        if (!code) return;
-
+      const invoiceRows = items.map((it) => {
         const qty = Number(it.quantity) || 0;
         const unitPrice = Number(it.unit_price) || 0;
         const gross = qty * unitPrice;
-        const discountShare = grossTotal > 0 ? (invoiceDiscount * gross) / grossTotal : 0;
-        const net = Math.max(0, gross - discountShare);
+        const lineItemDiscount = Math.max(0, Number(it.discount) || 0);
+        const lineNetBeforeHeaderDiscount = Math.max(0, gross - lineItemDiscount);
+
+        return {
+          item: it,
+          qty,
+          gross,
+          lineItemDiscount,
+          lineNetBeforeHeaderDiscount,
+        };
+      });
+
+      const netBeforeHeaderDiscount = invoiceRows.reduce(
+        (sum, row) => sum + row.lineNetBeforeHeaderDiscount,
+        0
+      );
+      const invoiceDiscount = Math.max(0, Number(inv.discount) || 0);
+      const invoiceTotal = Number(inv.total);
+      const hasInvoiceTotal = Number.isFinite(invoiceTotal) && invoiceTotal >= 0;
+      const netTarget = hasInvoiceTotal
+        ? Math.max(0, invoiceTotal)
+        : Math.max(0, netBeforeHeaderDiscount - invoiceDiscount);
+      const headerDiscountPool = Math.max(0, netBeforeHeaderDiscount - netTarget);
+
+      invoiceRows.forEach(({ item: it, qty, gross, lineItemDiscount, lineNetBeforeHeaderDiscount }) => {
+        const code = String(it.item_code || '').trim();
+        if (!code) return;
+
+        const headerDiscountShare = netBeforeHeaderDiscount > 0
+          ? (headerDiscountPool * lineNetBeforeHeaderDiscount) / netBeforeHeaderDiscount
+          : 0;
+        const discountShare = lineItemDiscount + headerDiscountShare;
+        const net = Math.max(0, lineNetBeforeHeaderDiscount - headerDiscountShare);
         const outPrice = costByCode.get(code) ?? 0;
         const cost = qty * outPrice;
 
@@ -1966,7 +2024,7 @@ export default function LoadsPage() {
                         <div>
                           <p className="text-xs text-emerald-800 uppercase">Total Sale (Invoices)</p>
                           <p className="text-base font-semibold text-emerald-900">
-                            {Number(deliverySummary.invoices.total_amount || 0).toFixed(2)}
+                                {Number(loadSummaryPreview.sales || 0).toFixed(2)}
                           </p>
                           <p className="text-xs text-emerald-700">{deliverySummary.invoices.count} invoice(s)</p>
                         </div>
@@ -1984,10 +2042,7 @@ export default function LoadsPage() {
                         <div>
                           <p className="text-xs text-emerald-800 uppercase">Balance (Approx)</p>
                           <p className="text-base font-semibold text-emerald-900">
-                            {(
-                              Number(deliverySummary.invoices.total_amount || 0) -
-                              Number(deliverySummary.payments.total_collected || 0)
-                            ).toFixed(2)}
+                            {Number(loadSummaryPreview.balance || 0).toFixed(2)}
                           </p>
                           <p className="text-xs text-emerald-700">Total sale minus collected payments</p>
                         </div>
@@ -1997,38 +2052,19 @@ export default function LoadsPage() {
                         <div>
                           <p className="text-xs text-emerald-800 uppercase">Total Cost (Estimate)</p>
                           <p className="text-base font-semibold text-emerald-900">
-                            {Number(
-                              soldItemProfitRows.length > 0
-                                ? soldProfitTotals.cost
-                                : (deliverySummary.invoices.total_cost || 0)
-                            ).toFixed(2)}
+                            {Number(loadSummaryPreview.cost || 0).toFixed(2)}
                           </p>
                         </div>
                         <div>
                           <p className="text-xs text-emerald-800 uppercase">Total Profit (Estimate)</p>
                           <p className="text-base font-semibold text-emerald-900">
-                            {Number(
-                              soldItemProfitRows.length > 0
-                                ? soldProfitTotals.profit
-                                : (deliverySummary.invoices.total_profit || 0)
-                            ).toFixed(2)}
+                            {Number(loadSummaryPreview.profit || 0).toFixed(2)}
                           </p>
                         </div>
                         <div>
                           <p className="text-xs text-emerald-800 uppercase">Margin % (Approx)</p>
                           <p className="text-base font-semibold text-emerald-900">
-                            {(soldItemProfitRows.length > 0
-                              ? soldProfitTotals.net
-                              : Number(deliverySummary.invoices.total_amount || 0)) > 0
-                              ? ((
-                                  (soldItemProfitRows.length > 0
-                                    ? soldProfitTotals.profit
-                                    : Number(deliverySummary.invoices.total_profit || 0)) /
-                                  (soldItemProfitRows.length > 0
-                                    ? soldProfitTotals.net
-                                    : Number(deliverySummary.invoices.total_amount || 0))
-                                ) * 100).toFixed(1)
-                              : '0.0'}
+                            {Number(loadSummaryPreview.marginPct || 0).toFixed(1)}
                             %
                           </p>
                         </div>
@@ -2095,7 +2131,10 @@ export default function LoadsPage() {
                           </tr>
                         ) : (
                           loadPayments.map((pay) => (
-                            <tr key={pay.id}>
+                            <tr
+                              key={pay.id}
+                              className={String(pay.status || '').trim().toLowerCase() === 'closed' ? 'bg-red-50' : ''}
+                            >
                               <td className="px-4 py-2 text-gray-700">{pay.payment_number || `PAY-${pay.id}`}</td>
                               <td className="px-4 py-2 text-gray-700">
                                 {pay.payment_date ? new Date(pay.payment_date).toLocaleDateString() : '-'}
@@ -2107,8 +2146,14 @@ export default function LoadsPage() {
                               <td className="px-4 py-2 text-gray-700 capitalize">{(pay.payment_method || '-').replace('_', ' ')}</td>
                               <td className="px-4 py-2 text-gray-700">{pay.reference_no || '-'}</td>
                               <td className="px-4 py-2 text-gray-700">{pay.bank_name || '-'}</td>
-                              <td className="px-4 py-2 text-gray-700 capitalize">{pay.status || '-'}</td>
-                              <td className="px-4 py-2 text-right text-gray-700">{Number(pay.amount || 0).toFixed(2)}</td>
+                              <td className="px-4 py-2">
+                                <span className={String(pay.status || '').trim().toLowerCase() === 'closed' ? 'inline-flex rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700' : 'text-gray-700 capitalize'}>
+                                  {pay.status || '-'}
+                                </span>
+                              </td>
+                              <td className={`px-4 py-2 text-right ${String(pay.status || '').trim().toLowerCase() === 'closed' ? 'font-semibold text-red-700' : 'text-gray-700'}`}>
+                                {Number(pay.amount || 0).toFixed(2)}
+                              </td>
                             </tr>
                           ))
                         )}
@@ -2116,9 +2161,9 @@ export default function LoadsPage() {
                       {loadPayments.length > 0 && (
                         <tfoot className="bg-gray-50 border-t border-gray-200">
                           <tr>
-                            <td colSpan={8} className="px-4 py-2 text-right font-semibold text-gray-800">Total Collected</td>
+                            <td colSpan={8} className="px-4 py-2 text-right font-semibold text-gray-800">Total Collected (excluding closed)</td>
                             <td className="px-4 py-2 text-right font-semibold text-gray-900">
-                              {loadPayments.reduce((sum, pay) => sum + Number(pay.amount || 0), 0).toFixed(2)}
+                              {collectedLoadPaymentsTotal.toFixed(2)}
                             </td>
                           </tr>
                         </tfoot>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -65,6 +65,7 @@ export default function QualityControlPage() {
 
   const [completedBatches, setCompletedBatches] = useState<BatchRow[]>([]);
   const [qcRows, setQcRows] = useState<QcInspection[]>([]);
+  const [approvedBatchIds, setApprovedBatchIds] = useState<number[]>([]);
   const [statusDrafts, setStatusDrafts] = useState<Record<number, 'approved' | 'rejected' | 'hold'>>({});
   const [updatingStatusId, setUpdatingStatusId] = useState<number>(0);
   const [deletingInspectionId, setDeletingInspectionId] = useState<number>(0);
@@ -81,6 +82,8 @@ export default function QualityControlPage() {
   const [toDate, setToDate] = useState('');
   const [statusFilter, setStatusFilter] = useState<'approved' | 'rejected' | 'hold' | ''>('');
   const [search, setSearch] = useState('');
+  const [qcCurrentPage, setQcCurrentPage] = useState(1);
+  const qcPageSize = 10;
 
   const [selectedBatchId, setSelectedBatchId] = useState<number>(0);
   const [inspectionDate, setInspectionDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -171,7 +174,7 @@ export default function QualityControlPage() {
       setLoading(true);
       setMessage('');
 
-      const [batchesRes, qcRes] = await Promise.all([
+      const [batchesRes, qcRes, approvedQcRes] = await Promise.all([
         axios.get(`${API_URL}/api/production/execution/batch-history`, {
           headers: authHeaders(authToken),
           params: { status: 'completed', per_page: 200 },
@@ -186,10 +189,27 @@ export default function QualityControlPage() {
             per_page: 200,
           },
         }),
+        axios.get(`${API_URL}/api/production/qc-inspections`, {
+          headers: authHeaders(authToken),
+          params: {
+            quality_status: 'approved',
+            per_page: 1000,
+          },
+        }),
       ]);
 
       setCompletedBatches(batchesRes.data?.data?.data || []);
       setQcRows(qcRes.data?.data?.data || []);
+      const approvedRows: QcInspection[] = approvedQcRes.data?.data?.data || [];
+      setApprovedBatchIds(
+        Array.from(
+          new Set(
+            approvedRows
+              .map((row) => Number(row?.production_order_id || 0))
+              .filter((id) => id > 0)
+          )
+        )
+      );
       setSummary(qcRes.data?.data?.summary || {
         total_inspections: 0,
         approved_batches: 0,
@@ -350,10 +370,32 @@ export default function QualityControlPage() {
     });
   }, [qcRows]);
 
+  const qcTotalPages = Math.max(1, Math.ceil(qcRows.length / qcPageSize));
+  const qcStartIndex = (qcCurrentPage - 1) * qcPageSize;
+  const pagedQcRows = qcRows.slice(qcStartIndex, qcStartIndex + qcPageSize);
+
+  useEffect(() => {
+    setQcCurrentPage((prev) => Math.min(prev, qcTotalPages));
+  }, [qcTotalPages]);
+
   const applyFilters = async () => {
     if (!token) return;
+    setQcCurrentPage(1);
     await loadData(token);
   };
+
+  const completedBatchesSorted = useMemo(() => {
+    const approvedSet = new Set(approvedBatchIds);
+    return [...completedBatches]
+      .filter((batch) => !approvedSet.has(Number(batch.id || 0)))
+      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+  }, [completedBatches, approvedBatchIds]);
+
+  useEffect(() => {
+    if (!selectedBatchId) return;
+    const stillAvailable = completedBatchesSorted.some((batch) => Number(batch.id) === Number(selectedBatchId));
+    if (!stillAvailable) setSelectedBatchId(0);
+  }, [selectedBatchId, completedBatchesSorted]);
 
   const saveInspection = async () => {
     if (!token) return;
@@ -561,20 +603,6 @@ export default function QualityControlPage() {
       </nav>}
 
       <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        <section className="sticky top-3 z-40 rounded-xl border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-white/80">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-900">Widget Controls</h3>
-              <p className="text-xs text-slate-500">Hide widgets, fix controls, restore hidden widgets, and unlock controls.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button type="button" onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')} disabled={widgetControlsLocked || pendingWidgetChanges.length === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60">Fix Widgets</button>
-              <button type="button" onClick={showRestoreWidgetList} disabled={hiddenWidgetCount === 0} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60">Restore Widgets ({hiddenWidgetCount})</button>
-              <button type="button" onClick={openUnlockWidgetsAfterFix} disabled={!widgetControlsLocked} className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:opacity-60">Unlock Widgets</button>
-            </div>
-          </div>
-        </section>
-
         {message && <div className="rounded-md border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-700">{message}</div>}
 
         {isWidgetVisible('production-qc-summary-cards') && <section className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -595,7 +623,7 @@ export default function QualityControlPage() {
                 <label className="block text-xs font-medium text-gray-600 mb-1">Completed Batch</label>
                 <select value={selectedBatchId} onChange={(e) => setSelectedBatchId(Number(e.target.value))} className={inputClass}>
                   <option value={0}>Select completed batch</option>
-                  {completedBatches.map((batch) => (
+                  {completedBatchesSorted.map((batch) => (
                     <option key={batch.id} value={batch.id}>
                       #{batch.id} | {batch.product?.code || '-'} - {batch.product?.name || '-'} | {batch.plan?.order_number || '-'}
                     </option>
@@ -708,7 +736,7 @@ export default function QualityControlPage() {
                 {qcRows.length === 0 ? (
                   <tr><td colSpan={11} className="px-4 py-8 text-center text-sm text-gray-500">No QC records found.</td></tr>
                 ) : (
-                  qcRows.map((row) => {
+                  pagedQcRows.map((row) => {
                     const productionOrder = row.productionOrder || row.production_order;
 
                     return (
@@ -767,6 +795,38 @@ export default function QualityControlPage() {
               </tbody>
             </table>
           </div>
+          {qcRows.length > 0 && (
+            <div className="flex items-center justify-between border-t border-gray-100 px-4 py-3 text-xs text-gray-600 sm:px-6">
+              <p>
+                Showing {qcStartIndex + 1}
+                {' '}-{' '}
+                {Math.min(qcStartIndex + qcPageSize, qcRows.length)}
+                {' '}of{' '}
+                {qcRows.length} QC records
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setQcCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={qcCurrentPage <= 1}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-[11px] text-gray-500">
+                  Page {qcCurrentPage} of {qcTotalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setQcCurrentPage((prev) => Math.min(qcTotalPages, prev + 1))}
+                  disabled={qcCurrentPage >= qcTotalPages}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
         {!widgetControlsLocked && <div><button type="button" onClick={() => stageWidgetVisibilityChange('production-qc-content-panels', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
         </>}

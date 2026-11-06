@@ -55,6 +55,7 @@ interface LoadAvailabilitySummary {
   invoices: {
     count: number;
     total_amount: number;
+    total_outstanding?: number;
     total_cost: number;
     total_profit: number;
   };
@@ -72,6 +73,33 @@ interface LoadAvailabilitySummary {
       status: string;
     }>;
   };
+  returns?: Array<{
+    id: number;
+    return_number?: string;
+    return_date: string;
+    total_quantity: number;
+    total_amount: number;
+    settlement_type?: string | null;
+    status?: string;
+    reason?: string | null;
+    customer?: {
+      shop_name?: string;
+      customer_code?: string;
+    } | null;
+    invoice?: {
+      invoice_number?: string;
+    } | null;
+    returned_item?: {
+      name?: string;
+      code?: string;
+      unit?: string;
+    } | null;
+    returnedItem?: {
+      name?: string;
+      code?: string;
+      unit?: string;
+    } | null;
+  }>;
   items: Array<{
     item_code: string;
     item_name: string;
@@ -93,6 +121,8 @@ interface LoadAvailabilityItem {
   product_code: string;
   name: string;
   qty: number; // current available qty in vehicle
+  out_price?: number;
+  sell_price?: number;
 }
 
 interface DistributionDashboardCache {
@@ -295,6 +325,28 @@ export default function DistributionPage() {
     { id: 'distribution-module-outstanding-payment-card', name: 'Distribution Outstanding Payment Module Card' },
     { id: 'distribution-module-live-locations-card', name: 'Distribution Live Locations Module Card' },
     { id: 'distribution-module-reports-card', name: 'Distribution Reports Module Card' },
+    { id: 'distribution-load-details-card-vehicle', name: 'Load Details Vehicle Card' },
+    { id: 'distribution-load-details-card-sales-ref', name: 'Load Details Sales Ref Card' },
+    { id: 'distribution-load-details-card-driver', name: 'Load Details Driver Card' },
+    { id: 'distribution-load-details-card-routes', name: 'Load Details Routes Card' },
+    { id: 'distribution-load-details-card-loaded-qty', name: 'Load Details Loaded Qty Card' },
+    { id: 'distribution-load-details-card-sold-qty', name: 'Load Details Sold Qty Card' },
+    { id: 'distribution-load-details-card-return-qty', name: 'Load Details Return Qty Card' },
+    { id: 'distribution-load-details-card-available-qty', name: 'Load Details Available Qty Card' },
+    { id: 'distribution-load-details-card-invoices', name: 'Load Details Invoices Card' },
+    { id: 'distribution-load-details-card-total-sales', name: 'Load Details Total Sales Card' },
+    { id: 'distribution-load-details-card-collected', name: 'Load Details Collected Card' },
+    { id: 'distribution-load-details-card-outstanding', name: 'Load Details Outstanding Card' },
+    { id: 'distribution-load-details-card-selling-performance', name: 'Load Details Selling Performance Card' },
+    { id: 'distribution-load-details-card-cash-collection', name: 'Load Details Cash Collection Card' },
+    { id: 'distribution-load-details-card-bank-transfer', name: 'Load Details Bank Transfer Card' },
+    { id: 'distribution-load-details-card-cheque-collection', name: 'Load Details Cheque Collection Card' },
+    { id: 'distribution-load-details-card-cheque-details', name: 'Load Details Cheque Details Card' },
+    { id: 'distribution-load-details-card-no-cheque', name: 'Load Details No Cheque Card' },
+    { id: 'distribution-load-details-card-return-details', name: 'Load Details Return Details Card' },
+    { id: 'distribution-load-details-card-no-returns', name: 'Load Details No Returns Card' },
+    { id: 'distribution-load-details-card-item-table', name: 'Load Details Item Table Card' },
+    { id: 'distribution-load-details-card-period', name: 'Load Details Period Card' },
   ];
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
   const hiddenWidgetCount = distributionWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
@@ -790,6 +842,8 @@ export default function DistributionPage() {
         product_code: String(item.product_code || ''),
         name: String(item.name || ''),
         qty: Number(item.qty || 0),
+        out_price: Number(item.out_price || 0),
+        sell_price: Number(item.sell_price || 0),
       }));
 
       setSelectedLoadSummary(summaryPayload || null);
@@ -896,7 +950,10 @@ export default function DistributionPage() {
     const returnValue = loadDetailRows.reduce((sum, row) => sum + Number(row.returnValue || 0), 0);
     const totalSales = Number(selectedLoadSummary?.invoices?.total_amount || 0);
     const totalCollected = Number(selectedLoadSummary?.payments?.total_collected || 0);
-    const outstanding = Math.max(0, totalSales - totalCollected);
+    const outstandingFromInvoices = Number(selectedLoadSummary?.invoices?.total_outstanding || 0);
+    const outstanding = outstandingFromInvoices > 0
+      ? outstandingFromInvoices
+      : Math.max(0, totalSales - totalCollected);
 
     return {
       loadedQty,
@@ -940,22 +997,91 @@ export default function DistributionPage() {
     const collected = Number(loadDetailTotals.totalCollected || 0);
     const availableQty = Number(loadDetailTotals.availableQty || 0);
     const soldQty = Number(loadDetailTotals.soldQty || 0);
-    const returnedQty = Number(loadDetailTotals.returnQty || 0);
-    const totalProfit = Number(selectedLoadSummary?.invoices?.total_profit || 0);
+    const returnedQtyFromItems = Number(loadDetailTotals.returnQty || 0);
+    const returnedQtyFromReturns = Number(
+      (selectedLoadSummary?.returns || []).reduce((sum, row) => sum + Number(row?.total_quantity || 0), 0)
+    );
+    const returnedQty = Math.max(returnedQtyFromItems, returnedQtyFromReturns);
+
+    const invoiceCost = Number(selectedLoadSummary?.invoices?.total_cost || 0);
+    const totalProfitFromInvoiceByCost = sales - invoiceCost;
+    const totalProfitFromInvoiceField = Number(selectedLoadSummary?.invoices?.total_profit || 0);
+    const itemProfitAgg = (selectedLoadSummary?.items || []).reduce(
+      (acc, row) => {
+        acc.sold += Number(row?.sold_value || 0);
+        acc.cost += Number(row?.cost_value || 0);
+        acc.profit += Number(row?.profit || 0);
+        return acc;
+      },
+      { sold: 0, cost: 0, profit: 0 }
+    );
+    const totalProfitFromItemsByCost = itemProfitAgg.sold - itemProfitAgg.cost;
+    const totalProfitFromItemsField = itemProfitAgg.profit;
+
+    const loadItemPriceMap = new Map(
+      selectedLoadItems.map((item) => [String(item.product_code || '').trim().toLowerCase(), Number(item.out_price || 0)])
+    );
+    const summaryItems = selectedLoadSummary?.items || [];
+    const totalProfitFromSummarySalesAndOutPrice = summaryItems.reduce((sum, item) => {
+      const codeKey = String(item?.item_code || item?.item_name || '').trim().toLowerCase();
+      if (!codeKey) return sum;
+
+      const outPrice = Number(loadItemPriceMap.get(codeKey) || 0);
+      if (outPrice <= 0) return sum;
+
+      const netQty = Number(item?.net_qty ?? (Number(item?.sold_qty || 0) - Number(item?.return_qty || 0)));
+      const netValue = Number(item?.net_value ?? (Number(item?.sold_value || 0) - Number(item?.return_value || 0)));
+
+      if (!Number.isFinite(netQty) || !Number.isFinite(netValue) || netQty <= 0) return sum;
+
+      const costValue = outPrice * netQty;
+      return sum + (netValue - costValue);
+    }, 0);
+
+    const hasInvoiceCostData = invoiceCost > 0;
+    const hasItemCostData = itemProfitAgg.cost > 0;
+    const hasOutPriceCostFallback = totalProfitFromSummarySalesAndOutPrice !== 0;
+
+    const totalProfit = hasInvoiceCostData
+      ? totalProfitFromInvoiceByCost
+      : hasItemCostData
+        ? totalProfitFromItemsByCost
+        : hasOutPriceCostFallback
+          ? totalProfitFromSummarySalesAndOutPrice
+        : totalProfitFromInvoiceField !== 0
+          ? totalProfitFromInvoiceField
+          : totalProfitFromItemsField;
 
     const collectionRate = sales > 0 ? Math.min(100, (collected / sales) * 100) : 0;
-    const marginRate = sales > 0 ? Math.max(0, Math.min(100, (totalProfit / sales) * 100)) : 0;
+    const marginRate = sales > 0 ? Math.max(-100, Math.min(100, (totalProfit / sales) * 100)) : 0;
+    const marginBarRate = Math.max(0, marginRate);
     const soldVsHandledRate = soldQty + availableQty > 0 ? Math.min(100, (soldQty / (soldQty + availableQty)) * 100) : 0;
     const returnRate = soldQty > 0 ? Math.min(100, (returnedQty / soldQty) * 100) : 0;
 
     return {
       collectionRate,
       marginRate,
+      marginBarRate,
       soldVsHandledRate,
       returnRate,
       totalProfit,
+      returnedQty,
     };
-  }, [loadDetailTotals, selectedLoadSummary]);
+  }, [loadDetailRows, loadDetailTotals, selectedLoadItems, selectedLoadSummary]);
+
+  const renderModalCardCloseButton = (widgetKey: string) => {
+    if (widgetControlsLocked || !isWidgetVisible(widgetKey)) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => stageWidgetVisibilityChange(widgetKey, false)}
+        className="absolute right-2 top-2 rounded-md border border-slate-300 bg-white/90 px-2 py-1 text-[11px] font-semibold text-slate-700 shadow-sm hover:bg-slate-100"
+        title="Hide card"
+      >
+        ✕
+      </button>
+    );
+  };
 
   if (!token) return null;
 
@@ -1205,33 +1331,6 @@ export default function DistributionPage() {
                 )}
                 <div className="flex items-center gap-2">
                   <button type="button" onClick={closeLoadDetailsModal} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50">Close</button>
-                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-modal-heading') && (
-                    <button
-                      type="button"
-                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-modal-heading', false)}
-                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                    >
-                      ✕
-                    </button>
-                  )}
-                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-modal-action-buttons') && (
-                    <button
-                      type="button"
-                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-modal-action-buttons', false)}
-                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                    >
-                      ✕
-                    </button>
-                  )}
-                  {!widgetControlsLocked && isWidgetVisible('distribution-load-details-cards') && (
-                    <button
-                      type="button"
-                      onClick={() => stageWidgetVisibilityChange('distribution-load-details-cards', false)}
-                      className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-                    >
-                      ✕
-                    </button>
-                  )}
                 </div>
               </div>
 
@@ -1244,39 +1343,44 @@ export default function DistributionPage() {
                   isWidgetVisible('distribution-load-details-cards') ? (
                   <>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
+                      {isWidgetVisible('distribution-load-details-card-vehicle') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-vehicle')}
                         <p className="text-[11px] uppercase text-slate-500">Vehicle</p>
                         <p className="text-sm font-semibold text-slate-900 mt-1">{selectedLoad?.vehicleLabel || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
+                      </div>}
+                      {isWidgetVisible('distribution-load-details-card-sales-ref') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-sales-ref')}
                         <p className="text-[11px] uppercase text-slate-500">Sales Ref</p>
                         <p className="text-sm font-semibold text-slate-900 mt-1">{selectedLoad?.salesRefLabel || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
+                      </div>}
+                      {isWidgetVisible('distribution-load-details-card-driver') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-driver')}
                         <p className="text-[11px] uppercase text-slate-500">Driver</p>
                         <p className="text-sm font-semibold text-slate-900 mt-1">{selectedLoad?.driverLabel || '-'}</p>
-                      </div>
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
+                      </div>}
+                      {isWidgetVisible('distribution-load-details-card-routes') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-routes')}
                         <p className="text-[11px] uppercase text-slate-500">Routes</p>
                         <p className="text-sm font-semibold text-slate-900 mt-1">{selectedLoad?.routeNames?.length ? selectedLoad.routeNames.join(' | ') : '-'}</p>
-                      </div>
+                      </div>}
                     </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Loaded Qty</p><p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.loadedQty)}</p></div>
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Sold Qty</p><p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.soldQty)}</p></div>
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Return Qty</p><p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.returnQty)}</p></div>
-                      <div className="rounded-xl border border-emerald-200 p-3 bg-emerald-50"><p className="text-[11px] uppercase text-emerald-700">Available Qty</p><p className="text-lg font-semibold text-emerald-800">{formatNumber(loadDetailTotals.availableQty)}</p></div>
+                      {isWidgetVisible('distribution-load-details-card-loaded-qty') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Loaded Qty</p>{renderModalCardCloseButton('distribution-load-details-card-loaded-qty')}<p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.loadedQty)}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-sold-qty') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Sold Qty</p>{renderModalCardCloseButton('distribution-load-details-card-sold-qty')}<p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.soldQty)}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-return-qty') && <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50"><p className="text-[11px] uppercase text-slate-500">Return Qty</p>{renderModalCardCloseButton('distribution-load-details-card-return-qty')}<p className="text-lg font-semibold text-slate-900">{formatNumber(loadDetailTotals.returnQty)}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-available-qty') && <div className="relative rounded-xl border border-emerald-200 p-3 bg-emerald-50"><p className="text-[11px] uppercase text-emerald-700">Available Qty</p>{renderModalCardCloseButton('distribution-load-details-card-available-qty')}<p className="text-lg font-semibold text-emerald-800">{formatNumber(loadDetailTotals.availableQty)}</p></div>}
                     </div>
 
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <div className="rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Invoices</p><p className="text-base font-semibold text-slate-900">{loadDetailTotals.invoiceCount}</p></div>
-                      <div className="rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Total Sales</p><p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.totalSales)}</p></div>
-                      <div className="rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Collected</p><p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.totalCollected)}</p></div>
-                      <div className="rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Outstanding</p><p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.outstanding)}</p></div>
+                      {isWidgetVisible('distribution-load-details-card-invoices') && <div className="relative rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Invoices</p>{renderModalCardCloseButton('distribution-load-details-card-invoices')}<p className="text-base font-semibold text-slate-900">{loadDetailTotals.invoiceCount}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-total-sales') && <div className="relative rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Total Sales</p>{renderModalCardCloseButton('distribution-load-details-card-total-sales')}<p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.totalSales)}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-collected') && <div className="relative rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Collected</p>{renderModalCardCloseButton('distribution-load-details-card-collected')}<p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.totalCollected)}</p></div>}
+                      {isWidgetVisible('distribution-load-details-card-outstanding') && <div className="relative rounded-xl border border-slate-200 p-3"><p className="text-[11px] uppercase text-slate-500">Outstanding</p>{renderModalCardCloseButton('distribution-load-details-card-outstanding')}<p className="text-base font-semibold text-slate-900">{formatNumber(loadDetailTotals.outstanding)}</p></div>}
                     </div>
 
-                    <div className="rounded-xl border border-slate-200 p-4 bg-white">
+                    {isWidgetVisible('distribution-load-details-card-selling-performance') && <div className="relative rounded-xl border border-slate-200 p-4 bg-white">
+                      {renderModalCardCloseButton('distribution-load-details-card-selling-performance')}
                       <div className="flex items-center justify-between mb-3">
                         <h4 className="text-sm font-semibold text-slate-900">Selling Performance Preview</h4>
                         <span className="text-xs text-slate-500">Graphical KPI View</span>
@@ -1293,7 +1397,7 @@ export default function DistributionPage() {
                         <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
                           <div className="flex items-center justify-between text-xs text-blue-800 mb-1"><span>Profit Margin</span><span>{performanceMetrics.marginRate.toFixed(1)}%</span></div>
                           <div className="h-2.5 rounded-full bg-blue-100">
-                            <div className="h-2.5 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500" style={{ width: `${performanceMetrics.marginRate}%` }} />
+                            <div className="h-2.5 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500" style={{ width: `${performanceMetrics.marginBarRate}%` }} />
                           </div>
                         </div>
 
@@ -1322,25 +1426,29 @@ export default function DistributionPage() {
                           <p className="text-base font-semibold text-slate-900">{performanceMetrics.collectionRate >= 85 ? 'High' : performanceMetrics.collectionRate >= 60 ? 'Medium' : 'Needs Attention'}</p>
                         </div>
                       </div>
-                    </div>
+                    </div>}
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      <div className="rounded-xl border border-emerald-200 p-3 bg-emerald-50">
+                      {isWidgetVisible('distribution-load-details-card-cash-collection') && <div className="relative rounded-xl border border-emerald-200 p-3 bg-emerald-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-cash-collection')}
                         <p className="text-[11px] uppercase text-emerald-700">Cash Collection</p>
                         <p className="text-base font-semibold text-emerald-900 mt-1">{formatNumber(collectionByMethod.cash)}</p>
-                      </div>
-                      <div className="rounded-xl border border-blue-200 p-3 bg-blue-50">
+                      </div>}
+                      {isWidgetVisible('distribution-load-details-card-bank-transfer') && <div className="relative rounded-xl border border-blue-200 p-3 bg-blue-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-bank-transfer')}
                         <p className="text-[11px] uppercase text-blue-700">Bank Transfer</p>
                         <p className="text-base font-semibold text-blue-900 mt-1">{formatNumber(collectionByMethod.bankTransfer)}</p>
-                      </div>
-                      <div className="rounded-xl border border-amber-200 p-3 bg-amber-50">
+                      </div>}
+                      {isWidgetVisible('distribution-load-details-card-cheque-collection') && <div className="relative rounded-xl border border-amber-200 p-3 bg-amber-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-cheque-collection')}
                         <p className="text-[11px] uppercase text-amber-700">Cheque Collection</p>
                         <p className="text-base font-semibold text-amber-900 mt-1">{formatNumber(collectionByMethod.cheque)}</p>
-                      </div>
+                      </div>}
                     </div>
 
                     {selectedLoadSummary?.payments?.cheques?.length ? (
-                      <div className="rounded-xl border border-slate-200 overflow-hidden">
+                      isWidgetVisible('distribution-load-details-card-cheque-details') ? <div className="relative rounded-xl border border-slate-200 overflow-hidden">
+                        {renderModalCardCloseButton('distribution-load-details-card-cheque-details')}
                         <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
                           <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Collected Cheque Details</p>
                         </div>
@@ -1370,14 +1478,73 @@ export default function DistributionPage() {
                             </tbody>
                           </table>
                         </div>
-                      </div>
+                      </div> : null
                     ) : (
-                      <div className="rounded-xl border border-slate-200 p-3 bg-slate-50">
+                      isWidgetVisible('distribution-load-details-card-no-cheque') ? <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-no-cheque')}
                         <p className="text-xs text-slate-600">No cheque collections recorded for this load.</p>
-                      </div>
+                      </div> : null
                     )}
 
-                    <div className="rounded-xl border border-slate-200 overflow-hidden">
+                    {selectedLoadSummary?.returns?.length ? (
+                      isWidgetVisible('distribution-load-details-card-return-details') ? <div className="relative rounded-xl border border-slate-200 overflow-hidden">
+                        {renderModalCardCloseButton('distribution-load-details-card-return-details')}
+                        <div className="px-3 py-2 bg-slate-50 border-b border-slate-200">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Return Details</p>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-sm">
+                            <thead className="bg-white text-slate-600 uppercase text-xs">
+                              <tr>
+                                <th className="px-3 py-2 text-left">Return #</th>
+                                <th className="px-3 py-2 text-left">Date</th>
+                                <th className="px-3 py-2 text-left">Customer</th>
+                                <th className="px-3 py-2 text-left">Invoice</th>
+                                <th className="px-3 py-2 text-left">Type</th>
+                                <th className="px-3 py-2 text-right">Qty</th>
+                                <th className="px-3 py-2 text-right">Amount</th>
+                                <th className="px-3 py-2 text-left">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {selectedLoadSummary.returns.map((ret) => {
+                                const settlementType = String(ret.settlement_type || '').toLowerCase();
+                                const settlementLabel = settlementType === 'bill_deduction'
+                                  ? 'Deduct bill'
+                                  : settlementType === 'cash_refund'
+                                    ? 'Cash refund'
+                                    : settlementType === 'item_exchange'
+                                      ? 'Item exchange'
+                                      : (ret.settlement_type || '-');
+                                const customerName = ret.customer?.shop_name || '-';
+                                const customerCode = ret.customer?.customer_code ? ` (${ret.customer.customer_code})` : '';
+
+                                return (
+                                  <tr key={ret.id}>
+                                    <td className="px-3 py-2 text-slate-800">{ret.return_number || `RET-${ret.id}`}</td>
+                                    <td className="px-3 py-2 text-slate-700">{formatDate(ret.return_date)}</td>
+                                    <td className="px-3 py-2 text-slate-700">{customerName}{customerCode}</td>
+                                    <td className="px-3 py-2 text-slate-700">{ret.invoice?.invoice_number || '-'}</td>
+                                    <td className="px-3 py-2 text-slate-700">{settlementLabel}</td>
+                                    <td className="px-3 py-2 text-right text-slate-700">{formatNumber(Number(ret.total_quantity || 0))}</td>
+                                    <td className="px-3 py-2 text-right font-semibold text-slate-900">{formatNumber(Number(ret.total_amount || 0))}</td>
+                                    <td className="px-3 py-2 text-slate-700">{ret.status || '-'}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div> : null
+                    ) : (
+                      isWidgetVisible('distribution-load-details-card-no-returns') ? <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-no-returns')}
+                        <p className="text-xs text-slate-600">No returns recorded for this load period.</p>
+                      </div> : null
+                    )}
+
+                    {isWidgetVisible('distribution-load-details-card-item-table') && <div className="relative rounded-xl border border-slate-200 overflow-hidden">
+                      {renderModalCardCloseButton('distribution-load-details-card-item-table')}
                       <div className="overflow-x-auto">
                         <table className="min-w-full text-sm">
                           <thead className="bg-slate-50 text-slate-600 uppercase text-xs">
@@ -1408,10 +1575,13 @@ export default function DistributionPage() {
                           </tbody>
                         </table>
                       </div>
-                    </div>
+                    </div>}
 
-                    {selectedLoadSummary?.period && (
-                      <p className="text-xs text-slate-500">Period: {formatDate(selectedLoadSummary.period.from)} to {formatDate(selectedLoadSummary.period.to)}</p>
+                    {selectedLoadSummary?.period && isWidgetVisible('distribution-load-details-card-period') && (
+                      <div className="relative rounded-xl border border-slate-200 p-3 bg-slate-50">
+                        {renderModalCardCloseButton('distribution-load-details-card-period')}
+                        <p className="text-xs text-slate-500">Period: {formatDate(selectedLoadSummary.period.from)} to {formatDate(selectedLoadSummary.period.to)}</p>
+                      </div>
                     )}
                   </>
                   ) : (
