@@ -260,6 +260,7 @@ export default function Employees() {
   const [resetPasswordConfirmValue, setResetPasswordConfirmValue] = useState('');
   const [resetPasswordSaving, setResetPasswordSaving] = useState(false);
   const [showResetPasswordText, setShowResetPasswordText] = useState(false);
+  const [showHiddenWidgetsPreviewModal, setShowHiddenWidgetsPreviewModal] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const filteredEmployees = useMemo(() => {
@@ -466,6 +467,10 @@ export default function Employees() {
   ];
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
   const hiddenWidgetCount = employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+  const hiddenEmployeeWidgets = useMemo(
+    () => employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false),
+    [employeeWidgetItems, widgetVisibility]
+  );
 
   const fetchWidgetVisibility = async (authToken?: string) => {
     const tokenToUse = authToken || token;
@@ -494,6 +499,16 @@ export default function Employees() {
       const remaining = prev.filter((entry) => entry.widget_key !== widgetKey);
       return [...remaining, { widget_key: widgetKey, is_visible: isVisible }];
     });
+  };
+
+  const closeHiddenWidgetPreviewItem = (widgetKey: string, widgetName: string) => {
+    if (widgetControlsLocked) {
+      showNotice('Widgets Locked', 'Unlock widgets first to restore hidden widgets.', 'info');
+      return;
+    }
+
+    stageWidgetVisibilityChange(widgetKey, true);
+    showNotice('Widget Restored', `${widgetName} is now visible.`, 'success');
   };
 
   const rollbackPendingWidgetChanges = () => {
@@ -1769,6 +1784,10 @@ export default function Employees() {
                               <span className="w-4 h-4">👁️</span>
                               <span>View</span>
                             </button>
+                            <button role="menuitem" onClick={() => { setShowHiddenWidgetsPreviewModal(true); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-indigo-700 hover:bg-indigo-50">
+                              <span className="w-4 h-4">🧩</span>
+                              <span>View Hidden Widget</span>
+                            </button>
                             <button role="menuitem" onClick={() => { handleEdit(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
                               <span className="w-4 h-4">✏️</span>
                               <span>Edit</span>
@@ -1876,6 +1895,60 @@ export default function Employees() {
         </div>
         )}
       </main>
+
+      {showHiddenWidgetsPreviewModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setShowHiddenWidgetsPreviewModal(false)}
+          />
+          <div className="relative w-full max-w-2xl rounded-2xl bg-white shadow-2xl border border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Hidden Widgets Preview</h3>
+                <p className="text-sm text-gray-600">Review widgets currently hidden on Employees page.</p>
+              </div>
+              <button
+                onClick={() => setShowHiddenWidgetsPreviewModal(false)}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+            <div className="px-6 py-4">
+              {hiddenEmployeeWidgets.length === 0 ? (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                  All widgets are currently visible.
+                </div>
+              ) : (
+                <div className="max-h-[50vh] overflow-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
+                  {hiddenEmployeeWidgets.map((item) => (
+                    <div key={item.id} className="px-4 py-3 flex items-center justify-between gap-4">
+                      <div>
+                        <p className="text-sm font-medium text-gray-900">{item.name}</p>
+                        <p className="text-xs text-gray-500">{item.id}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex rounded-full bg-rose-100 px-2.5 py-1 text-xs font-semibold text-rose-700">
+                          Hidden
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => closeHiddenWidgetPreviewItem(item.id, item.name)}
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-white px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                        >
+                          <span>✕</span>
+                          <span>Close</span>
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showSuperAdminConfirmModal && (
         <div className="fixed inset-0 z-[75] flex items-center justify-center p-4">
