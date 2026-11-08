@@ -34,6 +34,8 @@ type DashboardAccessCache = {
   userPermissions: string[];
   isAdminUser: boolean;
   isSalesRefUser: boolean;
+  userDisplayName?: string;
+  userDisplayId?: string;
   widgetVisibility: Record<string, boolean>;
   widgetControlsLocked: boolean;
 };
@@ -49,6 +51,34 @@ type WidgetVisibilityChange = {
 };
 
 type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
+
+type NetworkStrength = 'critical' | 'normal' | 'good';
+
+type BrowserConnectionInfo = {
+  effectiveType?: string;
+  downlink?: number;
+  rtt?: number;
+  addEventListener?: (type: 'change', listener: () => void) => void;
+  removeEventListener?: (type: 'change', listener: () => void) => void;
+};
+
+const getConnectionStrength = (connection?: BrowserConnectionInfo | null): NetworkStrength => {
+  if (!connection) return 'normal';
+
+  const effectiveType = String(connection.effectiveType || '').toLowerCase();
+  const downlink = Number(connection.downlink ?? 0);
+  const rtt = Number(connection.rtt ?? 0);
+
+  if (effectiveType.includes('slow-2g') || effectiveType === '2g' || downlink > 0 && downlink < 1 || rtt >= 350) {
+    return 'critical';
+  }
+
+  if (effectiveType === '3g' || (downlink >= 1 && downlink < 5) || (rtt >= 150 && rtt < 350)) {
+    return 'normal';
+  }
+
+  return 'good';
+};
 
 export default function Dashboard() {
   const [token, setToken] = useState('');
@@ -70,6 +100,10 @@ export default function Dashboard() {
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [salesTargets, setSalesTargets] = useState<SalesTargetPreview[]>([]);
   const [targetsLoading, setTargetsLoading] = useState(false);
+  const [loggedUserName, setLoggedUserName] = useState('User');
+  const [loggedUserId, setLoggedUserId] = useState('-');
+  const [isNetworkOnline, setIsNetworkOnline] = useState(true);
+  const [networkStrength, setNetworkStrength] = useState<NetworkStrength>('normal');
   const router = useRouter();
   const apiClient = createApiClient();
   const syncInFlightRef = useRef(false);
@@ -84,6 +118,8 @@ export default function Dashboard() {
       if (offlineSession?.token) {
         localStorage.setItem('token', offlineSession.token);
         setToken(offlineSession.token);
+        if (offlineSession.user?.name) setLoggedUserName(String(offlineSession.user.name));
+        if (offlineSession.user?.id) setLoggedUserId(String(offlineSession.user.id));
       } else {
         router.push('/');
       }
@@ -109,6 +145,8 @@ export default function Dashboard() {
         setUserPermissions(Array.isArray(cached.userPermissions) ? cached.userPermissions : []);
         setIsAdminUser(Boolean(cached.isAdminUser));
         setIsSalesRefUser(Boolean(cached.isSalesRefUser));
+        if (cached.userDisplayName) setLoggedUserName(cached.userDisplayName);
+        if (cached.userDisplayId) setLoggedUserId(cached.userDisplayId);
         setWidgetVisibility(cached.widgetVisibility || {});
         setWidgetControlsLocked(Boolean(cached.widgetControlsLocked));
         return true;
@@ -125,6 +163,12 @@ export default function Dashboard() {
 
         const userData = userRes.data || {};
         const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
+        const resolvedDisplayName = String(
+          userData?.name || userData?.employee?.name || userData?.employee?.full_name || userData?.email || 'User'
+        );
+        const resolvedDisplayId = String(
+          userData?.employee_id || userData?.employee?.id || userData?.id || '-'
+        );
         const roleNames = [
           String(userData?.role || ''),
           ...(Array.isArray(userData?.roles)
@@ -165,6 +209,8 @@ export default function Dashboard() {
         setUserPermissions(Array.from(new Set(permissionNames.filter(Boolean))));
         setIsAdminUser(adminUser);
         setIsSalesRefUser(salesRefUser);
+        setLoggedUserName(resolvedDisplayName);
+        setLoggedUserId(resolvedDisplayId);
 
         try {
           const widgetRes = await apiClient.get('/dashboard/widgets/me', {
@@ -182,6 +228,8 @@ export default function Dashboard() {
               userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
               isAdminUser: adminUser,
               isSalesRefUser: salesRefUser,
+              userDisplayName: resolvedDisplayName,
+              userDisplayId: resolvedDisplayId,
               widgetVisibility: widgetMap,
               widgetControlsLocked: controlsLocked,
             } satisfies DashboardAccessCache),
@@ -198,6 +246,8 @@ export default function Dashboard() {
               userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
               isAdminUser: adminUser,
               isSalesRefUser: salesRefUser,
+              userDisplayName: resolvedDisplayName,
+              userDisplayId: resolvedDisplayId,
               widgetVisibility: {},
               widgetControlsLocked: false,
             } satisfies DashboardAccessCache),
@@ -293,6 +343,70 @@ export default function Dashboard() {
       window.removeEventListener('focus', syncWhenOnline);
     };
   }, [token]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const connection = (navigator as Navigator & {
+      connection?: BrowserConnectionInfo;
+      mozConnection?: BrowserConnectionInfo;
+      webkitConnection?: BrowserConnectionInfo;
+    }).connection
+      || (navigator as Navigator & { mozConnection?: BrowserConnectionInfo }).mozConnection
+      || (navigator as Navigator & { webkitConnection?: BrowserConnectionInfo }).webkitConnection;
+
+    const updateConnectionState = () => {
+      setIsNetworkOnline(window.navigator.onLine);
+      if (!window.navigator.onLine) {
+        setNetworkStrength('critical');
+        return;
+      }
+      setNetworkStrength(getConnectionStrength(connection));
+    };
+
+    updateConnectionState();
+    window.addEventListener('online', updateConnectionState);
+    window.addEventListener('offline', updateConnectionState);
+    connection?.addEventListener?.('change', updateConnectionState);
+
+    return () => {
+      window.removeEventListener('online', updateConnectionState);
+      window.removeEventListener('offline', updateConnectionState);
+      connection?.removeEventListener?.('change', updateConnectionState);
+    };
+  }, []);
+
+  const networkLabel = useMemo(() => {
+    if (!isNetworkOnline) {
+      return {
+        dotClass: 'bg-rose-500',
+        textClass: 'text-rose-700',
+        label: 'Internet Critical',
+      };
+    }
+
+    if (networkStrength === 'critical') {
+      return {
+        dotClass: 'bg-orange-500',
+        textClass: 'text-orange-700',
+        label: 'Internet Critical',
+      };
+    }
+
+    if (networkStrength === 'normal') {
+      return {
+        dotClass: 'bg-amber-500',
+        textClass: 'text-amber-700',
+        label: 'Internet Normal',
+      };
+    }
+
+    return {
+      dotClass: 'bg-emerald-500',
+      textClass: 'text-emerald-700',
+      label: 'Internet Good',
+    };
+  }, [isNetworkOnline, networkStrength]);
 
   const targetsSummary = useMemo(() => {
     const safeNumber = (value: unknown) => {
@@ -827,9 +941,19 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="flex items-center justify-between sm:justify-end space-x-3 sm:space-x-4">
-              <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>System Online</span>
+              <div className="hidden md:flex items-center gap-4 text-sm text-gray-600">
+                <div className="flex items-center gap-2 rounded-full bg-white/70 px-3 py-1.5 shadow-sm">
+                  <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                  <span className="font-medium text-slate-700">{loggedUserName}</span>
+                  <span className="text-slate-500">ID: {loggedUserId}</span>
+                </div>
+                <div className={`flex items-center gap-2 rounded-full bg-white/70 px-3 py-1.5 shadow-sm ${networkLabel.textClass}`}>
+                  <div className={`w-2 h-2 rounded-full ${networkLabel.dotClass} ${isNetworkOnline ? 'animate-pulse' : ''}`}></div>
+                  <span className="font-medium">{networkLabel.label}</span>
+                </div>
+              </div>
+              <div className="md:hidden flex items-center">
+                <span className={`text-xs font-semibold ${networkLabel.textClass}`}>{networkLabel.label}</span>
               </div>
               <button
                 onClick={handleLogout}

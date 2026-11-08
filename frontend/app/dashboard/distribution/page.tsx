@@ -1394,13 +1394,6 @@ export default function DistributionPage() {
                           </div>
                         </div>
 
-                        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
-                          <div className="flex items-center justify-between text-xs text-blue-800 mb-1"><span>Profit Margin</span><span>{performanceMetrics.marginRate.toFixed(1)}%</span></div>
-                          <div className="h-2.5 rounded-full bg-blue-100">
-                            <div className="h-2.5 rounded-full bg-gradient-to-r from-blue-500 to-cyan-500" style={{ width: `${performanceMetrics.marginBarRate}%` }} />
-                          </div>
-                        </div>
-
                         <div className="rounded-lg border border-violet-200 bg-violet-50 p-3">
                           <div className="flex items-center justify-between text-xs text-violet-800 mb-1"><span>Sold Ratio</span><span>{performanceMetrics.soldVsHandledRate.toFixed(1)}%</span></div>
                           <div className="h-2.5 rounded-full bg-violet-100">
@@ -1417,10 +1410,6 @@ export default function DistributionPage() {
                       </div>
 
                       <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
-                          <p className="text-[11px] uppercase text-slate-500">Total Profit</p>
-                          <p className="text-base font-semibold text-slate-900">{formatNumber(performanceMetrics.totalProfit)}</p>
-                        </div>
                         <div className="rounded-lg border border-slate-200 p-3 bg-slate-50">
                           <p className="text-[11px] uppercase text-slate-500">Collection Efficiency</p>
                           <p className="text-base font-semibold text-slate-900">{performanceMetrics.collectionRate >= 85 ? 'High' : performanceMetrics.collectionRate >= 60 ? 'Medium' : 'Needs Attention'}</p>

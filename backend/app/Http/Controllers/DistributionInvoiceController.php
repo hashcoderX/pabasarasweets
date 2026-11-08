@@ -160,6 +160,26 @@ class DistributionInvoiceController extends Controller
             $query->where('status', $request->status);
         }
 
+        if ($request->filled('from_date')) {
+            $query->whereDate('invoice_date', '>=', $request->from_date);
+        }
+
+        if ($request->filled('to_date')) {
+            $query->whereDate('invoice_date', '<=', $request->to_date);
+        }
+
+        if ($request->filled('q')) {
+            $searchText = trim((string) $request->q);
+            $query->where(function ($q) use ($searchText) {
+                $q->where('invoice_number', 'like', '%' . $searchText . '%')
+                    ->orWhereHas('customer', function ($customerQuery) use ($searchText) {
+                        $customerQuery
+                            ->where('shop_name', 'like', '%' . $searchText . '%')
+                            ->orWhere('customer_code', 'like', '%' . $searchText . '%');
+                    });
+            });
+        }
+
         if ($request->boolean('exclude_cancelled')) {
             $query->whereNotIn('status', ['cancelled', 'deleted']);
         }

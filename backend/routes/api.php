@@ -4,6 +4,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BackupRestoreSettingController;
 use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\SecuritySettingController;
+use App\Http\Controllers\SystemMaintenanceController;
 use App\Http\Controllers\SystemResetController;
 use App\Http\Controllers\SystemSettingController;
 use App\Http\Controllers\Api\HR\DepartmentController;
@@ -86,6 +87,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('backup-settings', [BackupRestoreSettingController::class, 'show']);
     Route::put('backup-settings', [BackupRestoreSettingController::class, 'update']);
     Route::get('database-backup/download', [\App\Http\Controllers\DatabaseBackupController::class, 'download']);
+    Route::post('system/maintenance', [SystemMaintenanceController::class, 'run']);
     Route::post('system/reset', [SystemResetController::class, 'reset']);
 
     // HRM Routes

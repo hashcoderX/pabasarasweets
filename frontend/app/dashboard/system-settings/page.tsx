@@ -12,6 +12,16 @@ type CompanyRow = {
   updated_at?: string;
 };
 
+type AppModalState = {
+  open: boolean;
+  mode: 'alert' | 'confirm';
+  title: string;
+  message: string;
+  confirmText: string;
+  cancelText: string;
+  onConfirm?: (() => void) | null;
+};
+
 const toSafeStorageUrl = (value: string, apiBase: string): string => {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -53,10 +63,69 @@ export default function SystemSettingsPage() {
   const [logoLoadError, setLogoLoadError] = useState(false);
   const [backupDownloading, setBackupDownloading] = useState(false);
   const [lastBackupAt, setLastBackupAt] = useState('');
+  const [maintenanceRunning, setMaintenanceRunning] = useState(false);
+  const [maintenanceMessage, setMaintenanceMessage] = useState('');
+  const [maintenanceModeLabel, setMaintenanceModeLabel] = useState('');
+  const [lastMaintenanceAt, setLastMaintenanceAt] = useState('');
+  const [modalState, setModalState] = useState<AppModalState>({
+    open: false,
+    mode: 'alert',
+    title: '',
+    message: '',
+    confirmText: 'OK',
+    cancelText: 'Cancel',
+    onConfirm: null,
+  });
 
   const API_BASE = '';
 
   const router = useRouter();
+
+  const closeModal = () => {
+    setModalState((prev) => ({
+      ...prev,
+      open: false,
+      onConfirm: null,
+    }));
+  };
+
+  const showAlertModal = (title: string, message: string) => {
+    setModalState({
+      open: true,
+      mode: 'alert',
+      title,
+      message,
+      confirmText: 'OK',
+      cancelText: 'Cancel',
+      onConfirm: null,
+    });
+  };
+
+  const showConfirmModal = (
+    title: string,
+    message: string,
+    onConfirm: () => void,
+    confirmText = 'Confirm',
+    cancelText = 'Cancel'
+  ) => {
+    setModalState({
+      open: true,
+      mode: 'confirm',
+      title,
+      message,
+      confirmText,
+      cancelText,
+      onConfirm,
+    });
+  };
+
+  const handleModalConfirm = () => {
+    const confirmAction = modalState.onConfirm;
+    closeModal();
+    if (confirmAction) {
+      confirmAction();
+    }
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -128,7 +197,7 @@ export default function SystemSettingsPage() {
       setSystemEnabled(Boolean(res?.data?.system_enabled));
     } catch (error) {
       console.error('Error fetching system settings:', error);
-      alert('Failed to load system settings.');
+      showAlertModal('Load Failed', 'Failed to load system settings.');
     } finally {
       setLoading(false);
     }
@@ -198,10 +267,18 @@ export default function SystemSettingsPage() {
         { system_enabled: systemEnabled },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      alert(systemEnabled ? 'System enabled successfully.' : 'System disabled. Employee login is now restricted.');
+      showAlertModal(
+        'System Setting Updated',
+        systemEnabled
+          ? 'System enabled successfully.'
+          : 'System disabled. Employee login is now restricted.'
+      );
     } catch (error: any) {
       console.error('Error updating system setting:', error);
-      alert(error?.response?.data?.message || 'Failed to update system setting.');
+      showAlertModal(
+        'Update Failed',
+        String(error?.response?.data?.message || 'Failed to update system setting.')
+      );
     } finally {
       setSaving(false);
     }
@@ -234,12 +311,90 @@ export default function SystemSettingsPage() {
       setLastBackupAt(new Date().toLocaleString());
     } catch (error: any) {
       console.error('Error downloading database backup:', error);
-      alert(error?.response?.status === 403
-        ? 'You are not allowed to download database backups.'
-        : 'Failed to generate database backup.');
+      showAlertModal(
+        'Backup Failed',
+        error?.response?.status === 403
+          ? 'You are not allowed to download database backups.'
+          : 'Failed to generate database backup.'
+      );
     } finally {
       setBackupDownloading(false);
     }
+  };
+
+  const runSystemMaintenance = async (action: 'cache' | 'garbage' | 'full') => {
+    const actionLabel =
+      action === 'cache'
+        ? 'Cache Clearing'
+        : action === 'garbage'
+          ? 'Garbage Cleaning'
+          : 'Full Optimization';
+
+    try {
+      setMaintenanceRunning(true);
+      setMaintenanceMessage('');
+      setMaintenanceModeLabel(actionLabel);
+
+      const res = await axios.post(
+        '/api/system/maintenance',
+        { action },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      const message = String(res?.data?.message || `${actionLabel} completed successfully.`);
+      setMaintenanceMessage(message);
+      setLastMaintenanceAt(new Date().toLocaleString());
+      showAlertModal('Maintenance Completed', message);
+    } catch (error: any) {
+      console.error('Error running system maintenance:', error);
+      const message = String(error?.response?.data?.message || 'System maintenance failed.');
+      setMaintenanceMessage(message);
+      showAlertModal('Maintenance Failed', message);
+    } finally {
+      setMaintenanceRunning(false);
+      setMaintenanceModeLabel('');
+    }
+  };
+
+  const requestSaveConfirmation = () => {
+    showConfirmModal(
+      'Confirm System Status Update',
+      systemEnabled
+        ? 'This will allow employees to log in to the system. Continue?'
+        : 'This will block employee login (admins remain allowed). Continue?',
+      () => {
+        void saveSystemSetting();
+      },
+      'Yes, Save'
+    );
+  };
+
+  const requestBackupConfirmation = () => {
+    showConfirmModal(
+      'Confirm Database Backup',
+      'Generate and download a full database SQL backup now?',
+      () => {
+        void downloadDatabaseBackup();
+      },
+      'Download Backup'
+    );
+  };
+
+  const requestMaintenanceConfirmation = (action: 'cache' | 'garbage' | 'full') => {
+    const actionText = action === 'cache'
+      ? 'clear runtime cache only'
+      : action === 'garbage'
+        ? 'clean stale files only'
+        : 'run full optimization (cache clear, cleanup, and cache rebuild)';
+
+    showConfirmModal(
+      'Confirm System Maintenance',
+      `Are you sure you want to ${actionText}?`,
+      () => {
+        void runSystemMaintenance(action);
+      },
+      'Run Now'
+    );
   };
 
   const uptimeMode = systemEnabled ? 'Live' : 'Maintenance';
@@ -360,7 +515,7 @@ export default function SystemSettingsPage() {
           <div className="mt-5 flex gap-2">
             <button
               type="button"
-              onClick={saveSystemSetting}
+              onClick={requestSaveConfirmation}
               disabled={loading || saving}
               className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 shadow-lg shadow-emerald-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
             >
@@ -401,7 +556,7 @@ export default function SystemSettingsPage() {
 
             <button
               type="button"
-              onClick={downloadDatabaseBackup}
+              onClick={requestBackupConfirmation}
               disabled={backupDownloading}
               className="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 shadow-lg shadow-emerald-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
             >
@@ -411,6 +566,61 @@ export default function SystemSettingsPage() {
 
           <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
             Store downloaded backups securely; they contain complete business and user data.
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-5 md:p-6">
+          <h3 className="text-sm font-semibold text-gray-900 mb-2">System Optimization</h3>
+          <p className="text-sm text-gray-600 mb-4">
+            Clean runtime cache and remove stale garbage files to keep the system stable and responsive.
+          </p>
+
+          <div className="rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-white p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <button
+                type="button"
+                onClick={() => requestMaintenanceConfirmation('cache')}
+                disabled={maintenanceRunning}
+                className="px-4 py-2.5 bg-white border border-emerald-300 rounded-md text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              >
+                {maintenanceRunning && maintenanceModeLabel === 'Cache Clearing' ? 'Clearing Cache...' : 'Clear Cache'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => requestMaintenanceConfirmation('garbage')}
+                disabled={maintenanceRunning}
+                className="px-4 py-2.5 bg-white border border-amber-300 rounded-md text-sm font-semibold text-amber-700 hover:bg-amber-50 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+              >
+                {maintenanceRunning && maintenanceModeLabel === 'Garbage Cleaning' ? 'Cleaning Garbage...' : 'Garbage Clean'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => requestMaintenanceConfirmation('full')}
+                disabled={maintenanceRunning}
+                className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 shadow-lg shadow-emerald-200/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+              >
+                {maintenanceRunning && maintenanceModeLabel === 'Full Optimization' ? 'Optimizing...' : 'Optimize System'}
+              </button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2">
+                <p className="text-xs uppercase tracking-wide text-emerald-700 font-semibold">Last Action</p>
+                <p className="text-sm text-emerald-900 mt-1">{maintenanceModeLabel || 'No maintenance action running'}</p>
+              </div>
+              <div className="rounded-lg border border-cyan-100 bg-cyan-50 px-3 py-2">
+                <p className="text-xs uppercase tracking-wide text-cyan-700 font-semibold">Last Completed</p>
+                <p className="text-sm text-cyan-900 mt-1">{lastMaintenanceAt || 'Not run yet'}</p>
+              </div>
+            </div>
+
+            {maintenanceMessage && (
+              <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                {maintenanceMessage}
+              </div>
+            )}
           </div>
         </section>
       </main>
@@ -454,6 +664,37 @@ export default function SystemSettingsPage() {
           </div>
         </div>
       </section>
+
+      {modalState.open && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-2xl">
+            <div className="border-b border-slate-200 px-5 py-4">
+              <h4 className="text-base font-semibold text-slate-900">{modalState.title}</h4>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-sm text-slate-700">{modalState.message}</p>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-4">
+              {modalState.mode === 'confirm' && (
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  {modalState.cancelText}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={modalState.mode === 'confirm' ? handleModalConfirm : closeModal}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                {modalState.confirmText}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
