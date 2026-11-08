@@ -5400,12 +5400,12 @@ export default function DistributionInvoicesPage() {
 
               <div className="receipt-preview-stage flex-1 overflow-auto p-5">
                 <article
-                  className="pos-receipt mx-auto bg-white text-slate-900 shadow-lg"
+                  className={`pos-receipt pos-receipt--${receiptPaperWidth === '54mm' ? '54' : '80'} mx-auto bg-white text-slate-900 shadow-lg`}
                   style={{ '--receipt-width': receiptPaperWidth } as CSSProperties}
                 >
                   <header className="receipt-header text-center">
                     {receiptCompany.logo_url && <img src={receiptCompany.logo_url} alt="Company logo" className="mx-auto mb-2 max-h-16 max-w-[80%] object-contain" />}
-                    <h1 className="text-base font-extrabold">{receiptCompany.name || 'Company'}</h1>
+                    <h1 className="text-lg font-extrabold">{receiptCompany.name || 'Company'}</h1>
                     {receiptCompany.address && <p>{receiptCompany.address}</p>}
                     {receiptCompany.phone && <p>Tel: {receiptCompany.phone}</p>}
                     {receiptCompany.email && <p>{receiptCompany.email}</p>}
@@ -5490,16 +5490,28 @@ export default function DistributionInvoicesPage() {
           min-height: 140mm;
           padding: 5mm 4mm;
           font-family: Arial, sans-serif;
-          font-size: 11px;
-          line-height: 1.35;
+          font-size: 12px;
+          line-height: 1.45;
         }
-        .receipt-header p, .receipt-meta p, .pos-receipt section p { margin: 1px 0; }
+
+        /* Thermal POS readability presets */
+        .pos-receipt.pos-receipt--54 {
+          font-size: 11px;
+          line-height: 1.4;
+        }
+
+        .pos-receipt.pos-receipt--80 {
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        .receipt-header p, .receipt-meta p, .pos-receipt section p { margin: 2px 0; }
         .receipt-divider { border-top: 1px dashed #475569; margin: 8px 0; }
-        .pos-receipt h2 { margin: 6px 0 4px; border-left: 3px solid #059669; padding-left: 5px; font-size: 11px; font-weight: 800; text-transform: uppercase; }
-        .receipt-item { border-bottom: 1px dotted #cbd5e1; padding: 3px 0; }
-        .receipt-item > div:last-child { color: #64748b; font-size: 10px; }
-        .receipt-summary p { display: flex; justify-content: space-between; margin: 3px 0; }
-        .receipt-summary .receipt-total { border-top: 1px solid #0f766e; padding-top: 5px; font-size: 14px; }
+        .pos-receipt h2 { margin: 7px 0 5px; border-left: 3px solid #059669; padding-left: 5px; font-size: 13px; font-weight: 800; text-transform: uppercase; }
+        .receipt-item { border-bottom: 1px dotted #cbd5e1; padding: 4px 0; }
+        .receipt-item > div:last-child { color: #64748b; font-size: 11px; }
+        .receipt-summary p { display: flex; justify-content: space-between; margin: 4px 0; }
+        .receipt-summary .receipt-total { border-top: 1px solid #0f766e; padding-top: 6px; font-size: 16px; }
         .receipt-footer { border-top: 1px dashed #475569; margin-top: 9px; padding-top: 7px; text-align: center; font-weight: 700; }
         @media print {
           @page { margin: 0; }
