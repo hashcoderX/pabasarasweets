@@ -29,6 +29,24 @@ interface AttendanceRecord {
   employee: Employee;
 }
 
+interface AttendanceDeviceSettings {
+  device_name: string;
+  communication_type: string;
+  communication_password: string;
+  dhcp_enabled: boolean;
+  device_ip: string;
+  device_port: number;
+  subnet_mask: string;
+  gateway: string;
+  dns: string;
+  real_time_push_enabled: boolean;
+  server_host: string;
+  server_port: string;
+  p2p_service_enabled: boolean;
+  is_active: boolean;
+  sample_events_json: string;
+}
+
 type WidgetVisibilityChange = {
   widget_key: string;
   is_visible: boolean;
@@ -44,9 +62,10 @@ export default function AttendancePage() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
-  const [activeTab, setActiveTab] = useState<'mark' | 'upload' | 'history'>('mark');
+  const [activeTab, setActiveTab] = useState<'mark' | 'upload' | 'device' | 'history'>('mark');
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
+  const [deviceSyncResult, setDeviceSyncResult] = useState<any>(null);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [attendanceHistory, setAttendanceHistory] = useState<AttendanceRecord[]>([]);
   const [startDate, setStartDate] = useState('');
@@ -80,6 +99,34 @@ export default function AttendancePage() {
   const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
   const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
   const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+  const [deviceSettingsLoading, setDeviceSettingsLoading] = useState(false);
+  const [deviceSaveLoading, setDeviceSaveLoading] = useState(false);
+  const [deviceTestLoading, setDeviceTestLoading] = useState(false);
+  const [deviceSyncLoading, setDeviceSyncLoading] = useState(false);
+  const [deviceSettings, setDeviceSettings] = useState<AttendanceDeviceSettings>({
+    device_name: 'Realand A-L355',
+    communication_type: 'CS',
+    communication_password: '00000000',
+    dhcp_enabled: true,
+    device_ip: '172.20.10.2',
+    device_port: 5500,
+    subnet_mask: '255.255.255.240',
+    gateway: '172.20.10.1',
+    dns: '0.0.0.0',
+    real_time_push_enabled: false,
+    server_host: 's0.weixinac.com',
+    server_port: '5055',
+    p2p_service_enabled: true,
+    is_active: true,
+    sample_events_json: JSON.stringify(
+      [
+        { employee_code: 'EMP001', punch_time: `${todayDate} 08:03:10`, direction: 'in', device_id: 'Realand-A-L355' },
+        { employee_code: 'EMP001', punch_time: `${todayDate} 17:21:44`, direction: 'out', device_id: 'Realand-A-L355' },
+      ],
+      null,
+      2
+    ),
+  });
   const router = useRouter();
 
   const openNoticeModal = (tone: NoticeTone, title: string, message: string) => {
@@ -94,6 +141,7 @@ export default function AttendancePage() {
       setToken(storedToken);
       fetchEmployees(storedToken);
       fetchWidgetVisibility(storedToken);
+      fetchDeviceSettings(storedToken);
     }
   }, [router]);
 
@@ -137,6 +185,159 @@ export default function AttendancePage() {
       console.error('Error fetching attendance widget visibility:', error);
       setWidgetVisibility({});
       setWidgetControlsLocked(false);
+    }
+  };
+
+  const fetchDeviceSettings = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    try {
+      setDeviceSettingsLoading(true);
+      const response = await axios.get('/api/hr/attendance/device-settings', {
+        headers: { Authorization: `Bearer ${tokenToUse}` },
+      });
+      const settings = response.data?.data;
+      if (!settings) return;
+
+      setDeviceSettings((prev) => ({
+        ...prev,
+        device_name: settings.device_name || prev.device_name,
+        communication_type: settings.communication_type || prev.communication_type,
+        communication_password: settings.communication_password || prev.communication_password,
+        dhcp_enabled: Boolean(settings.dhcp_enabled),
+        device_ip: settings.device_ip || '',
+        device_port: Number(settings.device_port || prev.device_port),
+        subnet_mask: settings.subnet_mask || '',
+        gateway: settings.gateway || '',
+        dns: settings.dns || '',
+        real_time_push_enabled: Boolean(settings.real_time_push_enabled),
+        server_host: settings.server_host || '',
+        server_port: settings.server_port ? String(settings.server_port) : '',
+        p2p_service_enabled: Boolean(settings.p2p_service_enabled),
+        is_active: settings.is_active !== false,
+      }));
+    } catch (error) {
+      console.error('Error fetching attendance device settings:', error);
+    } finally {
+      setDeviceSettingsLoading(false);
+    }
+  };
+
+  const saveDeviceSettings = async () => {
+    if (!token) return;
+    try {
+      setDeviceSaveLoading(true);
+      const payload = {
+        device_name: deviceSettings.device_name,
+        communication_type: deviceSettings.communication_type,
+        communication_password: deviceSettings.communication_password || null,
+        dhcp_enabled: deviceSettings.dhcp_enabled,
+        device_ip: deviceSettings.device_ip || null,
+        device_port: Number(deviceSettings.device_port || 5500),
+        subnet_mask: deviceSettings.subnet_mask || null,
+        gateway: deviceSettings.gateway || null,
+        dns: deviceSettings.dns || null,
+        real_time_push_enabled: deviceSettings.real_time_push_enabled,
+        server_host: deviceSettings.server_host || null,
+        server_port: deviceSettings.server_port ? Number(deviceSettings.server_port) : null,
+        p2p_service_enabled: deviceSettings.p2p_service_enabled,
+        is_active: deviceSettings.is_active,
+      };
+
+      await axios.put('/api/hr/attendance/device-settings', payload, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      openNoticeModal('success', 'Device Settings Saved', 'Fingerprint device configuration has been saved.');
+      fetchDeviceSettings();
+    } catch (error: any) {
+      console.error('Error saving attendance device settings:', error);
+      openNoticeModal(
+        'error',
+        'Save Failed',
+        error?.response?.data?.message || 'Failed to save attendance device settings.'
+      );
+    } finally {
+      setDeviceSaveLoading(false);
+    }
+  };
+
+  const testDeviceConnection = async () => {
+    if (!token) return;
+    try {
+      setDeviceTestLoading(true);
+      const response = await axios.post(
+        '/api/hr/attendance/device-settings/test',
+        {
+          device_ip: deviceSettings.device_ip || null,
+          device_port: Number(deviceSettings.device_port || 5500),
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          validateStatus: () => true,
+        }
+      );
+
+      if (response.status >= 200 && response.status < 300 && response.data?.ok !== false) {
+        openNoticeModal('success', 'Connection Test', response.data?.message || 'Device is reachable.');
+      } else {
+        openNoticeModal(
+          'error',
+          'Connection Test Failed',
+          response.data?.message || 'Unable to reach the fingerprint device.'
+        );
+      }
+      fetchDeviceSettings();
+    } catch (error: any) {
+      const statusCode = Number(error?.response?.status || 0);
+      if (!statusCode || statusCode >= 500) {
+        console.error('Error testing attendance device connection:', error);
+      }
+      openNoticeModal(
+        'error',
+        'Connection Test Failed',
+        error?.response?.data?.message || 'Unable to reach the fingerprint device.'
+      );
+      fetchDeviceSettings();
+    } finally {
+      setDeviceTestLoading(false);
+    }
+  };
+
+  const syncDeviceEvents = async () => {
+    if (!token) return;
+
+    let parsedEvents: any[] = [];
+    try {
+      const parsed = JSON.parse(deviceSettings.sample_events_json || '[]');
+      parsedEvents = Array.isArray(parsed) ? parsed : [];
+      if (!parsedEvents.length) {
+        openNoticeModal('info', 'No Events', 'Please add at least one attendance event in JSON format.');
+        return;
+      }
+    } catch (error) {
+      openNoticeModal('error', 'Invalid JSON', 'Events JSON is invalid. Please correct and try again.');
+      return;
+    }
+
+    try {
+      setDeviceSyncLoading(true);
+      const response = await axios.post(
+        '/api/hr/attendance/device-events',
+        { events: parsedEvents },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setDeviceSyncResult(response.data);
+      openNoticeModal('success', 'Device Sync Completed', response.data?.message || 'Device events processed.');
+      fetchTodayAttendance();
+    } catch (error: any) {
+      console.error('Error syncing attendance device events:', error);
+      openNoticeModal(
+        'error',
+        'Device Sync Failed',
+        error?.response?.data?.message || 'Failed to process biometric events.'
+      );
+    } finally {
+      setDeviceSyncLoading(false);
     }
   };
 
@@ -429,6 +630,7 @@ export default function AttendancePage() {
     { id: 'hrm-attendance-tabs', name: 'Attendance Tabs' },
     { id: 'hrm-attendance-tab-button-mark', name: 'Attendance Tab Button: Quick Mark' },
     { id: 'hrm-attendance-tab-button-upload', name: 'Attendance Tab Button: CSV Upload' },
+    { id: 'hrm-attendance-tab-button-device', name: 'Attendance Tab Button: Device Sync' },
     { id: 'hrm-attendance-tab-button-history', name: 'Attendance Tab Button: View History' },
     { id: 'hrm-attendance-mark-pane', name: 'Attendance Tab Pane: Quick Mark' },
     { id: 'hrm-attendance-mark-controls', name: 'Quick Mark Controls' },
@@ -438,6 +640,8 @@ export default function AttendancePage() {
     { id: 'hrm-attendance-upload-panel', name: 'Attendance CSV Upload Panel' },
     { id: 'hrm-attendance-upload-heading', name: 'Attendance Upload Heading' },
     { id: 'hrm-attendance-upload-action-buttons', name: 'Attendance Upload Buttons' },
+    { id: 'hrm-attendance-device-pane', name: 'Attendance Tab Pane: Device Sync' },
+    { id: 'hrm-attendance-device-panel', name: 'Attendance Device Sync Panel' },
     { id: 'hrm-attendance-history-pane', name: 'Attendance Tab Pane: History' },
     { id: 'hrm-attendance-history-panel', name: 'Attendance History Panel' },
     { id: 'hrm-attendance-history-heading', name: 'Attendance History Heading' },
@@ -874,6 +1078,31 @@ export default function AttendancePage() {
                 </button>
               </div>
             )}
+            {isWidgetVisible('hrm-attendance-tab-button-device') && (
+              <div className="relative">
+                {!widgetControlsLocked && (
+                  <button
+                    type="button"
+                    onClick={() => stageWidgetVisibilityChange('hrm-attendance-tab-button-device', false)}
+                    className="absolute -right-2 -top-2 z-20 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[10px] font-bold text-slate-600 shadow hover:bg-slate-100"
+                    title="Disable this widget"
+                    aria-label="Disable Device Sync Tab Button"
+                  >
+                    ×
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveTab('device')}
+                  className={`px-6 py-2 rounded-full font-medium transition-all duration-300 ${
+                    activeTab === 'device'
+                      ? 'bg-gradient-to-r from-orange-500 to-red-500 text-white shadow-lg'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Device Sync
+                </button>
+              </div>
+            )}
             {isWidgetVisible('hrm-attendance-tab-button-history') && (
               <div className="relative">
                 {!widgetControlsLocked && (
@@ -1204,6 +1433,218 @@ export default function AttendancePage() {
                         <li key={index}>{error}</li>
                       ))}
                     </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'device' && isWidgetVisible('hrm-attendance-device-pane') && isWidgetVisible('hrm-attendance-device-panel') && (
+          <div className="relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-white/20 p-6">
+            {!widgetControlsLocked && (
+              <button
+                type="button"
+                onClick={() => {
+                  stageWidgetVisibilityChange('hrm-attendance-device-panel', false);
+                  stageWidgetVisibilityChange('hrm-attendance-device-pane', false);
+                }}
+                className="absolute right-3 top-3 z-20 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
+                title="Disable this widget"
+                aria-label="Disable Device Sync Panel"
+              >
+                ×
+              </button>
+            )}
+
+            <h3 className="text-xl font-bold text-gray-900">Biometric Device Auto Attendance</h3>
+            <p className="mt-1 text-sm text-gray-600">
+              Configure your Realand device, test network connectivity, and process punch events automatically.
+            </p>
+
+            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <label className="text-sm font-medium text-gray-700">
+                Device Name
+                <input
+                  type="text"
+                  value={deviceSettings.device_name}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, device_name: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Communication Type
+                <input
+                  type="text"
+                  value={deviceSettings.communication_type}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, communication_type: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Communication Password
+                <input
+                  type="text"
+                  value={deviceSettings.communication_password}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, communication_password: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Device IP
+                <input
+                  type="text"
+                  value={deviceSettings.device_ip}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, device_ip: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Local Port
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={deviceSettings.device_port}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, device_port: Number(e.target.value || 5500) }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Server Port
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={deviceSettings.server_port}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, server_port: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Subnet Mask
+                <input
+                  type="text"
+                  value={deviceSettings.subnet_mask}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, subnet_mask: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Gateway
+                <input
+                  type="text"
+                  value={deviceSettings.gateway}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, gateway: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                DNS
+                <input
+                  type="text"
+                  value={deviceSettings.dns}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, dns: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-4">
+              <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={deviceSettings.dhcp_enabled}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, dhcp_enabled: e.target.checked }))}
+                />
+                DHCP Enabled
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={deviceSettings.real_time_push_enabled}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, real_time_push_enabled: e.target.checked }))}
+                />
+                Real Time Push Enabled
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={deviceSettings.p2p_service_enabled}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, p2p_service_enabled: e.target.checked }))}
+                />
+                P2P Service Enabled
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={deviceSettings.is_active}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, is_active: e.target.checked }))}
+                />
+                Integration Active
+              </label>
+            </div>
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={saveDeviceSettings}
+                disabled={deviceSaveLoading || deviceSettingsLoading}
+                className="rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:opacity-60"
+              >
+                {deviceSaveLoading ? 'Saving...' : 'Save Device Settings'}
+              </button>
+              <button
+                type="button"
+                onClick={testDeviceConnection}
+                disabled={deviceTestLoading || deviceSettingsLoading}
+                className="rounded-lg border border-orange-300 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 disabled:opacity-60"
+              >
+                {deviceTestLoading ? 'Testing...' : 'Test Connection'}
+              </button>
+            </div>
+
+            <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50 p-4">
+              <p className="text-sm font-semibold text-blue-800">Bridge API Endpoint</p>
+              <p className="mt-1 text-sm text-blue-700">
+                POST <code>/api/hr/attendance/device-events</code> with an <code>events</code> array from your device bridge service.
+              </p>
+              <p className="mt-1 text-xs text-blue-600">
+                Tip: Realand A-L355 usually requires an external connector service to read device logs and post them to this API.
+              </p>
+            </div>
+
+            <div className="mt-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Sample / Incoming Events JSON</label>
+              <textarea
+                rows={8}
+                value={deviceSettings.sample_events_json}
+                onChange={(e) => setDeviceSettings((prev) => ({ ...prev, sample_events_json: e.target.value }))}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs text-black"
+              />
+            </div>
+
+            <div className="mt-3">
+              <button
+                type="button"
+                onClick={syncDeviceEvents}
+                disabled={deviceSyncLoading}
+                className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-60"
+              >
+                {deviceSyncLoading ? 'Syncing...' : 'Process Device Events'}
+              </button>
+            </div>
+
+            {deviceSyncResult && (
+              <div className="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+                <p>Created: {deviceSyncResult?.summary?.created_records ?? 0}</p>
+                <p>Updated: {deviceSyncResult?.summary?.updated_records ?? 0}</p>
+                <p>Skipped: {deviceSyncResult?.summary?.skipped_records ?? 0}</p>
+                {(deviceSyncResult?.errors || []).length > 0 && (
+                  <div className="mt-2 max-h-24 overflow-y-auto rounded-md border border-green-200 bg-white p-2 text-xs">
+                    {(deviceSyncResult.errors as string[]).map((error: string, index: number) => (
+                      <p key={index} className="text-red-600">{error}</p>
+                    ))}
                   </div>
                 )}
               </div>

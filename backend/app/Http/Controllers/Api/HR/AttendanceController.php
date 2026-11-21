@@ -4,12 +4,14 @@ namespace App\Http\Controllers\Api\HR;
 
 use App\Http\Controllers\Controller;
 use App\Models\Attendance;
+use App\Models\AttendanceDeviceSetting;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Carbon\Carbon;
 use App\Models\Employee;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
 
 class AttendanceController extends Controller
 {
@@ -461,6 +463,293 @@ class AttendanceController extends Controller
             'errors' => $errors,
             'data' => $createdRecords,
         ], 200);
+    }
+
+    /**
+     * Get biometric device settings used by the attendance bridge.
+     */
+    public function getDeviceSettings(): JsonResponse
+    {
+        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
+
+        return response()->json([
+            'data' => $settings,
+        ]);
+    }
+
+    /**
+     * Save biometric device settings.
+     */
+    public function saveDeviceSettings(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'device_name' => 'required|string|max:255',
+            'communication_type' => 'required|string|max:32',
+            'communication_password' => 'nullable|string|max:64',
+            'dhcp_enabled' => 'required|boolean',
+            'device_ip' => 'nullable|ip',
+            'device_port' => 'required|integer|min:1|max:65535',
+            'subnet_mask' => 'nullable|ip',
+            'gateway' => 'nullable|ip',
+            'dns' => 'nullable|ip',
+            'real_time_push_enabled' => 'required|boolean',
+            'server_host' => 'nullable|string|max:255',
+            'server_port' => 'nullable|integer|min:1|max:65535',
+            'p2p_service_enabled' => 'required|boolean',
+            'is_active' => 'required|boolean',
+        ]);
+
+        $userId = Auth::id();
+        $existing = AttendanceDeviceSetting::query()->latest('id')->first();
+
+        $settings = AttendanceDeviceSetting::query()->updateOrCreate(
+            ['id' => $existing?->id ?? 1],
+            array_merge($validated, [
+                'created_by' => $existing?->created_by ?? $userId,
+                'updated_by' => $userId,
+            ])
+        );
+
+        return response()->json([
+            'message' => 'Attendance device settings saved successfully.',
+            'data' => $settings,
+        ]);
+    }
+
+    /**
+     * Test TCP connectivity to biometric device.
+     */
+    public function testDeviceConnection(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'device_ip' => 'nullable|ip',
+            'device_port' => 'nullable|integer|min:1|max:65535',
+        ]);
+
+        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
+        $deviceIp = $validated['device_ip'] ?? $settings?->device_ip;
+        $devicePort = $validated['device_port'] ?? $settings?->device_port ?? 5500;
+
+        if (!$deviceIp) {
+            return response()->json([
+                'ok' => false,
+                'message' => 'Device IP is not configured.',
+            ], 422);
+        }
+
+        // Realand terminals speak a UDP protocol on the comm port; probe UDP first, then TCP as fallback.
+        $protocol = null;
+        $udpReplyBytes = $this->probeUdpDevice($deviceIp, (int) $devicePort);
+        if ($udpReplyBytes !== null) {
+            $protocol = 'UDP';
+        }
+
+        $errorNumber = 0;
+        $errorMessage = '';
+        if ($protocol === null) {
+            $connection = @fsockopen($deviceIp, (int) $devicePort, $errorNumber, $errorMessage, 3);
+            if (is_resource($connection)) {
+                fclose($connection);
+                $protocol = 'TCP';
+            }
+        }
+
+        $isReachable = $protocol !== null;
+        $successMessage = $protocol === 'UDP'
+            ? "Device responded over UDP on {$deviceIp}:{$devicePort} ({$udpReplyBytes} bytes)."
+            : "Connection successful to {$deviceIp}:{$devicePort} (TCP).";
+        $failureMessage = "No response from {$deviceIp}:{$devicePort} over UDP or TCP. "
+            . 'Check the device is powered on, on the same network, and the Local Port / Communication Password match.';
+
+        if ($settings) {
+            $settings->last_tested_at = now();
+            $settings->last_test_result = $isReachable
+                ? "Reachable via {$protocol} on {$deviceIp}:{$devicePort}"
+                : "Failed: no UDP reply, TCP {$errorNumber} {$errorMessage}";
+            $settings->updated_by = Auth::id();
+            $settings->save();
+        }
+
+        return response()->json([
+            'ok' => $isReachable,
+            'protocol' => $protocol,
+            'message' => $isReachable ? $successMessage : $failureMessage,
+        ], $isReachable ? 200 : 422);
+    }
+
+    /**
+     * Sends a small probe datagram and returns the reply length, or null if the device did not answer.
+     */
+    private function probeUdpDevice(string $ip, int $port, int $timeoutSeconds = 2): ?int
+    {
+        $socket = @stream_socket_client("udp://{$ip}:{$port}", $errno, $errstr, $timeoutSeconds);
+        if (!$socket) {
+            return null;
+        }
+
+        try {
+            stream_set_timeout($socket, $timeoutSeconds);
+            if (@fwrite($socket, "\x55\xAA\x01\x00") === false) {
+                return null;
+            }
+
+            $reply = @fread($socket, 1024);
+            $meta = stream_get_meta_data($socket);
+            if ($reply === false || $reply === '' || !empty($meta['timed_out'])) {
+                return null;
+            }
+
+            return strlen($reply);
+        } finally {
+            fclose($socket);
+        }
+    }
+
+    /**
+     * Receive attendance events from external device bridge and upsert attendance.
+     */
+    public function syncDeviceEvents(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'events' => 'required|array|min:1|max:5000',
+            'events.*.employee_code' => 'required|string|max:100',
+            'events.*.punch_time' => 'required|date',
+            'events.*.direction' => 'nullable|in:in,out,auto',
+            'events.*.device_id' => 'nullable|string|max:100',
+            'events.*.notes' => 'nullable|string|max:255',
+        ]);
+
+        $created = 0;
+        $updated = 0;
+        $skipped = 0;
+        $errors = [];
+
+        foreach ($validated['events'] as $index => $event) {
+            $lineNo = $index + 1;
+            $employeeCode = trim((string) $event['employee_code']);
+            $direction = strtolower((string) ($event['direction'] ?? 'auto'));
+            $deviceId = trim((string) ($event['device_id'] ?? ''));
+            $eventNotes = trim((string) ($event['notes'] ?? ''));
+
+            $employee = Employee::query()
+                ->whereRaw('LOWER(employee_code) = ?', [strtolower($employeeCode)])
+                ->first();
+
+            if (!$employee) {
+                $errors[] = "Event {$lineNo}: Employee code {$employeeCode} not found.";
+                continue;
+            }
+
+            try {
+                $punchAt = Carbon::parse((string) $event['punch_time']);
+            } catch (\Throwable $e) {
+                $errors[] = "Event {$lineNo}: Invalid punch_time.";
+                continue;
+            }
+
+            $attendanceDate = $punchAt->toDateString();
+            $punchTime = $punchAt->format('H:i:s');
+
+            $branchId = $employee->branch_id;
+            if (!$branchId || !DB::table('companies')->where('id', $branchId)->exists()) {
+                $firstCompany = DB::table('companies')->first();
+                if (!$firstCompany) {
+                    $errors[] = "Event {$lineNo}: Company not configured for employee {$employeeCode}.";
+                    continue;
+                }
+                $branchId = $firstCompany->id;
+            }
+
+            $attendance = Attendance::query()
+                ->where('employee_id', $employee->id)
+                ->where('date', $attendanceDate)
+                ->first();
+
+            $wasCreated = false;
+            if (!$attendance) {
+                $attendance = new Attendance();
+                $attendance->tenant_id = $branchId;
+                $attendance->branch_id = $branchId;
+                $attendance->employee_id = $employee->id;
+                $attendance->date = $attendanceDate;
+                $attendance->status = 'present';
+                $wasCreated = true;
+            }
+
+            $inTime = $attendance->in_time;
+            $outTime = $attendance->out_time;
+
+            if ($direction === 'in') {
+                if (!$inTime || strcmp($punchTime, (string) $inTime) < 0) {
+                    $inTime = $punchTime;
+                }
+            } elseif ($direction === 'out') {
+                if (!$outTime || strcmp($punchTime, (string) $outTime) > 0) {
+                    $outTime = $punchTime;
+                }
+            } else {
+                if (!$inTime) {
+                    $inTime = $punchTime;
+                } elseif (!$outTime && strcmp($punchTime, (string) $inTime) >= 0) {
+                    $outTime = $punchTime;
+                } else {
+                    $skipped++;
+                    continue;
+                }
+            }
+
+            $attendance->in_time = $inTime;
+            $attendance->out_time = $outTime;
+
+            if ($attendance->in_time && $attendance->out_time) {
+                $start = Carbon::createFromFormat('H:i:s', $attendance->in_time);
+                $end = Carbon::createFromFormat('H:i:s', $attendance->out_time);
+                if ($end->greaterThanOrEqualTo($start)) {
+                    $attendance->work_hours = round($end->diffInMinutes($start) / 60, 2);
+                }
+            }
+
+            $noteParts = [];
+            if ($attendance->notes) {
+                $noteParts[] = $attendance->notes;
+            }
+            if ($deviceId !== '') {
+                $noteParts[] = "Device: {$deviceId}";
+            }
+            if ($eventNotes !== '') {
+                $noteParts[] = $eventNotes;
+            }
+            $noteParts[] = 'Source: biometric_sync';
+            $attendance->notes = implode(' | ', array_values(array_unique(array_filter($noteParts))));
+
+            $attendance->save();
+            if ($wasCreated) {
+                $created++;
+            } else {
+                $updated++;
+            }
+        }
+
+        $summary = [
+            'created_records' => $created,
+            'updated_records' => $updated,
+            'skipped_records' => $skipped,
+            'error_count' => count($errors),
+        ];
+
+        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
+        if ($settings) {
+            $settings->last_synced_at = now();
+            $settings->last_sync_summary = $summary;
+            $settings->updated_by = Auth::id();
+            $settings->save();
+        }
+
+        return response()->json([
+            'message' => 'Device events processed.',
+            'summary' => $summary,
+            'errors' => $errors,
+        ]);
     }
 
     private function normalizeCsvHeader(string $value): string

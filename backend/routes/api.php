@@ -161,11 +161,15 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('employees/{employee}/allowances-deductions/{allowanceDeduction}', [EmployeeAllowanceDeductionController::class, 'update']);
         Route::delete('employees/{employee}/allowances-deductions/{allowanceDeduction}', [EmployeeAllowanceDeductionController::class, 'destroy']);
 
-        Route::apiResource('attendance', AttendanceController::class);
+        Route::get('attendance/device-settings', [AttendanceController::class, 'getDeviceSettings']);
+        Route::put('attendance/device-settings', [AttendanceController::class, 'saveDeviceSettings']);
+        Route::post('attendance/device-settings/test', [AttendanceController::class, 'testDeviceConnection']);
+        Route::post('attendance/device-events', [AttendanceController::class, 'syncDeviceEvents']);
         Route::post('attendance/mark', [AttendanceController::class, 'markBasic']);
         Route::post('attendance/mark-out', [AttendanceController::class, 'markOut']);
         Route::post('attendance/upload-csv', [AttendanceController::class, 'uploadCsv']);
         Route::get('attendance/employee/{employeeId}', [AttendanceController::class, 'getEmployeeAttendance']);
+        Route::apiResource('attendance', AttendanceController::class);
         Route::apiResource('leaves', LeaveController::class);
         Route::post('leaves/{leave}/section-head-approve', [LeaveController::class, 'sectionHeadApprove']);
         Route::post('leaves/{leave}/hr-approve', [LeaveController::class, 'hrApprove']);
