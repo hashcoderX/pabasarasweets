@@ -4,6 +4,12 @@ import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
+import { OUTLET_EMBED_MESSAGE } from './useOutletEmbeddedBridge';
+
+type EmbeddedFrame = {
+  path: string;
+  src: string;
+};
 
 type StockLine = {
   inventory_item_id: number;
@@ -160,9 +166,13 @@ function OutletPosDashboardContent() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [embeddedPath, setEmbeddedPath] = useState<string>('');
-  const [embeddedSrc, setEmbeddedSrc] = useState<string>('');
-  const [embeddedLoading, setEmbeddedLoading] = useState(false);
-  const embeddedFrameRef = useRef<HTMLIFrameElement | null>(null);
+  // Visited pages stay mounted (hidden) so switching back never reloads the frame.
+  const [embeddedFrames, setEmbeddedFrames] = useState<EmbeddedFrame[]>([]);
+  const [readyEmbeddedPaths, setReadyEmbeddedPaths] = useState<Record<string, boolean>>({});
+  const embeddedFrameRefs = useRef<Record<string, HTMLIFrameElement | null>>({});
+  const embeddedReadyFallbackTimers = useRef<Record<string, number>>({});
+  const embeddedMessageHandlerRef = useRef<(event: MessageEvent) => void>(() => {});
+  const embeddedLoading = Boolean(embeddedPath) && !readyEmbeddedPaths[embeddedPath];
   const hasLoadedDashboardRef = useRef(false);
   const confirmActionRef = useRef<(() => void) | null>(null);
 
@@ -212,8 +222,7 @@ function OutletPosDashboardContent() {
     if (action) action();
   };
 
-  const cleanEmbeddedFrameUi = () => {
-    const frame = embeddedFrameRef.current;
+  const cleanEmbeddedFrameUi = (frame: HTMLIFrameElement | null | undefined) => {
     if (!frame) return;
 
     try {
@@ -251,28 +260,76 @@ function OutletPosDashboardContent() {
     { href: '/outlet-pos/loyalty-customers', icon: '🎁', label: 'Loyalty Customers' },
   ];
 
+  const clearEmbeddedReadyFallback = (path: string) => {
+    const timerId = embeddedReadyFallbackTimers.current[path];
+    if (timerId) {
+      window.clearTimeout(timerId);
+      delete embeddedReadyFallbackTimers.current[path];
+    }
+  };
+
+  const markEmbeddedReady = (path: string) => {
+    clearEmbeddedReadyFallback(path);
+    setReadyEmbeddedPaths((prev) => (prev[path] ? prev : { ...prev, [path]: true }));
+  };
+
+  const markEmbeddedNotReady = (paths: string[]) => {
+    if (!paths.length) return;
+    setReadyEmbeddedPaths((prev) => {
+      const next = { ...prev };
+      paths.forEach((path) => {
+        delete next[path];
+      });
+      return next;
+    });
+  };
+
   const openEmbeddedPage = (path: string) => {
     if (path === '/outlet-pos') {
       setEmbeddedPath('');
-      setEmbeddedSrc('');
-      setEmbeddedLoading(false);
       return;
     }
-    const nextSrc = getPathWithCode(path, true);
-    if (path === embeddedPath && nextSrc === embeddedSrc) {
-      return;
-    }
-    setEmbeddedLoading(true);
+
     setEmbeddedPath(path);
-    setEmbeddedSrc(nextSrc);
+    setEmbeddedFrames((prev) => {
+      if (prev.some((frame) => frame.path === path)) return prev;
+      return [...prev, { path, src: getPathWithCode(path, true) }];
+    });
+  };
+
+  // Drops cached frames that may now hold stale data; optionally reloads the active one in place.
+  const invalidateEmbeddedFrames = (options: { keepPath?: string; reloadKept?: boolean } = {}) => {
+    const { keepPath = '', reloadKept = false } = options;
+
+    const dropped = embeddedFrames.filter((frame) => frame.path !== keepPath).map((frame) => frame.path);
+    dropped.forEach((path) => {
+      clearEmbeddedReadyFallback(path);
+      delete embeddedFrameRefs.current[path];
+    });
+
+    const kept = embeddedFrames.filter((frame) => frame.path === keepPath);
+    if (reloadKept && kept.length) {
+      clearEmbeddedReadyFallback(keepPath);
+      markEmbeddedNotReady([...dropped, keepPath]);
+      const baseSrc = getPathWithCode(keepPath, true);
+      const separator = baseSrc.includes('?') ? '&' : '?';
+      setEmbeddedFrames([{ path: keepPath, src: `${baseSrc}${separator}_refresh=${Date.now()}` }]);
+      return;
+    }
+
+    markEmbeddedNotReady(dropped);
+    setEmbeddedFrames(kept);
   };
 
   const refreshEmbeddedPageIfOpen = () => {
-    if (!embeddedPath) return;
-    const nextSrcBase = getPathWithCode(embeddedPath, true);
-    const separator = nextSrcBase.includes('?') ? '&' : '?';
-    setEmbeddedLoading(true);
-    setEmbeddedSrc(`${nextSrcBase}${separator}_refresh=${Date.now()}`);
+    invalidateEmbeddedFrames({ keepPath: embeddedPath, reloadKept: true });
+  };
+
+  const handleEmbeddedFrameLoad = (path: string) => {
+    cleanEmbeddedFrameUi(embeddedFrameRefs.current[path]);
+    clearEmbeddedReadyFallback(path);
+    // Safety net for pages that never send the ready signal (e.g. redirected to login).
+    embeddedReadyFallbackTimers.current[path] = window.setTimeout(() => markEmbeddedReady(path), 8000);
   };
 
   const redirectToLoginWithNext = () => {
@@ -439,6 +496,45 @@ function OutletPosDashboardContent() {
 
     load();
   }, [token, API_URL, params, router]);
+
+  embeddedMessageHandlerRef.current = (event: MessageEvent) => {
+    if (event.origin !== window.location.origin) return;
+    const data = event.data as { type?: string; path?: string } | null;
+    if (!data?.type) return;
+
+    const sourcePath = Object.keys(embeddedFrameRefs.current).find(
+      (path) => embeddedFrameRefs.current[path]?.contentWindow === event.source
+    );
+    if (!sourcePath) return;
+
+    if (data.type === OUTLET_EMBED_MESSAGE.ready) {
+      cleanEmbeddedFrameUi(embeddedFrameRefs.current[sourcePath]);
+      markEmbeddedReady(sourcePath);
+      return;
+    }
+
+    if (data.type === OUTLET_EMBED_MESSAGE.dataChanged) {
+      invalidateEmbeddedFrames({ keepPath: sourcePath });
+      if (token) {
+        loadData(token).catch((error) => console.error('Error refreshing outlet dashboard:', error));
+      }
+      return;
+    }
+
+    if (data.type === OUTLET_EMBED_MESSAGE.navigate && typeof data.path === 'string' && data.path.startsWith('/outlet-pos')) {
+      openEmbeddedPage(data.path);
+    }
+  };
+
+  useEffect(() => {
+    const listener = (event: MessageEvent) => embeddedMessageHandlerRef.current(event);
+    window.addEventListener('message', listener);
+    const fallbackTimers = embeddedReadyFallbackTimers.current;
+    return () => {
+      window.removeEventListener('message', listener);
+      Object.values(fallbackTimers).forEach((timerId) => window.clearTimeout(timerId));
+    };
+  }, []);
 
   const stockTotals = useMemo(() => {
     const totalItems = stocks.length;
@@ -1015,71 +1111,88 @@ function OutletPosDashboardContent() {
                 </div>
                 <button
                   onClick={handleLogout}
-                  className="px-4 py-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-md text-sm font-medium hover:from-rose-600 hover:to-pink-600"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-md text-sm font-medium hover:from-rose-600 hover:to-pink-600"
                 >
-                  Logout
+                  <span aria-hidden="true">🚪</span>
+                  <span>Logout</span>
                 </button>
               </div>
               <div className="pb-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => openEmbeddedPage('/outlet-pos/create-sale')}
-                  className="px-4 py-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-md text-sm font-medium hover:from-rose-600 hover:to-pink-600"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-rose-500 to-pink-500 text-white rounded-md text-sm font-medium hover:from-rose-600 hover:to-pink-600"
                 >
-                  Go To Create Sale
+                  <span aria-hidden="true">➕</span>
+                  <span>Go To Create Sale</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => openEmbeddedPage('/outlet-pos/sales')}
-                  className="px-4 py-2 border border-pink-200 bg-pink-50 text-pink-700 rounded-md text-sm font-medium hover:bg-pink-100"
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-pink-200 bg-pink-50 text-pink-700 rounded-md text-sm font-medium hover:bg-pink-100"
                 >
-                  Open Sales Records
+                  <span aria-hidden="true">🧾</span>
+                  <span>Open Sales Records</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => openEmbeddedPage('/outlet-pos/cash-drawer')}
-                  className="px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm font-medium hover:bg-emerald-100"
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm font-medium hover:bg-emerald-100"
                 >
-                  Set Cash Drawer
+                  <span aria-hidden="true">💵</span>
+                  <span>Set Cash Drawer</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => openEmbeddedPage('/outlet-pos/stock')}
-                  className="px-4 py-2 border border-rose-200 bg-rose-50 text-rose-700 rounded-md text-sm font-medium hover:bg-rose-100"
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-rose-200 bg-rose-50 text-rose-700 rounded-md text-sm font-medium hover:bg-rose-100"
                 >
-                  View Stock
+                  <span aria-hidden="true">📦</span>
+                  <span>View Stock</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => openEmbeddedPage('/outlet-pos/loyalty-customers')}
-                  className="px-4 py-2 border border-amber-200 bg-amber-50 text-amber-700 rounded-md text-sm font-medium hover:bg-amber-100"
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-amber-200 bg-amber-50 text-amber-700 rounded-md text-sm font-medium hover:bg-amber-100"
                 >
-                  Loyalty Customers
+                  <span aria-hidden="true">🎁</span>
+                  <span>Loyalty Customers</span>
                 </button>
               </div>
             </div>
           </nav>
 
       <main className="w-full py-8 px-[30px] space-y-6">
-        {embeddedPath ? (
-          <div className="relative min-h-[80vh] w-full overflow-hidden rounded-2xl border border-rose-100 bg-white shadow-xl">
+        {embeddedFrames.length > 0 ? (
+          <div
+            className={`relative min-h-[80vh] w-full overflow-hidden rounded-2xl border border-rose-100 bg-white shadow-xl ${
+              embeddedPath ? '' : 'hidden'
+            }`}
+          >
             {embeddedLoading ? (
-              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/90">
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white">
                 <div className="h-8 w-8 animate-spin rounded-full border-2 border-rose-200 border-t-rose-500" />
               </div>
             ) : null}
-            <iframe
-              ref={embeddedFrameRef}
-              src={embeddedSrc}
-              title={`Outlet POS Embedded Page - ${embeddedPath}`}
-              onLoad={() => {
-                setEmbeddedLoading(false);
-                cleanEmbeddedFrameUi();
-              }}
-              className="h-[80vh] w-full bg-white"
-            />
+            {embeddedFrames.map((frame) => (
+              <iframe
+                key={frame.path}
+                ref={(element) => {
+                  if (element) {
+                    embeddedFrameRefs.current[frame.path] = element;
+                  } else if (embeddedFrameRefs.current[frame.path]) {
+                    delete embeddedFrameRefs.current[frame.path];
+                  }
+                }}
+                src={frame.src}
+                title={`Outlet POS Embedded Page - ${frame.path}`}
+                onLoad={() => handleEmbeddedFrameLoad(frame.path)}
+                className={`h-[80vh] w-full bg-white ${frame.path === embeddedPath ? 'block' : 'hidden'}`}
+              />
+            ))}
           </div>
-        ) : (
+        ) : null}
+        {!embeddedPath ? (
           <>
         <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
@@ -1385,7 +1498,7 @@ function OutletPosDashboardContent() {
           </div>
         </section>
           </>
-        )}
+        ) : null}
       </main>
         </div>
       </div>

@@ -4,6 +4,7 @@ import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
+import { useOutletEmbeddedBridge } from '../useOutletEmbeddedBridge';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -308,6 +309,7 @@ function OutletPosContent() {
   const router = useRouter();
   const params = useSearchParams();
   const isEmbedded = params.get('embedded') === '1';
+  useOutletEmbeddedBridge(isEmbedded, loading);
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const formInputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';

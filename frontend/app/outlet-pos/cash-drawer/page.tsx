@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import axios from '@/lib/http';
+import { useOutletEmbeddedBridge } from '../useOutletEmbeddedBridge';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
@@ -80,6 +81,7 @@ function OutletCashDrawerContent() {
   const router = useRouter();
   const params = useSearchParams();
   const isEmbedded = params.get('embedded') === '1';
+  useOutletEmbeddedBridge(isEmbedded, loading);
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const getPathWithCode = (path: string) => {

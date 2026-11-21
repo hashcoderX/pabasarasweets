@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { createApiClient } from '@/lib/apiClient';
 import { clearOfflineSession, readOfflineSession } from '@/lib/offlineSession';
 import { syncDistributionOfflineQueues } from '@/lib/distributionSync';
@@ -145,6 +145,7 @@ export default function Dashboard() {
     message: '',
   });
   const router = useRouter();
+  const pathname = usePathname();
   const apiClient = createApiClient();
   const syncInFlightRef = useRef(false);
   const hasPrefetchedRoutesRef = useRef(false);
@@ -772,6 +773,19 @@ export default function Dashboard() {
 
     setTimeout(prefetchWork, 0);
   }, [accessReady, router, visibleModules]);
+
+  useEffect(() => {
+    setNavigatingPath(null);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!navigatingPath) return;
+    const timeoutId = window.setTimeout(() => {
+      setNavigatingPath(null);
+    }, 2500);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [navigatingPath]);
 
   const rememberRecentRoute = (path: string) => {
     try {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { isAxiosError } from 'axios';
 import axios from '@/lib/http';
@@ -84,6 +84,8 @@ export default function Leaves() {
 
   // Form fields for leave request
   const [employeeId, setEmployeeId] = useState('');
+  const [employeeSearchTerm, setEmployeeSearchTerm] = useState('');
+  const [isEmployeeSearchOpen, setIsEmployeeSearchOpen] = useState(false);
   const [leaveType, setLeaveType] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -109,6 +111,7 @@ export default function Leaves() {
   const [confirmTitle, setConfirmTitle] = useState('');
   const [confirmMessage, setConfirmMessage] = useState('');
   const [confirmAction, setConfirmAction] = useState<(() => Promise<void> | void) | null>(null);
+  const employeeSearchCloseTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -122,6 +125,14 @@ export default function Leaves() {
       fetchWidgetVisibility(storedToken);
     }
   }, [router]);
+
+  useEffect(() => {
+    return () => {
+      if (employeeSearchCloseTimerRef.current) {
+        window.clearTimeout(employeeSearchCloseTimerRef.current);
+      }
+    };
+  }, []);
 
   const fetchLeaves = async (authToken?: string) => {
     const tokenToUse = authToken || token;
@@ -184,6 +195,10 @@ export default function Leaves() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token) return;
+    if (!employeeId) {
+      showNotice('Validation Error', 'Please select an employee from the list.', 'error');
+      return;
+    }
 
     try {
       const leaveData = {
@@ -302,6 +317,8 @@ export default function Leaves() {
 
   const resetForm = () => {
     setEmployeeId('');
+    setEmployeeSearchTerm('');
+    setIsEmployeeSearchOpen(false);
     setLeaveType('');
     setStartDate('');
     setEndDate('');
@@ -328,6 +345,44 @@ export default function Leaves() {
     setReason(leave.reason);
     setShowForm(true);
   };
+
+  useEffect(() => {
+    if (!showForm) return;
+    if (!employeeId) {
+      setEmployeeSearchTerm('');
+      return;
+    }
+
+    const selectedEmployee = employees.find((employee) => String(employee.id) === employeeId);
+    if (!selectedEmployee) return;
+
+    setEmployeeSearchTerm(
+      `${selectedEmployee.first_name} ${selectedEmployee.last_name} (${selectedEmployee.employee_code})`
+    );
+  }, [employeeId, employees, showForm]);
+
+  const activeEmployees = useMemo(
+    () => employees.filter((employee) => employee.status === 'active'),
+    [employees]
+  );
+
+  const filteredActiveEmployees = useMemo(() => {
+    const keyword = employeeSearchTerm.trim().toLowerCase();
+    if (!keyword) return activeEmployees.slice(0, 25);
+
+    return activeEmployees
+      .filter((employee) => {
+        const fullName = `${employee.first_name} ${employee.last_name}`.toLowerCase();
+        const employeeCode = String(employee.employee_code || '').toLowerCase();
+        const employeeEmail = String(employee.email || '').toLowerCase();
+        return (
+          fullName.includes(keyword) ||
+          employeeCode.includes(keyword) ||
+          employeeEmail.includes(keyword)
+        );
+      })
+      .slice(0, 25);
+  }, [activeEmployees, employeeSearchTerm]);
 
   const handleEditLeaveType = (leaveType: LeaveType) => {
     setEditingLeaveType(leaveType);
@@ -779,62 +834,6 @@ export default function Leaves() {
           </div>
         )}
 
-        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-blue-900">
-                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
-              </p>
-              <p className="text-xs text-blue-700">
-                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {!widgetControlsLocked && (
-                <button
-                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Fix Widget
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={restoreAllHiddenWidgetsStaged}
-                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
-                >
-                  Stage Restore All
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={rollbackPendingWidgetChanges}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Rollback
-                </button>
-              )}
-              <button
-                onClick={restoreHiddenWidgetsAfterFix}
-                disabled={!hiddenWidgetCount}
-                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Restore Widgets
-              </button>
-              {widgetControlsLocked && (
-                <button
-                  onClick={openUnlockWidgetsAfterFix}
-                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
-                >
-                  Unlock Widgets
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
         {/* Leave Requests List */}
         {isWidgetVisible('hrm-leaves-list-card') && (
         <div className="bg-white/70 backdrop-blur-sm shadow-xl rounded-2xl border border-white/20 overflow-hidden relative">
@@ -1102,19 +1101,55 @@ export default function Leaves() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Employee</label>
-                  <select
-                    value={employeeId}
-                    onChange={(e) => setEmployeeId(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
-                    required
-                  >
-                    <option value="">Select Employee</option>
-                    {employees.filter(employee => employee.status === 'active').map((employee) => (
-                      <option key={employee.id} value={employee.id}>
-                        {employee.first_name} {employee.last_name} ({employee.employee_code})
-                      </option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={employeeSearchTerm}
+                      onChange={(e) => {
+                        setEmployeeSearchTerm(e.target.value);
+                        setEmployeeId('');
+                        setIsEmployeeSearchOpen(true);
+                      }}
+                      onFocus={() => setIsEmployeeSearchOpen(true)}
+                      onBlur={() => {
+                        employeeSearchCloseTimerRef.current = window.setTimeout(() => {
+                          setIsEmployeeSearchOpen(false);
+                        }, 120);
+                      }}
+                      placeholder="Type name, code, or email"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-black"
+                      required
+                    />
+                    {isEmployeeSearchOpen && (
+                      <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg">
+                        {filteredActiveEmployees.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-gray-500">No matching employee found.</div>
+                        ) : (
+                          filteredActiveEmployees.map((employee) => (
+                            <button
+                              key={employee.id}
+                              type="button"
+                              onMouseDown={() => {
+                                setEmployeeId(String(employee.id));
+                                setEmployeeSearchTerm(
+                                  `${employee.first_name} ${employee.last_name} (${employee.employee_code})`
+                                );
+                                setIsEmployeeSearchOpen(false);
+                              }}
+                              className="w-full px-3 py-2 text-left hover:bg-blue-50 focus:bg-blue-50"
+                            >
+                              <div className="text-sm font-medium text-gray-900">
+                                {employee.first_name} {employee.last_name}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                {employee.employee_code} {employee.email ? `• ${employee.email}` : ''}
+                              </div>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Leave Type</label>
