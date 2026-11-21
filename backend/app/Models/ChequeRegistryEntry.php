@@ -9,6 +9,7 @@ class ChequeRegistryEntry extends Model
 {
     protected $fillable = [
         'company_id',
+        'company_bank_account_id',
         'company_cheque_account_id',
         'distribution_payment_id',
         'direction',
@@ -40,6 +41,11 @@ class ChequeRegistryEntry extends Model
     public function chequeAccount(): BelongsTo
     {
         return $this->belongsTo(CompanyChequeAccount::class, 'company_cheque_account_id');
+    }
+
+    public function bankAccount(): BelongsTo
+    {
+        return $this->belongsTo(CompanyBankAccount::class, 'company_bank_account_id');
     }
 
     public function distributionPayment(): BelongsTo

@@ -320,7 +320,7 @@ export default function ProductionPage() {
       </div>
 
       {isWidgetVisible('production-nav-bar') && <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard" className="flex items-center space-x-2 text-gray-700 hover:text-emerald-600 transition-colors duration-300">
@@ -353,7 +353,7 @@ export default function ProductionPage() {
         {!widgetControlsLocked && <div className="px-4 pb-3 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
       </nav>}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {isWidgetVisible('production-hero-card') && <div className="text-center mb-12">
           <div className="inline-block p-1 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full mb-6">
             <div className="bg-white rounded-full p-4">

@@ -111,6 +111,8 @@ export default function ProductionPlanningReportsPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | NormalizedPlanStatus>('all');
+  const [scheduleCurrentPage, setScheduleCurrentPage] = useState(1);
+  const [scheduleRowsPerPage, setScheduleRowsPerPage] = useState(10);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -222,8 +224,16 @@ export default function ProductionPlanningReportsPage() {
   const planActualByPlanId = useMemo(() => {
     const map = new Map<number, number>();
     const allBatches = [...activeBatches, ...historyBatches];
+    const seenBatchIds = new Set<number>();
 
     allBatches.forEach((batch) => {
+      const batchId = Number(batch.id || 0);
+      if (batchId && seenBatchIds.has(batchId)) return;
+      if (batchId) seenBatchIds.add(batchId);
+
+      const batchStatus = String(batch.status || '').toLowerCase();
+      if (batchStatus === 'cancelled') return;
+
       const planId = Number(batch.production_plan_id || batch.plan?.id || 0);
       if (!planId) return;
       const prev = Number(map.get(planId) || 0);
@@ -271,6 +281,21 @@ export default function ProductionPlanningReportsPage() {
         return Number(a.id) - Number(b.id);
       });
   }, [normalizedPlans, statusFilter, fromDate, toDate]);
+
+  const scheduleTotalPages = Math.max(1, Math.ceil(filteredPlans.length / scheduleRowsPerPage));
+  const schedulePageStart = (scheduleCurrentPage - 1) * scheduleRowsPerPage;
+  const schedulePageEnd = schedulePageStart + scheduleRowsPerPage;
+  const pagedSchedulePlans = filteredPlans.slice(schedulePageStart, schedulePageEnd);
+
+  useEffect(() => {
+    setScheduleCurrentPage(1);
+  }, [fromDate, toDate, statusFilter, scheduleRowsPerPage]);
+
+  useEffect(() => {
+    if (scheduleCurrentPage > scheduleTotalPages) {
+      setScheduleCurrentPage(scheduleTotalPages);
+    }
+  }, [scheduleCurrentPage, scheduleTotalPages]);
 
   const totalPlanned = useMemo(
     () => filteredPlans.reduce((sum, plan) => sum + Number(plan.target_quantity || 0), 0),
@@ -377,7 +402,7 @@ export default function ProductionPlanningReportsPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-3">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
             <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-emerald-600 transition-colors">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -397,7 +422,7 @@ export default function ProductionPlanningReportsPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         <div className="text-center">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900">Production Planning Reports</h1>
           <p className="mt-2 text-gray-600">Management-level planning, execution, pending and overdue production visibility.</p>
@@ -509,7 +534,7 @@ export default function ProductionPlanningReportsPage() {
                 {filteredPlans.length === 0 ? (
                   <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">No production schedule rows found.</td></tr>
                 ) : (
-                  filteredPlans.map((plan) => (
+                  pagedSchedulePlans.map((plan) => (
                     <tr key={plan.id} className="hover:bg-emerald-50/35">
                       <td className="px-4 py-2.5 text-sm text-gray-700">{String(plan.plan_date).slice(0, 10)}</td>
                       <td className="px-4 py-2.5 text-sm text-indigo-700 font-medium">{plan.order_number || '-'}</td>
@@ -527,6 +552,46 @@ export default function ProductionPlanningReportsPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-gray-600">
+              Showing {filteredPlans.length === 0 ? 0 : schedulePageStart + 1} to {Math.min(schedulePageEnd, filteredPlans.length)} of {filteredPlans.length} records
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-sm text-gray-600">Rows:</label>
+              <select
+                value={scheduleRowsPerPage}
+                onChange={(e) => setScheduleRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setScheduleCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={scheduleCurrentPage === 1}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-gray-700">
+                Page {scheduleCurrentPage} of {scheduleTotalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setScheduleCurrentPage((prev) => Math.min(scheduleTotalPages, prev + 1))}
+                disabled={scheduleCurrentPage === scheduleTotalPages}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
 

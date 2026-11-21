@@ -135,6 +135,9 @@ export default function DistributionReturnsReportPage() {
   const [billingLinkFilter, setBillingLinkFilter] = useState<BillingLinkFilter>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(25);
+  const [showFilters, setShowFilters] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [allocatedRoutes, setAllocatedRoutes] = useState<RouteInfo[]>([]);
@@ -543,6 +546,46 @@ export default function DistributionReturnsReportPage() {
 
   const parseAmount = (value?: number) => Number(value || 0);
 
+  const resetAllFilters = () => {
+    setSearch('');
+    setStatusFilter('all');
+    setSettlementFilter('all');
+    setCustomerFilter('all');
+    setRouteFilter('all');
+    setBillingLinkFilter('all');
+    setFromDate('');
+    setToDate('');
+  };
+
+  const applyQuickDateRange = (days: number) => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - Math.max(0, days - 1));
+
+    const toDateInput = (date: Date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    setFromDate(toDateInput(start));
+    setToDate(toDateInput(end));
+  };
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (search.trim()) count += 1;
+    if (statusFilter !== 'all') count += 1;
+    if (settlementFilter !== 'all') count += 1;
+    if (customerFilter !== 'all') count += 1;
+    if (routeFilter !== 'all') count += 1;
+    if (billingLinkFilter !== 'all') count += 1;
+    if (fromDate) count += 1;
+    if (toDate) count += 1;
+    return count;
+  }, [search, statusFilter, settlementFilter, customerFilter, routeFilter, billingLinkFilter, fromDate, toDate]);
+
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
 
@@ -586,6 +629,25 @@ export default function DistributionReturnsReportPage() {
       return text.includes(term);
     });
   }, [rows, search, statusFilter, settlementFilter, customerFilter, routeFilter, billingLinkFilter, fromDate, toDate]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const startIndex = (safeCurrentPage - 1) * rowsPerPage;
+  const endIndex = Math.min(startIndex + rowsPerPage, filteredRows.length);
+
+  const pagedRows = useMemo(() => {
+    return filteredRows.slice(startIndex, endIndex);
+  }, [filteredRows, startIndex, endIndex]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, settlementFilter, customerFilter, routeFilter, billingLinkFilter, fromDate, toDate, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const summary = useMemo(() => {
     const totalReturns = filteredRows.length;
@@ -796,7 +858,7 @@ export default function DistributionReturnsReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-600 transition-colors duration-300">
@@ -814,7 +876,7 @@ export default function DistributionReturnsReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Returns <span className="bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">Report</span>
@@ -829,6 +891,37 @@ export default function DistributionReturnsReportPage() {
         )}
 
         <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
+          <div className="mb-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-gray-800">Filters</h2>
+              <span className="inline-flex items-center rounded-full border border-teal-200 bg-teal-50 px-2 py-0.5 text-xs font-semibold text-teal-700">
+                Active: {activeFilterCount}
+              </span>
+              {loading && (
+                <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-semibold text-amber-700">
+                  Refreshing...
+                </span>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowFilters((prev) => !prev)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-gray-300 bg-white text-gray-700 hover:bg-gray-100"
+              >
+                {showFilters ? 'Hide Filters' : 'Show Filters'}
+              </button>
+              <button
+                type="button"
+                onClick={resetAllFilters}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100"
+              >
+                Clear All Filters
+              </button>
+            </div>
+          </div>
+
+          {showFilters && (
           <div className="grid grid-cols-1 md:grid-cols-8 gap-3">
             <div className="md:col-span-2">
               <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
@@ -922,6 +1015,32 @@ export default function DistributionReturnsReportPage() {
                 className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
               />
             </div>
+            <div className="md:col-span-2">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Quick Date Range</label>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => applyQuickDateRange(7)}
+                  className="px-2.5 py-1.5 rounded-md text-xs font-semibold border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100"
+                >
+                  Last 7 Days
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyQuickDateRange(30)}
+                  className="px-2.5 py-1.5 rounded-md text-xs font-semibold border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100"
+                >
+                  Last 30 Days
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyQuickDateRange(90)}
+                  className="px-2.5 py-1.5 rounded-md text-xs font-semibold border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100"
+                >
+                  Last 90 Days
+                </button>
+              </div>
+            </div>
             <div className="md:col-span-6 flex justify-end">
               <button
                 type="button"
@@ -933,6 +1052,7 @@ export default function DistributionReturnsReportPage() {
               </button>
             </div>
           </div>
+          )}
 
           <div className="mt-4 flex flex-wrap gap-2">
             <button onClick={() => void openCreateModal()} className="px-4 py-2 rounded-md text-sm font-medium border border-emerald-200 bg-emerald-600 text-white hover:bg-emerald-700">
@@ -964,16 +1084,47 @@ export default function DistributionReturnsReportPage() {
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-green-50 to-teal-50 flex flex-wrap gap-3 text-sm text-black">
-            <span>Total Returns: <strong>{summary.totalReturns}</strong></span>
-            <span>Total Qty: <strong>{summary.totalQuantity.toFixed(2)}</strong></span>
-            <span>Return Amount: <strong>{formatMoney(summary.totalAmount)}</strong></span>
-            <span>Settlement Amount: <strong>{formatMoney(summary.settlementAmount)}</strong></span>
-            <span>Bill Deduction: <strong>{formatMoney(summary.settlementTotals.bill_deduction)}</strong></span>
-            <span>Cash Refund: <strong>{formatMoney(summary.settlementTotals.cash_refund)}</strong></span>
-            <span>Item Exchange: <strong>{formatMoney(summary.settlementTotals.item_exchange)}</strong></span>
-            <span>With Billing: <strong>{summary.billingCounts.withBilling}</strong></span>
-            <span>Without Billing: <strong>{summary.billingCounts.withoutBilling}</strong></span>
+          <div className="px-4 py-4 border-b border-gray-100 bg-gradient-to-r from-green-50 to-teal-50 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Total Returns</p>
+              <p className="text-lg font-bold text-gray-900">{summary.totalReturns}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Total Qty</p>
+              <p className="text-lg font-bold text-gray-900">{summary.totalQuantity.toFixed(2)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Return Amount</p>
+              <p className="text-lg font-bold text-gray-900">{formatMoney(summary.totalAmount)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Settlement Amount</p>
+              <p className="text-lg font-bold text-gray-900">{formatMoney(summary.settlementAmount)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">With / Without Billing</p>
+              <p className="text-sm font-bold text-gray-900">{summary.billingCounts.withBilling} / {summary.billingCounts.withoutBilling}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Bill Deduction</p>
+              <p className="text-lg font-bold text-emerald-700">{formatMoney(summary.settlementTotals.bill_deduction)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Cash Refund</p>
+              <p className="text-lg font-bold text-blue-700">{formatMoney(summary.settlementTotals.cash_refund)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Item Exchange</p>
+              <p className="text-lg font-bold text-purple-700">{formatMoney(summary.settlementTotals.item_exchange)}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Pending</p>
+              <p className="text-lg font-bold text-amber-700">{summary.statusCounts.pending}</p>
+            </div>
+            <div className="rounded-lg border border-green-200 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-gray-500">Approved / Rejected</p>
+              <p className="text-sm font-bold text-gray-900">{summary.statusCounts.approved} / {summary.statusCounts.rejected}</p>
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -1000,8 +1151,8 @@ export default function DistributionReturnsReportPage() {
                     <td colSpan={12} className="px-4 py-10 text-center text-sm text-gray-500">No returns records found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
-                    <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                  pagedRows.map((row, idx) => (
+                    <tr key={`${row.id}-${row.return_number || 'no-return'}-${row.return_date || 'no-date'}-${idx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.return_number || '-'}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">
                         {row.distribution_invoice_id || row.invoice?.id || row.invoice?.invoice_number ? (
@@ -1041,6 +1192,47 @@ export default function DistributionReturnsReportPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="px-4 py-3 border-t border-gray-100 bg-gray-50/70 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-gray-700">
+              <span>Rows per page:</span>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 text-sm text-black px-2 py-1"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+              <span className="text-gray-600">
+                {filteredRows.length === 0 ? '0-0' : `${startIndex + 1}-${endIndex}`} of {filteredRows.length}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={safeCurrentPage <= 1}
+                className="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-gray-700 min-w-[120px] text-center">
+                Page {safeCurrentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={safeCurrentPage >= totalPages}
+                className="px-3 py-1.5 rounded-md text-sm font-medium border border-gray-300 bg-white text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
 

@@ -7,6 +7,12 @@ return new class extends Migration
 {
     public function up(): void
     {
+        DB::statement("UPDATE distribution_payments SET status = CASE
+            WHEN status IN ('closed', 'cancelled', 'reversed') THEN 'returned'
+            WHEN status IN ('cleared', 'bounced', 'pending', 'received', 'returned') THEN status
+            ELSE 'pending'
+        END");
+
         DB::statement("ALTER TABLE distribution_payments MODIFY status ENUM('received','cleared','bounced','pending','returned') NOT NULL DEFAULT 'received'");
     }
 

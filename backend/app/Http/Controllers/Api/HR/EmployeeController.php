@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\HR;
 
 use App\Http\Controllers\Controller;
 use App\Models\Employee;
+use App\Models\EmployeeWallet;
 use App\Models\User;
 use App\Models\Designation;
 use App\Models\Role;
@@ -14,6 +15,21 @@ use Illuminate\Support\Facades\Hash;
 
 class EmployeeController extends Controller
 {
+    private function generateEmployeeWalletNumber(Employee $employee): string
+    {
+        $baseCode = trim((string) ($employee->employee_code ?? 'EMP' . $employee->id));
+        $safeBase = strtoupper(preg_replace('/[^A-Z0-9]/i', '', $baseCode) ?: ('EMP' . $employee->id));
+        $suffix = strtoupper(substr(md5((string) (microtime(true) . '-' . $employee->id)), 0, 4));
+        $candidate = 'EW-' . $safeBase . '-' . $suffix;
+
+        while (EmployeeWallet::query()->where('wallet_number', $candidate)->exists()) {
+            $suffix = strtoupper(substr(md5((string) (microtime(true) . '-' . random_int(100, 999))), 0, 4));
+            $candidate = 'EW-' . $safeBase . '-' . $suffix;
+        }
+
+        return $candidate;
+    }
+
     private function generateTemporaryNicPassport(): string
     {
         $candidate = 'TEMP' . now()->format('YmdHis') . random_int(100, 999);
@@ -149,6 +165,28 @@ class EmployeeController extends Controller
         return (int) $designation->id;
     }
 
+    private function defaultPaymentRequestTypeForEmployeeType(string $employeeType): string
+    {
+        return in_array($employeeType, ['temporary', 'daily_wage'], true)
+            ? 'daily_wage_request'
+            : 'monthly_payroll';
+    }
+
+    private function isPaymentRequestTypeCompatible(string $employeeType, string $paymentRequestType): bool
+    {
+        $allowedByType = [
+            'full_time' => ['monthly_payroll', 'salary_advance_request'],
+            'part_time' => ['weekly_payroll', 'monthly_payroll', 'salary_advance_request'],
+            'contract' => ['monthly_payroll', 'weekly_payroll', 'salary_advance_request'],
+            'temporary' => ['daily_wage_request', 'daily_payroll', 'weekly_payroll'],
+            'daily_wage' => ['daily_wage_request', 'daily_payroll'],
+        ];
+
+        $allowed = $allowedByType[$employeeType] ?? ['monthly_payroll'];
+
+        return in_array($paymentRequestType, $allowed, true);
+    }
+
     /**
      * Display a listing of the resource.
      */
@@ -159,6 +197,7 @@ class EmployeeController extends Controller
             'designation',
             'branch',
             'user:id,employee_id,role,email,name',
+            'wallet:id,employee_id,wallet_number,wallet_name,balance,currency,status',
             'reportingPerson:id,employee_code,first_name,last_name',
         ]);
 
@@ -194,12 +233,21 @@ class EmployeeController extends Controller
         $apit = $taxApplicable
             ? $this->calculateApit((float) $validated['basic_salary'])
             : ['amount' => 0.0, 'rate' => 0.0];
+        $employeeType = $validated['employee_type'] ?? 'full_time';
+        $paymentRequestType = $validated['payment_request_type'] ?? $this->defaultPaymentRequestTypeForEmployeeType($employeeType);
+
+        if (!$this->isPaymentRequestTypeCompatible($employeeType, $paymentRequestType)) {
+            return response()->json([
+                'message' => 'Selected payment request type is not compatible with the selected employment type.',
+            ], 422);
+        }
 
         $employeeData = [
             'tenant_id' => (int) $validated['branch_id'],
             'branch_id' => $validated['branch_id'],
             'first_name' => $validated['first_name'],
             'last_name' => $validated['last_name'],
+            'employee_nic' => $validated['employee_nic'] ?? null,
             'email' => $validated['email'],
             'mobile' => $validated['phone'] ?? '',
             'nic_passport' => $this->generateTemporaryNicPassport(),
@@ -225,7 +273,8 @@ class EmployeeController extends Controller
             'tax_relief_eligible' => isset($validated['tax_relief_eligible']) ? (bool) $validated['tax_relief_eligible'] : false,
             'apit_tax_amount' => $apit['amount'],
             'apit_tax_rate' => $apit['rate'],
-            'employee_type' => 'full_time', // Default type
+            'employee_type' => $employeeType,
+            'payment_request_type' => $paymentRequestType,
             'status' => $validated['status'] ?? 'active',
         ];
 
@@ -256,6 +305,7 @@ class EmployeeController extends Controller
             'designation',
             'branch',
             'user:id,employee_id,role,email,name',
+            'wallet:id,employee_id,wallet_number,wallet_name,balance,currency,status',
             'reportingPerson:id,employee_code,first_name,last_name',
         ]), 201);
     }
@@ -270,6 +320,7 @@ class EmployeeController extends Controller
             'designation',
             'branch',
             'user:id,employee_id,role,email,name',
+            'wallet:id,employee_id,wallet_number,wallet_name,balance,currency,status',
             'reportingPerson:id,employee_code,first_name,last_name',
         ]));
     }
@@ -282,11 +333,14 @@ class EmployeeController extends Controller
         $validated = $request->validate([
             'first_name' => 'sometimes|required|string|max:255',
             'last_name' => 'sometimes|required|string|max:255',
+            'employee_nic' => 'nullable|string|max:50|unique:employees,employee_nic,' . $employee->id,
             'email' => 'sometimes|required|email|unique:employees,email,' . $employee->id,
             'phone' => 'nullable|string|max:20',
             'address' => 'nullable|string',
             'date_of_birth' => 'nullable|date|before:today',
             'hire_date' => 'sometimes|required|date',
+            'employee_type' => 'nullable|in:full_time,part_time,contract,temporary,daily_wage',
+            'payment_request_type' => 'nullable|in:monthly_payroll,weekly_payroll,daily_payroll,daily_wage_request,salary_advance_request',
             'basic_salary' => 'sometimes|required|numeric|min:0',
             'commission' => 'nullable|numeric|min:0|max:100',
             'commission_base' => 'nullable|in:company_profit,own_business',
@@ -330,11 +384,23 @@ class EmployeeController extends Controller
         $apit = $resolvedTaxApplicable
             ? $this->calculateApit($resolvedSalary)
             : ['amount' => 0.0, 'rate' => 0.0];
+        $resolvedEmployeeType = $validated['employee_type'] ?? ($employee->employee_type ?? 'full_time');
+        $resolvedPaymentRequestType = $validated['payment_request_type']
+            ?? ($employee->payment_request_type ?: $this->defaultPaymentRequestTypeForEmployeeType($resolvedEmployeeType));
+
+        if (!$this->isPaymentRequestTypeCompatible($resolvedEmployeeType, $resolvedPaymentRequestType)) {
+            return response()->json([
+                'message' => 'Selected payment request type is not compatible with the selected employment type.',
+            ], 422);
+        }
 
         // Map frontend fields to backend fields
         $updateData = [
             'first_name' => $validated['first_name'] ?? $employee->first_name,
             'last_name' => $validated['last_name'] ?? $employee->last_name,
+            'employee_nic' => array_key_exists('employee_nic', $validated)
+                ? ($validated['employee_nic'] ?: null)
+                : $employee->employee_nic,
             'email' => $validated['email'] ?? $employee->email,
             'mobile' => $validated['phone'] ?? $employee->mobile,
             'address' => $validated['address'] ?? $employee->address,
@@ -346,6 +412,8 @@ class EmployeeController extends Controller
                 : $employee->reporting_person_id,
             'branch_id' => $validated['branch_id'] ?? $employee->branch_id,
             'join_date' => $validated['hire_date'] ?? $employee->join_date,
+            'employee_type' => $resolvedEmployeeType,
+            'payment_request_type' => $resolvedPaymentRequestType,
             'basic_salary' => $validated['basic_salary'] ?? $employee->basic_salary,
             'commission' => $validated['commission'] ?? $employee->commission,
             'commission_base' => $validated['commission_base'] ?? $employee->commission_base,
@@ -384,6 +452,7 @@ class EmployeeController extends Controller
             'designation',
             'branch',
             'user:id,employee_id,role,email,name',
+            'wallet:id,employee_id,wallet_number,wallet_name,balance,currency,status',
             'reportingPerson:id,employee_code,first_name,last_name',
         ]));
     }
@@ -436,5 +505,45 @@ class EmployeeController extends Controller
         return response()->json([
             'message' => 'Employee password reset successfully.',
         ]);
+    }
+
+    public function createWallet(Request $request, Employee $employee): JsonResponse
+    {
+        if ($employee->status !== 'active') {
+            return response()->json([
+                'message' => 'Wallet can only be created for active employees.',
+            ], 422);
+        }
+
+        if (EmployeeWallet::query()->where('employee_id', $employee->id)->exists()) {
+            return response()->json([
+                'message' => 'Wallet already exists for this employee.',
+                'data' => EmployeeWallet::query()
+                    ->where('employee_id', $employee->id)
+                    ->first(['id', 'employee_id', 'wallet_number', 'wallet_name', 'balance', 'currency', 'status']),
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'wallet_name' => 'nullable|string|max:120',
+            'opening_balance' => 'nullable|numeric|min:0',
+            'currency' => 'nullable|string|max:10',
+        ]);
+
+        $walletName = trim((string) ($validated['wallet_name'] ?? ''));
+        $wallet = EmployeeWallet::create([
+            'employee_id' => $employee->id,
+            'wallet_number' => $this->generateEmployeeWalletNumber($employee),
+            'wallet_name' => $walletName !== '' ? $walletName : ($employee->first_name . ' ' . $employee->last_name . ' Wallet'),
+            'balance' => (float) ($validated['opening_balance'] ?? 0),
+            'currency' => strtoupper(trim((string) ($validated['currency'] ?? 'LKR'))) ?: 'LKR',
+            'status' => 'active',
+            'created_by' => $request->user()?->id,
+        ]);
+
+        return response()->json([
+            'message' => 'Employee wallet created successfully.',
+            'data' => $wallet->only(['id', 'employee_id', 'wallet_number', 'wallet_name', 'balance', 'currency', 'status']),
+        ], 201);
     }
 }

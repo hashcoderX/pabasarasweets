@@ -601,7 +601,7 @@ export default function ProductionPlanningPage() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.14),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.12),_transparent_28%),linear-gradient(180deg,_#f5fffb_0%,_#ecfeff_46%,_#f0fdf4_100%)]">
       {isWidgetVisible('production-planning-nav-bar') && <nav className="relative z-10 border-b border-emerald-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-4">
           <div className="overflow-hidden rounded-3xl border border-emerald-100 bg-white shadow-[0_18px_65px_-35px_rgba(5,150,105,0.45)]">
             <div className="border-b border-emerald-100 bg-gradient-to-r from-slate-900 via-teal-900 to-cyan-900 px-6 py-5">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -633,7 +633,7 @@ export default function ProductionPlanningPage() {
         {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-planning-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
       </nav>}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         {isWidgetVisible('production-planning-flow-card') && <section className="rounded-2xl border border-teal-200 bg-teal-50/75 px-4 py-3 text-sm text-teal-900 shadow-sm">
           <p className="font-semibold">Recommended flow</p>
           <p className="mt-1">1) Filter and review existing plans, 2) Create a new production plan, 3) Verify today&apos;s queue, 4) Create production order when ready.</p>

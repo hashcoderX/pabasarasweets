@@ -722,7 +722,7 @@ export default function DistributionCustomersPage() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.10),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]">
       <nav className="border-b border-white/60 bg-white/85 shadow-sm backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 h-auto">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <div className="flex items-center gap-3">
@@ -754,7 +754,7 @@ export default function DistributionCustomersPage() {
         </div>
       </nav>
 
-      <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <div className="w-full py-8 px-3 sm:px-4 lg:px-6">
 
         {isWidgetVisible('distribution-customers-hero-card') && <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>

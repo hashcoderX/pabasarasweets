@@ -79,11 +79,16 @@ function OutletCashDrawerContent() {
 
   const router = useRouter();
   const params = useSearchParams();
+  const isEmbedded = params.get('embedded') === '1';
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
-    return `${path}${outletCode ? `?outlet_code=${encodeURIComponent(outletCode)}` : ''}`;
+    const query = new URLSearchParams();
+    if (outletCode) query.set('outlet_code', outletCode);
+    if (isEmbedded) query.set('embedded', '1');
+    const queryString = query.toString();
+    return `${path}${queryString ? `?${queryString}` : ''}`;
   };
 
   const redirectToLoginWithNext = () => {
@@ -458,20 +463,20 @@ function OutletCashDrawerContent() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.18),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.14),_transparent_28%),linear-gradient(180deg,_#f0fdf9_0%,_#ecfeff_45%,_#f0fdfa_100%)]">
+      <div className={`flex ${isEmbedded ? 'py-10' : 'min-h-screen'} items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.18),_transparent_25%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.14),_transparent_28%),linear-gradient(180deg,_#f0fdf9_0%,_#ecfeff_45%,_#f0fdfa_100%)]`}>
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.18),_transparent_24%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.14),_transparent_28%),linear-gradient(180deg,_#f0fdf9_0%,_#ecfeff_45%,_#f0fdfa_100%)]">
+    <div className={`relative ${isEmbedded ? '' : 'min-h-screen'} overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.18),_transparent_24%),radial-gradient(circle_at_top_right,_rgba(6,182,212,0.14),_transparent_28%),linear-gradient(180deg,_#f0fdf9_0%,_#ecfeff_45%,_#f0fdfa_100%)]`}>
       <div className="absolute inset-0 opacity-30 pointer-events-none">
         <div className="absolute top-20 left-20 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute top-40 right-20 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
       </div>
 
-      <main className="relative z-10 mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full space-y-6 py-8">
         <section className="overflow-hidden rounded-[30px] border border-white/70 bg-white/80 shadow-[0_26px_90px_-45px_rgba(13,148,136,0.48)] backdrop-blur-xl">
           <div className="grid gap-7 px-5 py-6 sm:px-6 lg:grid-cols-[1.35fr_1fr] lg:px-8">
             <div className="space-y-4">

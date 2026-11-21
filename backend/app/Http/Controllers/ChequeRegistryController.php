@@ -22,6 +22,7 @@ class ChequeRegistryController extends Controller
     {
         $query = ChequeRegistryEntry::with([
             'company:id,name',
+            'bankAccount:id,company_id,bank_name,account_no,current_balance',
             'chequeAccount:id,company_id,bank_name,account_no,current_balance',
             'distributionPayment:id,payment_number,payment_date,amount,payment_method,reference_no,status,received_by,customer_id',
             'distributionPayment.customer:id,shop_name,customer_code',
@@ -110,6 +111,7 @@ class ChequeRegistryController extends Controller
 
         $entry = ChequeRegistryEntry::create([
             'company_id' => $payload['company_id'],
+            'company_bank_account_id' => null,
             'direction' => 'received',
             'lifecycle_status' => 'registered',
             'source_module' => $payload['source_module'] ?? 'manual',
@@ -127,7 +129,7 @@ class ChequeRegistryController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $entry->load(['company:id,name']),
+            'data' => $entry->load(['company:id,name', 'bankAccount:id,company_id,bank_name,account_no,current_balance']),
             'message' => 'Cheque registered successfully',
         ], 201);
     }
@@ -173,7 +175,7 @@ class ChequeRegistryController extends Controller
 
         $payload = $validator->validated();
 
-        $updated = DB::transaction(function () use ($entry, $payload, $request) {
+        $updated = DB::transaction(function () use ($entry, $payload) {
             $bankAccount = CompanyBankAccount::findOrFail($payload['company_bank_account_id']);
 
             if ($entry->company_id && (int) $entry->company_id !== (int) $bankAccount->company_id) {
@@ -183,18 +185,12 @@ class ChequeRegistryController extends Controller
                 ], 422));
             }
 
-            CompanyBankAccount::whereKey($bankAccount->id)
-                ->update(['current_balance' => DB::raw('current_balance + ' . (float) $entry->amount)]);
-
-            $company = Company::findOrFail($bankAccount->company_id);
-            $companyBankBalance = (float) $company->bankAccounts()->sum('current_balance');
-            $company->update(['current_bank_balance' => round($companyBankBalance, 2)]);
-
             $entry->update([
                 'company_id' => $bankAccount->company_id,
+                'company_bank_account_id' => $bankAccount->id,
                 'company_cheque_account_id' => null,
-                'bank_name' => $entry->bank_name ?: $bankAccount->bank_name,
-                'account_no' => $entry->account_no ?: $bankAccount->account_no,
+                'bank_name' => $bankAccount->bank_name,
+                'account_no' => $bankAccount->account_no,
                 'deposit_date' => $payload['deposit_date'],
                 'lifecycle_status' => 'deposited',
                 'notes' => $payload['notes'] ?? $entry->notes,
@@ -203,20 +199,12 @@ class ChequeRegistryController extends Controller
             if (!empty($entry->distribution_payment_id)) {
                 $payment = DistributionPayment::find($entry->distribution_payment_id);
                 if ($payment && $payment->payment_method === 'check') {
-                    $payment->update(['status' => 'cleared']);
+                    // Keep distribution payment status unchanged at deposit stage.
+                    // Final financial completion is tracked on end clearance.
                 }
             }
 
-            MainCashTransaction::create([
-                'date' => $payload['deposit_date'],
-                'type' => 'in',
-                'amount' => $entry->amount,
-                'reference' => 'CHQ-DEP-' . $entry->id,
-                'note' => 'Cheque deposit | Cheque: ' . $entry->cheque_no . ' | Bank: ' . ($bankAccount->bank_name ?? '-') . ' | Source: ' . ($entry->source_module ?? 'manual'),
-                'created_by' => $request->user()?->id,
-            ]);
-
-            return $entry->fresh()->load(['company:id,name', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
+            return $entry->fresh()->load(['company:id,name', 'bankAccount:id,company_id,bank_name,account_no,current_balance', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
         });
 
         return response()->json([
@@ -267,13 +255,19 @@ class ChequeRegistryController extends Controller
 
         $updated = DB::transaction(function () use ($entry, $payload, $request) {
             $amount = (float) $entry->amount;
-            $wasDeposited = in_array($entry->lifecycle_status, ['deposited', 'cleared'], true);
+            $wasDeposited = $entry->lifecycle_status === 'cleared';
 
             // If already deposited, reverse the credited bank balance before marking return.
             if ($wasDeposited && $amount > 0) {
                 $bankAccount = null;
 
-                if (!empty($entry->company_id) && !empty($entry->account_no)) {
+                if (!empty($entry->company_bank_account_id)) {
+                    $bankAccount = CompanyBankAccount::query()
+                        ->whereKey((int) $entry->company_bank_account_id)
+                        ->first();
+                }
+
+                if (!$bankAccount && !empty($entry->company_id) && !empty($entry->account_no)) {
                     $bankAccount = CompanyBankAccount::query()
                         ->where('company_id', $entry->company_id)
                         ->where('account_no', $entry->account_no)
@@ -349,7 +343,7 @@ class ChequeRegistryController extends Controller
                 'created_by' => $request->user()?->id,
             ]);
 
-            return $entry->fresh()->load(['company:id,name', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
+            return $entry->fresh()->load(['company:id,name', 'bankAccount:id,company_id,bank_name,account_no,current_balance', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
         });
 
         return response()->json([
@@ -411,7 +405,13 @@ class ChequeRegistryController extends Controller
 
             $bankAccount = null;
 
-            if (!empty($entry->account_no)) {
+            if (!empty($entry->company_bank_account_id)) {
+                $bankAccount = CompanyBankAccount::query()
+                    ->whereKey((int) $entry->company_bank_account_id)
+                    ->first();
+            }
+
+            if (!$bankAccount && !empty($entry->account_no)) {
                 $bankAccount = CompanyBankAccount::query()
                     ->where('company_id', $companyId)
                     ->where('account_no', $entry->account_no)
@@ -440,8 +440,8 @@ class ChequeRegistryController extends Controller
                 ], 422));
             }
 
-            // Credit bank only when amount is not already sitting in bank balance from a prior deposit.
-            if (!in_array($entry->lifecycle_status, ['deposited', 'cleared'], true) && $amount > 0) {
+            // Credit bank on end clearance (final settlement point).
+            if ($entry->lifecycle_status !== 'cleared' && $amount > 0) {
                 CompanyBankAccount::whereKey($bankAccount->id)
                     ->update(['current_balance' => DB::raw('current_balance + ' . $amount)]);
             }
@@ -498,9 +498,10 @@ class ChequeRegistryController extends Controller
 
             $entry->update([
                 'company_id' => $bankAccount->company_id,
+                'company_bank_account_id' => $bankAccount->id,
                 'company_cheque_account_id' => null,
-                'bank_name' => $entry->bank_name ?: $bankAccount->bank_name,
-                'account_no' => $entry->account_no ?: $bankAccount->account_no,
+                'bank_name' => $bankAccount->bank_name,
+                'account_no' => $bankAccount->account_no,
                 'deposit_date' => $entry->deposit_date ?: now()->toDateString(),
                 'lifecycle_status' => 'cleared',
                 'notes' => $composed !== '' ? $composed : null,
@@ -515,7 +516,7 @@ class ChequeRegistryController extends Controller
                 'created_by' => $request->user()?->id,
             ]);
 
-            return $entry->fresh()->load(['company:id,name', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
+            return $entry->fresh()->load(['company:id,name', 'bankAccount:id,company_id,bank_name,account_no,current_balance', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']);
         });
 
         return response()->json([
@@ -529,7 +530,8 @@ class ChequeRegistryController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'company_id' => 'required|exists:companies,id',
-            'company_cheque_account_id' => 'required|exists:company_cheque_accounts,id',
+            'company_cheque_account_id' => 'nullable|required_without:company_bank_account_id|exists:company_cheque_accounts,id',
+            'company_bank_account_id' => 'nullable|required_without:company_cheque_account_id|exists:company_bank_accounts,id',
             'supplier_name' => 'required|string|max:255',
             'cheque_no' => 'required|string|max:100',
             'cheque_date' => 'required|date',
@@ -551,43 +553,81 @@ class ChequeRegistryController extends Controller
         $payload = $validator->validated();
 
         $entry = DB::transaction(function () use ($payload, $request) {
-            $chequeAccount = CompanyChequeAccount::findOrFail($payload['company_cheque_account_id']);
-
-            if ((int) $chequeAccount->company_id !== (int) $payload['company_id']) {
-                throw new HttpResponseException(response()->json([
-                    'success' => false,
-                    'message' => 'Cheque account does not belong to selected company.',
-                ], 422));
-            }
-
-            $available = (float) $chequeAccount->current_balance;
             $amount = (float) $payload['amount'];
-
-            if ($available < $amount) {
-                throw new HttpResponseException(response()->json([
-                    'success' => false,
-                    'message' => 'Insufficient cheque account balance.',
-                ], 422));
-            }
-
-            CompanyChequeAccount::whereKey($chequeAccount->id)
-                ->update(['current_balance' => DB::raw('current_balance - ' . $amount)]);
-
             $company = Company::findOrFail($payload['company_id']);
-            $companyChequeBalance = (float) $company->chequeAccounts()->sum('current_balance');
-            $company->update(['current_cheque_balance' => round($companyChequeBalance, 2)]);
+            $companyBankAccountId = null;
+            $companyChequeAccountId = null;
+            $bankName = $payload['bank_name'] ?? null;
+            $accountNo = $payload['account_no'] ?? null;
+
+            if (!empty($payload['company_bank_account_id'])) {
+                $bankAccount = CompanyBankAccount::findOrFail($payload['company_bank_account_id']);
+
+                if ((int) $bankAccount->company_id !== (int) $payload['company_id']) {
+                    throw new HttpResponseException(response()->json([
+                        'success' => false,
+                        'message' => 'Bank account does not belong to selected company.',
+                    ], 422));
+                }
+
+                $available = (float) $bankAccount->current_balance;
+                if ($available < $amount) {
+                    throw new HttpResponseException(response()->json([
+                        'success' => false,
+                        'message' => 'Insufficient company bank account balance.',
+                    ], 422));
+                }
+
+                CompanyBankAccount::whereKey($bankAccount->id)
+                    ->update(['current_balance' => DB::raw('current_balance - ' . $amount)]);
+
+                $companyBankBalance = (float) $company->bankAccounts()->sum('current_balance');
+                $company->update(['current_bank_balance' => round($companyBankBalance, 2)]);
+
+                $companyBankAccountId = (int) $bankAccount->id;
+                $bankName = $bankName ?? $bankAccount->bank_name;
+                $accountNo = $accountNo ?? $bankAccount->account_no;
+            } else {
+                $chequeAccount = CompanyChequeAccount::findOrFail($payload['company_cheque_account_id']);
+
+                if ((int) $chequeAccount->company_id !== (int) $payload['company_id']) {
+                    throw new HttpResponseException(response()->json([
+                        'success' => false,
+                        'message' => 'Cheque account does not belong to selected company.',
+                    ], 422));
+                }
+
+                $available = (float) $chequeAccount->current_balance;
+                if ($available < $amount) {
+                    throw new HttpResponseException(response()->json([
+                        'success' => false,
+                        'message' => 'Insufficient cheque account balance.',
+                    ], 422));
+                }
+
+                CompanyChequeAccount::whereKey($chequeAccount->id)
+                    ->update(['current_balance' => DB::raw('current_balance - ' . $amount)]);
+
+                $companyChequeBalance = (float) $company->chequeAccounts()->sum('current_balance');
+                $company->update(['current_cheque_balance' => round($companyChequeBalance, 2)]);
+
+                $companyChequeAccountId = (int) $chequeAccount->id;
+                $bankName = $bankName ?? $chequeAccount->bank_name;
+                $accountNo = $accountNo ?? $chequeAccount->account_no;
+            }
 
             return ChequeRegistryEntry::create([
                 'company_id' => $payload['company_id'],
-                'company_cheque_account_id' => $chequeAccount->id,
+                'company_bank_account_id' => $companyBankAccountId,
+                'company_cheque_account_id' => $companyChequeAccountId,
                 'direction' => 'issued',
                 'lifecycle_status' => 'issued',
                 'source_module' => 'supplier_payment',
                 'cheque_no' => $payload['cheque_no'],
                 'cheque_date' => $payload['cheque_date'],
                 'amount' => $payload['amount'],
-                'bank_name' => $payload['bank_name'] ?? $chequeAccount->bank_name,
-                'account_no' => $payload['account_no'] ?? $chequeAccount->account_no,
+                'bank_name' => $bankName,
+                'account_no' => $accountNo,
                 'counterparty_name' => $payload['supplier_name'],
                 'reference_no' => $payload['reference_no'] ?? null,
                 'notes' => $payload['notes'] ?? null,
@@ -597,7 +637,7 @@ class ChequeRegistryController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $entry->load(['company:id,name', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']),
+            'data' => $entry->load(['company:id,name', 'bankAccount:id,company_id,bank_name,account_no,current_balance', 'chequeAccount:id,company_id,bank_name,account_no,current_balance']),
             'message' => 'Issued cheque saved successfully',
         ], 201);
     }

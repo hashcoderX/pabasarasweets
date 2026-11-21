@@ -674,7 +674,7 @@ export default function BomPage() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_23%),radial-gradient(circle_at_top_right,_rgba(245,158,11,0.14),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff7ed_42%,_#fff3e4_100%)]">
       {isWidgetVisible('production-bom-nav-bar') && <nav className="relative z-10 border-b border-orange-100/80 bg-white/80 backdrop-blur-lg shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-4">
           <div className="overflow-hidden rounded-3xl border border-orange-100 bg-white shadow-[0_18px_65px_-35px_rgba(194,65,12,0.42)]">
             <div className="border-b border-orange-100 bg-gradient-to-r from-slate-900 via-orange-900 to-amber-800 px-6 py-5">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -706,7 +706,7 @@ export default function BomPage() {
         {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-bom-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
       </nav>}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         {isWidgetVisible('production-bom-workflow-card') && <section className="rounded-2xl border border-blue-200 bg-blue-50/80 px-4 py-3 text-sm text-blue-800 shadow-sm">
           <p className="font-semibold">Recommended workflow</p>
           <p className="mt-1 text-blue-900/90">Follow these steps in order to avoid wrong recipes, wrong stock checks, and incorrect production deductions.</p>

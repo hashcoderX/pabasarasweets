@@ -107,6 +107,8 @@ interface LoadAvailabilitySummary {
     sold_qty: number;
     sold_value: number;
     return_qty: number;
+    exchange_return_qty?: number;
+    damaged_return_qty?: number;
     return_value: number;
     net_qty: number;
     net_value: number;
@@ -121,6 +123,7 @@ interface LoadAvailabilityItem {
   product_code: string;
   name: string;
   qty: number; // current available qty in vehicle
+  loaded_qty?: number;
   out_price?: number;
   sell_price?: number;
 }
@@ -146,6 +149,7 @@ export default function DistributionPage() {
   const [assignedRouteName, setAssignedRouteName] = useState('');
   const [assignedRouteNames, setAssignedRouteNames] = useState<string[]>([]);
   const [isSuperAdminView, setIsSuperAdminView] = useState(false);
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [customerCount, setCustomerCount] = useState(0);
   const [invoiceCount, setInvoiceCount] = useState(0);
   const [returnCount, setReturnCount] = useState(0);
@@ -323,6 +327,7 @@ export default function DistributionPage() {
     { id: 'distribution-module-returns-card', name: 'Distribution Returns Module Card' },
     { id: 'distribution-module-payments-card', name: 'Distribution Payments Module Card' },
     { id: 'distribution-module-outstanding-payment-card', name: 'Distribution Outstanding Payment Module Card' },
+    { id: 'distribution-module-delivery-expenses-card', name: 'Distribution Delivery Expenses Module Card' },
     { id: 'distribution-module-live-locations-card', name: 'Distribution Live Locations Module Card' },
     { id: 'distribution-module-reports-card', name: 'Distribution Reports Module Card' },
     { id: 'distribution-load-details-card-vehicle', name: 'Load Details Vehicle Card' },
@@ -548,6 +553,7 @@ export default function DistributionPage() {
 
       if (!employeeId && !adminUser) {
         setIsSuperAdminView(false);
+        setIsSalesRefUser(false);
         setAssignedRouteId(null);
         setAssignedRouteIds([]);
         setAssignedRouteName('');
@@ -560,6 +566,7 @@ export default function DistributionPage() {
       const loads = Array.isArray(loadsRes.data) ? loadsRes.data : (loadsRes.data?.data || []);
       if (adminUser) {
         setIsSuperAdminView(true);
+        setIsSalesRefUser(false);
         const activeLoads = loads
           .filter((load: any) => ['pending', 'in_transit'].includes(String(load.status || '').toLowerCase()))
           .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
@@ -585,6 +592,7 @@ export default function DistributionPage() {
       }
 
       setIsSuperAdminView(false);
+      setIsSalesRefUser(true);
       const inTransitAssignedLoads = loads
         .filter((load: any) => Number(load.sales_ref_id) === employeeId && String(load.status) === 'in_transit')
         .sort((a: any, b: any) => new Date(b.load_date || b.created_at || 0).getTime() - new Date(a.load_date || a.created_at || 0).getTime());
@@ -842,6 +850,7 @@ export default function DistributionPage() {
         product_code: String(item.product_code || ''),
         name: String(item.name || ''),
         qty: Number(item.qty || 0),
+        loaded_qty: item.loaded_qty !== undefined && item.loaded_qty !== null ? Number(item.loaded_qty) : undefined,
         out_price: Number(item.out_price || 0),
         sell_price: Number(item.sell_price || 0),
       }));
@@ -872,9 +881,17 @@ export default function DistributionPage() {
     { name: 'Returns', icon: '↩️', path: '/dashboard/distribution/returns', stat: returnCount, desc: 'Manage customer returns', widgetKey: 'distribution-module-returns-card' },
     { name: 'Payments', icon: '💳', path: '/dashboard/distribution/payments', stat: paymentCount, desc: 'Check, cash, and bank transfers', widgetKey: 'distribution-module-payments-card' },
     { name: 'Outstanding Payment', icon: '🧮', path: '/dashboard/distribution/payments?entry=outstanding', stat: paymentCount, desc: 'Collect outstanding without creating a new invoice', widgetKey: 'distribution-module-outstanding-payment-card' },
+    { name: 'Delivery Expenses', icon: '🧾', path: '/dashboard/distribution/delivery-expenses', stat: 0, desc: 'Add delivery expenses in a dedicated section', widgetKey: 'distribution-module-delivery-expenses-card' },
     { name: 'Live Locations', icon: '📍', path: '/dashboard/distribution/live-locations', stat: 0, desc: 'Track all ref locations on map', widgetKey: 'distribution-module-live-locations-card' },
     { name: 'Reports', icon: '📊', path: '/dashboard/reports', stat: 2, desc: 'Sales and delivery balance reports', widgetKey: 'distribution-module-reports-card' },
   ];
+
+  const hasAllocatedRoute = assignedRouteIds.length > 0 || Boolean(assignedRouteId);
+  const isSalesRefWithoutAllocatedRoute = !routeResolving && isSalesRefUser && !hasAllocatedRoute;
+  const restrictedModuleNames = new Set(['Invoices', 'Returns', 'Delivery Expenses']);
+  const visibleModules = modules.filter(
+    (module) => !(isSalesRefWithoutAllocatedRoute && restrictedModuleNames.has(module.name))
+  );
 
   const getModulePath = (path: string) => {
     if (path.startsWith('#')) return path;
@@ -907,8 +924,13 @@ export default function DistributionPage() {
       const summary = summaryByCode.get(key);
       const soldQty = Number(summary?.sold_qty || 0);
       const returnQty = Number(summary?.return_qty || 0);
+      const exchangeReturnQty = Number(summary?.exchange_return_qty || 0);
+      const damagedReturnQty = Number(summary?.damaged_return_qty || 0);
       const availableQty = Math.max(0, Number(item.qty || 0));
-      const loadedQty = Math.max(0, availableQty + soldQty - returnQty);
+      const loadedQty = Math.max(
+        0,
+        Number(item.loaded_qty ?? (availableQty + soldQty - returnQty))
+      );
 
       return {
         key: `${item.id}-${item.product_code}`,
@@ -917,6 +939,8 @@ export default function DistributionPage() {
         loadedQty,
         soldQty,
         returnQty,
+        exchangeReturnQty,
+        damagedReturnQty,
         availableQty,
         returnValue: Number(summary?.return_value || 0),
       };
@@ -931,9 +955,11 @@ export default function DistributionPage() {
         key: `summary-${key}`,
         code: summaryItem.item_code || '-',
         name: summaryItem.item_name || '-',
-        loadedQty: Math.max(0, Number(summaryItem.sold_qty || 0) - Number(summaryItem.return_qty || 0)),
+        loadedQty: Math.max(0, Number(summaryItem.sold_qty || 0)),
         soldQty: Number(summaryItem.sold_qty || 0),
         returnQty: Number(summaryItem.return_qty || 0),
+        exchangeReturnQty: Number(summaryItem.exchange_return_qty || 0),
+        damagedReturnQty: Number(summaryItem.damaged_return_qty || 0),
         availableQty: 0,
         returnValue: Number(summaryItem.return_value || 0),
       });
@@ -1088,7 +1114,7 @@ export default function DistributionPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-teal-50 to-emerald-50">
       <nav className="bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               {isWidgetVisible('distribution-nav-back-button') && (
@@ -1117,7 +1143,7 @@ export default function DistributionPage() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-8">
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-8">
         {isWidgetVisible('distribution-offline-status-card') && <section className={`rounded-2xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50/90' : 'border-amber-200 bg-amber-50/90'}`}>
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
             <p className={`text-sm font-medium ${isOnline ? 'text-emerald-800' : 'text-amber-800'}`}>
@@ -1173,7 +1199,7 @@ export default function DistributionPage() {
         </div>}
 
         {isWidgetVisible('distribution-modules-grid') && <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {modules
+          {visibleModules
             .filter((module) => isWidgetVisible(module.widgetKey))
             .map((module) => (
               <div key={module.name} className="relative">
@@ -1208,6 +1234,12 @@ export default function DistributionPage() {
             </div>
           )}
         </div>}
+
+        {isSalesRefWithoutAllocatedRoute && (
+          <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            Security notice: no allocated route was found for this sales ref user. Invoices, Returns, and Delivery Expenses are hidden until a route is assigned.
+          </section>
+        )}
 
         {isWidgetVisible('distribution-load-availability-section') && <section id="load-availability" className="mt-8">
           <div className="bg-white/80 backdrop-blur-sm border border-white/40 rounded-2xl shadow-lg p-6">
@@ -1555,7 +1587,21 @@ export default function DistributionPage() {
                                   <td className="px-3 py-2 text-slate-800">{row.code} - {row.name}</td>
                                   <td className="px-3 py-2 text-right text-slate-700">{formatNumber(row.loadedQty)}</td>
                                   <td className="px-3 py-2 text-right text-slate-700">{formatNumber(row.soldQty)}</td>
-                                  <td className="px-3 py-2 text-right text-slate-700">{formatNumber(row.returnQty)}</td>
+                                  <td className="px-3 py-2 text-right text-slate-700">
+                                    <div className="flex flex-col items-end gap-1">
+                                      <span>{formatNumber(row.returnQty)}</span>
+                                      {row.exchangeReturnQty > 0 && (
+                                        <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
+                                          Exchange {formatNumber(row.exchangeReturnQty)}
+                                        </span>
+                                      )}
+                                      {row.damagedReturnQty > 0 && (
+                                        <span className="rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700">
+                                          Damage {formatNumber(row.damagedReturnQty)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
                                   <td className="px-3 py-2 text-right font-semibold text-emerald-700">{formatNumber(row.availableQty)}</td>
                                   <td className="px-3 py-2 text-right text-slate-700">{formatNumber(row.returnValue)}</td>
                                 </tr>

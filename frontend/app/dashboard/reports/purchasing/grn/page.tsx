@@ -81,6 +81,15 @@ type GrnRow = {
   grnItems?: GrnItem[];
 };
 
+type CompanyBrand = {
+  id: number;
+  name?: string;
+  email?: string;
+  phone?: string;
+  address?: string;
+  website?: string;
+};
+
 export default function GrnReportPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
@@ -90,8 +99,11 @@ export default function GrnReportPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'draft' | 'received' | 'inspected' | 'approved' | 'rejected'>('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
   const [errorMessage, setErrorMessage] = useState('');
   const [selectedGrn, setSelectedGrn] = useState<GrnRow | null>(null);
+  const [companyBrand, setCompanyBrand] = useState<CompanyBrand | null>(null);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -140,7 +152,7 @@ export default function GrnReportPage() {
           return;
         }
 
-        await fetchRows(token);
+        await Promise.all([fetchRows(token), fetchCompanyBrand(token)]);
       } catch (error) {
         console.error('Error checking GRN report access:', error);
         router.push('/dashboard');
@@ -170,6 +182,27 @@ export default function GrnReportPage() {
       setErrorMessage('Failed to load GRN report data.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchCompanyBrand = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    try {
+      const companyRes = await axios.get(`${API_URL}/api/companies`, {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+
+      const companyRows = Array.isArray(companyRes.data)
+        ? companyRes.data
+        : Array.isArray(companyRes.data?.data)
+          ? companyRes.data.data
+          : [];
+
+      setCompanyBrand(companyRows.length > 0 ? companyRows[0] : null);
+    } catch {
+      setCompanyBrand(null);
     }
   };
 
@@ -204,6 +237,21 @@ export default function GrnReportPage() {
       return grnNo.includes(term) || poNo.includes(term) || supplier.includes(term) || notes.includes(term);
     });
   }, [normalizedRows, search, statusFilter, startDate, endDate]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  const pageStart = (currentPage - 1) * rowsPerPage;
+  const pageEnd = pageStart + rowsPerPage;
+  const pagedRows = filteredRows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, startDate, endDate, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const summary = useMemo(() => {
     const total = filteredRows.length;
@@ -321,6 +369,107 @@ export default function GrnReportPage() {
     return doc;
   };
 
+  const buildSingleGrnPdf = (grn: GrnRow) => {
+    const normalized = {
+      ...grn,
+      purchaseOrder: grn.purchaseOrder || grn.purchase_order,
+      grnItems: grn.grnItems || grn.grn_items || [],
+    };
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+
+    const items = Array.isArray(normalized.grnItems) ? normalized.grnItems : [];
+    const recQty = items.reduce((sum, i) => sum + Number(i.received_quantity || 0), 0);
+    const accQty = items.reduce((sum, i) => sum + Number(i.accepted_quantity || 0), 0);
+    const rejQty = items.reduce((sum, i) => sum + Number(i.rejected_quantity || 0), 0);
+
+    const companyName = companyBrand?.name?.trim() || 'Company';
+    const companyMeta = [companyBrand?.address, companyBrand?.phone, companyBrand?.email, companyBrand?.website]
+      .filter(Boolean)
+      .join(' | ');
+    const footerText = 'System By Softcodelk(PVT) Ltd www.softcodelk.com';
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.text(companyName, 40, 24);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);
+    if (companyMeta) {
+      doc.text(companyMeta, 40, 38);
+    }
+    doc.setDrawColor(180);
+    doc.line(40, 46, doc.internal.pageSize.getWidth() - 40, 46);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.text(`GRN Details - ${normalized.grn_number || '-'}`, 40, 64);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, 40, 80);
+    doc.text(`Received Date: ${toDateLabel(normalized.received_date)}`, 40, 94);
+    doc.text(`PO Number: ${normalized.purchaseOrder?.order_number || '-'}`, 40, 108);
+    doc.text(`Supplier: ${normalized.purchaseOrder?.supplier?.name || '-'}`, 40, 122);
+    doc.text(`Status: ${normalized.status ? normalized.status.toUpperCase() : '-'}`, 40, 136);
+
+    doc.text(`Total Amount: LKR ${toMoney(normalized.total_amount)}`, 420, 80);
+    doc.text(`Discount: LKR ${toMoney(normalized.discount_amount)}`, 420, 94);
+    doc.text(`Net Amount: LKR ${toMoney(normalized.net_amount)}`, 420, 108);
+    doc.text(`Paid Amount: LKR ${toMoney(normalized.paid_amount)}`, 420, 122);
+    doc.text(`Payment Ref: ${normalized.payment_reference || '-'}`, 420, 136);
+
+    autoTable(doc, {
+      startY: 154,
+      head: [['Item', 'Code', 'Rec Qty', 'Acc Qty', 'Rej Qty', 'Purchase Price', 'Quality']],
+      body: items.map((item, index) => {
+        const poItem = item.purchaseOrderItem || item.purchase_order_item;
+        const inv = poItem?.inventory_item;
+        const fallbackPrice = Number(poItem?.unit_price || 0);
+        const purchasePrice = Number(item.purchase_price ?? fallbackPrice);
+
+        return [
+          inv?.name || `Item #${item.purchase_order_item_id || index + 1}`,
+          inv?.code || '-',
+          String(Number(item.received_quantity || 0)),
+          String(Number(item.accepted_quantity || 0)),
+          String(Number(item.rejected_quantity || 0)),
+          `LKR ${toMoney(purchasePrice)}`,
+          item.quality_status || '-',
+        ];
+      }),
+      theme: 'grid',
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [16, 185, 129] },
+      margin: { left: 20, right: 20, bottom: 42 },
+      didDrawPage: () => {
+        doc.setFontSize(9);
+        doc.text(
+          `Summary - Items: ${items.length}, Rec Qty: ${recQty}, Acc Qty: ${accQty}, Rej Qty: ${rejQty}`,
+          20,
+          doc.internal.pageSize.getHeight() - 26
+        );
+      },
+    });
+
+    if (normalized.notes) {
+      const finalY = (doc as any).lastAutoTable?.finalY || 140;
+      doc.setFontSize(10);
+      doc.text('Notes:', 20, finalY + 18);
+      const splitNotes = doc.splitTextToSize(String(normalized.notes), doc.internal.pageSize.getWidth() - 60);
+      doc.text(splitNotes, 20, finalY + 34);
+    }
+
+    const pageCount = doc.getNumberOfPages();
+    for (let page = 1; page <= pageCount; page++) {
+      doc.setPage(page);
+      doc.setFontSize(8);
+      doc.setTextColor(80);
+      doc.text(footerText, doc.internal.pageSize.getWidth() / 2, doc.internal.pageSize.getHeight() - 10, { align: 'center' });
+      doc.setTextColor(0);
+    }
+
+    return doc;
+  };
+
   const viewPdf = () => window.open(buildPdf().output('bloburl'), '_blank');
   const downloadPdf = () => buildPdf().save(`grn-report-${new Date().toISOString().split('T')[0]}.pdf`);
 
@@ -341,7 +490,7 @@ export default function GrnReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-emerald-600 transition-colors duration-300">
@@ -357,7 +506,7 @@ export default function GrnReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">GRN <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">Report</span></h1>
           <p className="text-gray-600">Goods received notes overview with quantity and quality status analytics.</p>
@@ -431,7 +580,7 @@ export default function GrnReportPage() {
                 {filteredRows.length === 0 ? (
                   <tr><td colSpan={10} className="px-4 py-10 text-center text-sm text-gray-500">No GRN records found.</td></tr>
                 ) : (
-                  filteredRows.map((row, idx) => {
+                  pagedRows.map((row, idx) => {
                     const items = Array.isArray(row.grnItems) ? row.grnItems : [];
                     const recQty = items.reduce((sum, i) => sum + Number(i.received_quantity || 0), 0);
                     const accQty = items.reduce((sum, i) => sum + Number(i.accepted_quantity || 0), 0);
@@ -464,29 +613,76 @@ export default function GrnReportPage() {
               </tbody>
             </table>
           </div>
+
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-gray-600">
+              Showing {filteredRows.length === 0 ? 0 : pageStart + 1} to {Math.min(pageEnd, filteredRows.length)} of {filteredRows.length} records
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-sm text-gray-600">Rows:</label>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-gray-700">Page {currentPage} of {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </section>
 
         {selectedGrn && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-6xl overflow-hidden rounded-3xl border border-white/20 bg-white shadow-2xl">
-              <div className="border-b border-emerald-100 bg-gradient-to-r from-emerald-50 to-teal-50 px-6 py-4">
+          <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-950/60 p-0 sm:items-center sm:p-4 backdrop-blur-sm">
+            <div className="flex h-[100dvh] w-full flex-col overflow-hidden rounded-none border border-white/20 bg-white shadow-2xl sm:h-auto sm:max-h-[90dvh] sm:max-w-5xl sm:rounded-3xl">
+              <div className="sticky top-0 z-10 border-b border-emerald-100 bg-gradient-to-r from-emerald-50 to-teal-50 px-4 py-3 sm:px-6 sm:py-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-700">GRN Full Details</p>
-                    <h3 className="mt-1 text-xl font-semibold text-slate-900">{selectedGrn.grn_number || '-'}</h3>
-                    <p className="mt-1 text-sm text-slate-600">Received: {toDateLabel(selectedGrn.received_date)} • PO: {selectedGrn.purchaseOrder?.order_number || '-'}</p>
+                    <h3 className="mt-1 text-lg sm:text-xl font-semibold text-slate-900">{selectedGrn.grn_number || '-'}</h3>
+                    <p className="mt-1 text-xs sm:text-sm text-slate-600">Received: {toDateLabel(selectedGrn.received_date)} • PO: {selectedGrn.purchaseOrder?.order_number || '-'}</p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedGrn(null)}
-                    className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-xl text-slate-600 transition hover:bg-slate-50"
-                  >
-                    &times;
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => buildSingleGrnPdf(selectedGrn).save(`${selectedGrn.grn_number || 'grn'}-full-report.pdf`)}
+                      className="inline-flex items-center rounded-lg border border-emerald-200 bg-emerald-100 px-3 py-2 text-xs font-semibold text-emerald-800 transition hover:bg-emerald-200"
+                    >
+                      Generate PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedGrn(null)}
+                      className="inline-flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-lg sm:text-xl text-slate-600 transition hover:bg-slate-50"
+                    >
+                      &times;
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div className="max-h-[82vh] overflow-y-auto p-6 space-y-6">
+              <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6">
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Supplier</p>
@@ -510,7 +706,7 @@ export default function GrnReportPage() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                     <p className="text-xs font-semibold uppercase tracking-[0.15em] text-emerald-700">Total Amount</p>
                     <p className="mt-2 text-lg font-bold text-emerald-900">LKR {toMoney(selectedGrn.total_amount)}</p>
@@ -543,7 +739,7 @@ export default function GrnReportPage() {
                 {Array.isArray(selectedGrn.payment_breakdown) && selectedGrn.payment_breakdown.length > 0 ? (
                   <div className="rounded-2xl border border-slate-200 bg-white p-4">
                     <p className="mb-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">Payment Breakdown</p>
-                    <div className="overflow-x-auto">
+                    <div className="hidden md:block overflow-x-auto">
                       <table className="min-w-full divide-y divide-slate-200">
                         <thead className="bg-slate-50">
                           <tr>
@@ -563,12 +759,21 @@ export default function GrnReportPage() {
                         </tbody>
                       </table>
                     </div>
+                    <div className="space-y-2 md:hidden">
+                      {selectedGrn.payment_breakdown.map((line, index) => (
+                        <div key={`pay-line-mobile-${index}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">{String(line.payment_type || '-').replace('_', ' ')}</p>
+                          <p className="mt-1 text-sm font-semibold text-slate-900">LKR {toMoney(line.amount)}</p>
+                          <p className="mt-1 text-xs text-slate-600">Ref: {line.reference || '-'}</p>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
 
                 <div className="rounded-2xl border border-slate-200 bg-white p-4">
                   <p className="mb-3 text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">GRN Items</p>
-                  <div className="overflow-x-auto">
+                  <div className="hidden lg:block overflow-x-auto">
                     <table className="min-w-full divide-y divide-slate-200">
                       <thead className="bg-slate-50">
                         <tr>
@@ -602,6 +807,28 @@ export default function GrnReportPage() {
                         })}
                       </tbody>
                     </table>
+                  </div>
+                  <div className="space-y-3 lg:hidden">
+                    {(selectedGrn.grnItems || []).map((item, index) => {
+                      const poItem = item.purchaseOrderItem || item.purchase_order_item;
+                      const inv = poItem?.inventory_item;
+                      const fallbackPrice = Number(poItem?.unit_price || 0);
+                      const purchasePrice = Number(item.purchase_price ?? fallbackPrice);
+
+                      return (
+                        <div key={`grn-item-mobile-${item.id || index}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                          <p className="text-sm font-semibold text-slate-900">{inv?.name || `Item #${item.purchase_order_item_id || index + 1}`}</p>
+                          <p className="mt-0.5 text-xs text-slate-600">{inv?.code || '-'}</p>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-700">
+                            <p>Rec Qty: <span className="font-semibold text-slate-900">{Number(item.received_quantity || 0)}</span></p>
+                            <p>Acc Qty: <span className="font-semibold text-slate-900">{Number(item.accepted_quantity || 0)}</span></p>
+                            <p>Rej Qty: <span className="font-semibold text-slate-900">{Number(item.rejected_quantity || 0)}</span></p>
+                            <p>Quality: <span className="font-semibold text-slate-900">{item.quality_status || '-'}</span></p>
+                          </div>
+                          <p className="mt-2 text-xs text-slate-700">Purchase Price: <span className="font-semibold text-slate-900">LKR {toMoney(purchasePrice)}</span></p>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 

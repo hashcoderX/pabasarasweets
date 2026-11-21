@@ -12,7 +12,17 @@ interface Candidate {
   email: string;
   phone: string;
   address: string;
+  city?: string;
   position_applied: string;
+  source?: string;
+  linkedin_url?: string;
+  portfolio_url?: string;
+  years_of_experience?: number;
+  current_company?: string;
+  current_designation?: string;
+  current_salary?: number;
+  notice_period_days?: number;
+  skills?: string;
   status: 'applied' | 'shortlisted' | 'interviewed' | 'selected' | 'rejected' | 'hired';
   interview_date?: string;
   interview_time?: string;
@@ -115,6 +125,8 @@ export default function Candidates() {
   const [showExpModal, setShowExpModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showInterviewModal, setShowInterviewModal] = useState(false);
+  const [interviewViewMode, setInterviewViewMode] = useState<'scheduled' | 'completed'>('scheduled');
+  const [quickInterviewView, setQuickInterviewView] = useState<'scheduled' | 'completed' | null>(null);
   const [upcomingInterviews, setUpcomingInterviews] = useState<Interview[]>([]);
   const [editingCandidate, setEditingCandidate] = useState<Candidate | null>(null);
   const [convertingCandidate, setConvertingCandidate] = useState<Candidate | null>(null);
@@ -129,7 +141,17 @@ export default function Candidates() {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
+  const [city, setCity] = useState('');
   const [positionApplied, setPositionApplied] = useState('');
+  const [source, setSource] = useState('');
+  const [linkedinUrl, setLinkedinUrl] = useState('');
+  const [portfolioUrl, setPortfolioUrl] = useState('');
+  const [yearsOfExperience, setYearsOfExperience] = useState('');
+  const [currentCompany, setCurrentCompany] = useState('');
+  const [currentDesignation, setCurrentDesignation] = useState('');
+  const [currentSalary, setCurrentSalary] = useState('');
+  const [noticePeriodDays, setNoticePeriodDays] = useState('');
+  const [skills, setSkills] = useState('');
   const [cvFile, setCvFile] = useState<File | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [expectedSalary, setExpectedSalary] = useState('');
@@ -270,6 +292,7 @@ export default function Candidates() {
   const openProfile = async (candidate: Candidate) => {
     try {
       setProfileLoading(true);
+      setInterviewViewMode('scheduled');
       setShowProfileModal(true);
       const res = await axios.get(`${API_URL}/api/hr/candidates/${candidate.id}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -608,7 +631,17 @@ export default function Candidates() {
     setEmail('');
     setPhone('');
     setAddress('');
+    setCity('');
     setPositionApplied('');
+    setSource('');
+    setLinkedinUrl('');
+    setPortfolioUrl('');
+    setYearsOfExperience('');
+    setCurrentCompany('');
+    setCurrentDesignation('');
+    setCurrentSalary('');
+    setNoticePeriodDays('');
+    setSkills('');
     setCvFile(null);
     setPhotoFile(null);
     setExpectedSalary('');
@@ -646,7 +679,35 @@ export default function Candidates() {
     formData.append('email', email);
     formData.append('phone', phone);
     formData.append('address', address);
+    formData.append('city', city);
     formData.append('position_applied', positionApplied);
+    if (source) {
+      formData.append('source', source);
+    }
+    if (linkedinUrl) {
+      formData.append('linkedin_url', linkedinUrl);
+    }
+    if (portfolioUrl) {
+      formData.append('portfolio_url', portfolioUrl);
+    }
+    if (yearsOfExperience) {
+      formData.append('years_of_experience', yearsOfExperience);
+    }
+    if (currentCompany) {
+      formData.append('current_company', currentCompany);
+    }
+    if (currentDesignation) {
+      formData.append('current_designation', currentDesignation);
+    }
+    if (currentSalary) {
+      formData.append('current_salary', currentSalary);
+    }
+    if (noticePeriodDays) {
+      formData.append('notice_period_days', noticePeriodDays);
+    }
+    if (skills) {
+      formData.append('skills', skills);
+    }
     if (cvFile) {
       formData.append('cv_file', cvFile);
     }
@@ -695,7 +756,17 @@ export default function Candidates() {
     setEmail(candidate.email);
     setPhone(candidate.phone);
     setAddress(candidate.address);
+    setCity(candidate.city || '');
     setPositionApplied(candidate.position_applied);
+    setSource(candidate.source || '');
+    setLinkedinUrl(candidate.linkedin_url || '');
+    setPortfolioUrl(candidate.portfolio_url || '');
+    setYearsOfExperience(candidate.years_of_experience ? candidate.years_of_experience.toString() : '');
+    setCurrentCompany(candidate.current_company || '');
+    setCurrentDesignation(candidate.current_designation || '');
+    setCurrentSalary(candidate.current_salary ? candidate.current_salary.toString() : '');
+    setNoticePeriodDays(candidate.notice_period_days ? candidate.notice_period_days.toString() : '');
+    setSkills(candidate.skills || '');
     setExpectedSalary(candidate.expected_salary ? candidate.expected_salary.toString() : '');
     setNotes(candidate.notes || '');
     setStatus(candidate.status);
@@ -835,6 +906,37 @@ export default function Candidates() {
       default: return 'bg-gray-100 text-gray-800';
     }
   };
+
+  const formatDateDisplay = (value?: string | null, fallback = '-') => {
+    if (!value) return fallback;
+
+    const dateOnlyMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const parsed = dateOnlyMatch
+      ? new Date(Number(dateOnlyMatch[1]), Number(dateOnlyMatch[2]) - 1, Number(dateOnlyMatch[3]))
+      : new Date(value);
+
+    if (Number.isNaN(parsed.getTime())) return value;
+
+    return parsed.toLocaleDateString('en-GB', {
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    });
+  };
+
+  const filterInterviewsByMode = (
+    interviews: Interview[] = [],
+    mode: 'scheduled' | 'completed'
+  ) => {
+    if (mode === 'scheduled') {
+      return interviews.filter((iv) => !iv.result || iv.result === 'pending');
+    }
+
+    return interviews.filter((iv) => iv.result === 'pass' || iv.result === 'fail');
+  };
+
+  const scheduledGlobalInterviews = upcomingInterviews.filter((iv) => !iv.result || iv.result === 'pending');
+  const completedGlobalInterviews = upcomingInterviews.filter((iv) => iv.result === 'pass' || iv.result === 'fail');
 
   const candidateWidgetItems = [
     { id: 'hrm-candidates-nav-back-button', name: 'Candidates Back Button' },
@@ -1057,147 +1159,119 @@ export default function Candidates() {
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
 
-      {/* Modern Navigation */}
-      <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
-            <div className="flex items-center justify-between sm:justify-start gap-3">
-              {isWidgetVisible('hrm-candidates-nav-back-button') && (
-                <button
-                  onClick={() => router.push('/dashboard/hrm')}
-                  className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                  </svg>
-                  <span className="font-medium text-sm sm:text-base">Back to HRM</span>
-                </button>
-              )}
-            </div>
-            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4">
-              <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>Candidate System Active</span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full flex items-center justify-center text-white text-sm font-bold">
-                  🎯
-                </div>
-                <span className="font-medium text-gray-900">Candidate Management</span>
-              </div>
-              {isWidgetVisible('hrm-candidates-nav-logout-button') && (
-                <button
-                  onClick={() => {
-                    localStorage.removeItem('token');
-                    router.push('/');
-                  }}
-                  className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-                >
-                  Logout
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      </nav>
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        {apiError && (
-          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 text-red-700 px-4 py-3">
-            {apiError}
-          </div>
-        )}
-        {/* Hero Section */}
-        {isWidgetVisible('hrm-candidates-hero-card') && (
-          <div className="mb-8 rounded-2xl border border-gray-200 bg-white/90 shadow-sm p-6 relative">
-            {!widgetControlsLocked && (
-              <button
-                onClick={() => stageWidgetVisibilityChange('hrm-candidates-hero-card', false)}
-                className="absolute top-3 right-3 w-8 h-8 rounded-full bg-red-500 text-white hover:bg-red-600 flex items-center justify-center text-sm"
-                title="Hide this widget"
-              >
-                ×
-              </button>
-            )}
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
-              <div>
-                {isWidgetVisible('hrm-candidates-heading-title') && (
-                  <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-gray-900">Candidates</h1>
-                )}
-                {isWidgetVisible('hrm-candidates-heading-subtitle') && (
-                  <p className="text-sm sm:text-base md:text-lg text-gray-600">Manage applicants, interviews and conversions</p>
-                )}
-              </div>
-              {isWidgetVisible('hrm-candidates-heading-actions') && (
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => { resetForm(); resetEditForm(); setShowForm(true); }}
-                    className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
-                  >
-                    Add Candidate
-                  </button>
-                  <button onClick={() => fetchCandidates()} className="px-4 py-2 rounded-lg border">Refresh</button>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="mb-6 rounded-2xl border border-white/60 bg-white/70 backdrop-blur-xl p-5 sm:p-6 shadow-lg">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <p className="text-sm font-semibold text-blue-900">
-                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">Candidates Management</h1>
+              <p className="mt-2 text-sm sm:text-base text-slate-600 max-w-2xl">
+                Manage recruitment pipeline, track interview progress, and move the right candidates to hiring decisions faster.
               </p>
-              <p className="text-xs text-blue-700">
-                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
-              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-3 py-1 text-xs font-medium">
+                  Total Candidates: {candidates.length}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-700 px-3 py-1 text-xs font-medium">
+                  Scheduled Interviews: {scheduledGlobalInterviews.length}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 px-3 py-1 text-xs font-medium">
+                  Completed Interviews: {completedGlobalInterviews.length}
+                </span>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {!widgetControlsLocked && (
-                <button
-                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Fix Widget
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={restoreAllHiddenWidgetsStaged}
-                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
-                >
-                  Stage Restore All
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={rollbackPendingWidgetChanges}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Rollback
-                </button>
-              )}
+
+            <div className="flex flex-wrap items-center justify-start lg:justify-end gap-2 sm:gap-3">
               <button
-                onClick={restoreHiddenWidgetsAfterFix}
-                disabled={!hiddenWidgetCount}
-                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                type="button"
+                onClick={() => setQuickInterviewView('scheduled')}
+                className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 transition hover:bg-amber-100"
               >
-                Restore Widgets
+                Scheduled Interviews
               </button>
-              {widgetControlsLocked && (
-                <button
-                  onClick={openUnlockWidgetsAfterFix}
-                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
-                >
-                  Unlock Widgets
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setQuickInterviewView('completed')}
+                className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-100"
+              >
+                Completed Interviews
+              </button>
+              <button
+                onClick={() => { resetForm(); resetEditForm(); setShowForm(true); }}
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg transition hover:from-blue-700 hover:to-cyan-700"
+              >
+                <span className="text-base leading-none">+</span>
+                <span>Add Candidate</span>
+              </button>
             </div>
           </div>
         </div>
+
+        {quickInterviewView && (
+          <div className="mb-6 rounded-2xl border border-white/70 bg-white/80 backdrop-blur shadow-lg overflow-hidden">
+            <div className="px-4 sm:px-5 py-3 border-b bg-gradient-to-r from-slate-50 to-cyan-50 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-semibold text-slate-900">
+                {quickInterviewView === 'scheduled'
+                  ? `Scheduled Interviews (${scheduledGlobalInterviews.length})`
+                  : `Completed Interviews (${completedGlobalInterviews.length})`}
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => fetchUpcomingInterviews()}
+                  className="text-sm text-indigo-600 hover:underline"
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQuickInterviewView(null)}
+                  className="text-sm text-slate-500 hover:text-slate-700"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <div className="p-4 overflow-auto max-h-80">
+              {(quickInterviewView === 'scheduled' ? scheduledGlobalInterviews : completedGlobalInterviews).length === 0 ? (
+                <div className="text-sm text-slate-500">
+                  {quickInterviewView === 'scheduled' ? 'No scheduled interviews found.' : 'No completed interviews found.'}
+                </div>
+              ) : (
+                <table className="min-w-full">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2">Date</th>
+                      <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2">Time</th>
+                      <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2">Candidate</th>
+                      <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2">Interviewers</th>
+                      <th className="text-left text-xs font-semibold text-slate-600 px-3 py-2">Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(quickInterviewView === 'scheduled' ? scheduledGlobalInterviews : completedGlobalInterviews).map((iv) => (
+                      <tr key={iv.id} className="border-t border-slate-100">
+                        <td className="px-3 py-2 text-sm text-slate-700">{formatDateDisplay(iv.interview_date)}</td>
+                        <td className="px-3 py-2 text-sm text-slate-700">{iv.interview_time}</td>
+                        <td className="px-3 py-2 text-sm text-slate-700">
+                          {(iv as any).candidate ? `${(iv as any).candidate.first_name} ${(iv as any).candidate.last_name}` : '-'}
+                        </td>
+                        <td className="px-3 py-2 text-sm text-slate-700">
+                          <div className="flex flex-wrap gap-1">
+                            {(iv.interviewers || []).map((p) => (
+                              <span key={p.id} className="inline-flex px-2 py-0.5 text-xs rounded-md bg-yellow-100 text-yellow-800">{p.first_name} {p.last_name}</span>
+                            ))}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-sm text-slate-700">{iv.result || 'pending'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Candidates Table */}
         {isWidgetVisible('hrm-candidates-table-card') && (
@@ -1498,8 +1572,10 @@ export default function Candidates() {
               </div>
             </div>
             <div className="p-6">
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+              <form onSubmit={handleSubmit} className="space-y-5">
+                <div className="rounded-2xl border border-blue-100 bg-blue-50/50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-blue-700">Basic Information</p>
+                  <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       First Name *
@@ -1525,94 +1601,211 @@ export default function Candidates() {
                     />
                   </div>
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Email *
-                  </label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
-                    required
-                  />
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Phone *
-                  </label>
-                  <input
-                    type="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
-                    required
-                  />
+                <div className="rounded-2xl border border-cyan-100 bg-cyan-50/40 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700">Contact Information</p>
+                  <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Email *
+                      </label>
+                      <input
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Phone *
+                      </label>
+                      <input
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        City
+                      </label>
+                      <input
+                        type="text"
+                        value={city}
+                        onChange={(e) => setCity(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="e.g., Colombo"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Address
+                      </label>
+                      <textarea
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        rows={3}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Address
-                  </label>
-                  <textarea
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                    rows={3}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
-                  />
+                <div className="rounded-2xl border border-violet-100 bg-violet-50/40 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">Recruitment Profile</p>
+                  <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Position Applied *
+                      </label>
+                      <input
+                        type="text"
+                        value={positionApplied}
+                        onChange={(e) => setPositionApplied(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Candidate Source
+                      </label>
+                      <input
+                        type="text"
+                        value={source}
+                        onChange={(e) => setSource(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="LinkedIn, Referral, Job Portal"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Years of Experience</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={yearsOfExperience}
+                        onChange={(e) => setYearsOfExperience(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="e.g., 3.5"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Notice Period (Days)</label>
+                      <input
+                        type="number"
+                        value={noticePeriodDays}
+                        onChange={(e) => setNoticePeriodDays(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="e.g., 30"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Current Company</label>
+                      <input
+                        type="text"
+                        value={currentCompany}
+                        onChange={(e) => setCurrentCompany(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Current Designation</label>
+                      <input
+                        type="text"
+                        value={currentDesignation}
+                        onChange={(e) => setCurrentDesignation(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Current Salary</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={currentSalary}
+                        onChange={(e) => setCurrentSalary(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Expected Salary</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={expectedSalary}
+                        onChange={(e) => setExpectedSalary(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="e.g., 50000.00"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">LinkedIn URL</label>
+                      <input
+                        type="url"
+                        value={linkedinUrl}
+                        onChange={(e) => setLinkedinUrl(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="https://linkedin.com/in/..."
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Portfolio URL</label>
+                      <input
+                        type="url"
+                        value={portfolioUrl}
+                        onChange={(e) => setPortfolioUrl(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="https://portfolio.example.com"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Skills</label>
+                      <textarea
+                        value={skills}
+                        onChange={(e) => setSkills(e.target.value)}
+                        rows={2}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
+                        placeholder="Comma separated skills, e.g., Excel, Recruiting, Labor Law"
+                      />
+                    </div>
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Position Applied *
-                  </label>
-                  <input
-                    type="text"
-                    value={positionApplied}
-                    onChange={(e) => setPositionApplied(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
-                    required
-                  />
-                </div>
+                <div className="rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Attachments</p>
+                  <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        CV File
+                      </label>
+                      <input
+                        type="file"
+                        accept=".pdf,.doc,.docx"
+                        onChange={(e) => setCvFile(e.target.files?.[0] || null)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    CV File
-                  </label>
-                  <input
-                    type="file"
-                    accept=".pdf,.doc,.docx"
-                    onChange={(e) => setCvFile(e.target.files?.[0] || null)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Profile Photo
-                  </label>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    onChange={(e) => setPhotoFile(e.target.files?.[0] || null)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Expected Salary
-                  </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={expectedSalary}
-                    onChange={(e) => setExpectedSalary(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black placeholder-gray-500"
-                    placeholder="e.g., 50000.00"
-                  />
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Profile Photo
+                      </label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => setPhotoFile(e.target.files?.[0] || null)}
+                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-black file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 {editingCandidate && (
@@ -1991,7 +2184,7 @@ export default function Candidates() {
                           {(() => {
                             const latest = [...(profileCandidate.interviews || [])].sort((a,b)=>`${a.interview_date} ${a.interview_time}`.localeCompare(`${b.interview_date} ${b.interview_time}`)).slice(-1)[0];
                             return latest ? (
-                              <div className="text-xs text-gray-600">Last: {latest.interview_date} {latest.interview_time} · Result: {latest.result || 'pending'}</div>
+                              <div className="text-xs text-gray-600">Last: {formatDateDisplay(latest.interview_date)} {latest.interview_time} · Result: {latest.result || 'pending'}</div>
                             ) : null;
                           })()}
                         </>
@@ -2002,7 +2195,7 @@ export default function Candidates() {
                     <div className="text-xs uppercase text-gray-500">Offer</div>
                     <div className="mt-2 text-sm text-gray-900">Expected: {profileCandidate.expected_salary ?? '—'}</div>
                     <div className="text-sm text-gray-900">Offered: {profileCandidate.offered_salary ?? '—'}</div>
-                    <div className="text-sm text-gray-700">Joining: {profileCandidate.joining_date || '—'}</div>
+                    <div className="text-sm text-gray-700">Joining: {formatDateDisplay(profileCandidate.joining_date, '—')}</div>
                   </div>
                 </div>
 
@@ -2061,7 +2254,7 @@ export default function Candidates() {
                             <tr className="border-t" key={e.id}>
                               <td className="px-3 py-2 text-sm text-gray-700">{e.institution}</td>
                               <td className="px-3 py-2 text-sm text-gray-700">{e.degree || '-'} {e.field_of_study ? `(${e.field_of_study})` : ''}</td>
-                              <td className="px-3 py-2 text-sm text-gray-700">{e.start_date || '-'} → {e.end_date || '-'}</td>
+                              <td className="px-3 py-2 text-sm text-gray-700">{formatDateDisplay(e.start_date)} → {formatDateDisplay(e.end_date)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -2092,7 +2285,7 @@ export default function Candidates() {
                             <tr className="border-t" key={x.id}>
                               <td className="px-3 py-2 text-sm text-gray-700">{x.company}</td>
                               <td className="px-3 py-2 text-sm text-gray-700">{x.role}</td>
-                              <td className="px-3 py-2 text-sm text-gray-700">{x.start_date || '-'} → {x.is_current ? 'Present' : (x.end_date || '-')}</td>
+                              <td className="px-3 py-2 text-sm text-gray-700">{formatDateDisplay(x.start_date)} → {x.is_current ? 'Present' : formatDateDisplay(x.end_date)}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -2105,6 +2298,30 @@ export default function Candidates() {
                 <div className="border rounded-2xl">
                   <div className="px-4 py-3 border-b bg-gradient-to-r from-gray-50 to-gray-100 flex items-center justify-between">
                     <div className="text-sm font-semibold text-gray-900">Interviews ({profileCandidate.interviews?.length || 0})</div>
+                    <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-1">
+                      <button
+                        type="button"
+                        onClick={() => setInterviewViewMode('scheduled')}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition ${
+                          interviewViewMode === 'scheduled'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        Scheduled
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setInterviewViewMode('completed')}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition ${
+                          interviewViewMode === 'completed'
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        Completed
+                      </button>
+                    </div>
                   </div>
 
                   {/* Scheduled Interviews (global) */}
@@ -2130,7 +2347,7 @@ export default function Candidates() {
                           <tbody>
                             {upcomingInterviews.map(iv => (
                               <tr key={iv.id} className="border-t">
-                                <td className="px-3 py-2 text-sm text-gray-700">{iv.interview_date}</td>
+                                <td className="px-3 py-2 text-sm text-gray-700">{formatDateDisplay(iv.interview_date)}</td>
                                 <td className="px-3 py-2 text-sm text-gray-700">{iv.interview_time}</td>
                                 <td className="px-3 py-2 text-sm text-gray-700">
                                   {/* Candidate name comes via interview->candidate in backend response */}
@@ -2153,8 +2370,12 @@ export default function Candidates() {
                     </div>
                   </div>
                   <div className="p-4 overflow-auto max-h-72">
-                    {(profileCandidate.interviews?.length || 0) === 0 ? (
-                      <div className="text-sm text-gray-500">No interviews scheduled.</div>
+                    {filterInterviewsByMode(profileCandidate.interviews || [], interviewViewMode).length === 0 ? (
+                      <div className="text-sm text-gray-500">
+                        {interviewViewMode === 'scheduled'
+                          ? 'No scheduled interviews.'
+                          : 'No completed interviews.'}
+                      </div>
                     ) : (
                       <table className="min-w-full">
                         <thead className="bg-gray-50">
@@ -2169,9 +2390,9 @@ export default function Candidates() {
                           </tr>
                         </thead>
                         <tbody>
-                          {profileCandidate.interviews?.map((iv) => (
+                          {filterInterviewsByMode(profileCandidate.interviews || [], interviewViewMode).map((iv) => (
                             <tr key={iv.id} className="border-t">
-                              <td className="px-3 py-2 text-sm text-gray-700">{iv.interview_date}</td>
+                              <td className="px-3 py-2 text-sm text-gray-700">{formatDateDisplay(iv.interview_date)}</td>
                               <td className="px-3 py-2 text-sm text-gray-700">{iv.interview_time}</td>
                               <td className="px-3 py-2 text-sm text-gray-700">
                                 <div className="flex flex-wrap gap-1">
@@ -2391,7 +2612,7 @@ export default function Candidates() {
                     <tr key={e.id} className="border-t">
                       <td className="px-4 py-2 text-sm text-gray-700">{e.institution}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{e.degree || '-'} {e.field_of_study ? `(${e.field_of_study})` : ''}</td>
-                      <td className="px-4 py-2 text-sm text-gray-700">{e.start_date || '-'} → {e.end_date || '-'}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{formatDateDisplay(e.start_date)} → {formatDateDisplay(e.end_date)}</td>
                       <td className="px-4 py-2 text-sm">
                         <button onClick={() => removeEducation(e)} className="text-red-600 hover:underline">Delete</button>
                       </td>
@@ -2442,7 +2663,7 @@ export default function Candidates() {
                     <tr key={x.id} className="border-t">
                       <td className="px-4 py-2 text-sm text-gray-700">{x.company}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{x.role}</td>
-                      <td className="px-4 py-2 text-sm text-gray-700">{x.start_date || '-'} → {x.is_current ? 'Present' : (x.end_date || '-')}</td>
+                      <td className="px-4 py-2 text-sm text-gray-700">{formatDateDisplay(x.start_date)} → {x.is_current ? 'Present' : formatDateDisplay(x.end_date)}</td>
                       <td className="px-4 py-2 text-sm">
                         <button onClick={() => removeExperience(x)} className="text-red-600 hover:underline">Delete</button>
                       </td>

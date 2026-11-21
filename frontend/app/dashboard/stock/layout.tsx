@@ -21,7 +21,7 @@ export default function StockLayout({
     <div className="min-h-screen bg-gray-50">
       {/* Stock Management Navigation */}
       <div className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="py-4 space-y-3">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h1 className="text-xl sm:text-2xl font-bold text-gray-900">Stock Management</h1>
@@ -56,7 +56,7 @@ export default function StockLayout({
       </div>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <main className="w-full py-6 px-3 sm:px-4 lg:px-6">
         {children}
       </main>
     </div>

@@ -32,6 +32,8 @@ export default function RawMaterialStockReportPage() {
   const [rows, setRows] = useState<InventoryRow[]>([]);
   const [search, setSearch] = useState('');
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
@@ -109,6 +111,21 @@ export default function RawMaterialStockReportPage() {
     out: filteredRows.filter(isOut).length,
   }), [filteredRows]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  const pageStart = (currentPage - 1) * rowsPerPage;
+  const pageEnd = pageStart + rowsPerPage;
+  const pagedRows = filteredRows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, stockFilter, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const qty = (n?: number) => Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const rowToExport = (r: InventoryRow) => [r.code || '-', r.name || '-', r.category || '-', qty(r.current_stock), qty(r.minimum_stock), qty(r.maximum_stock), r.unit || '-'];
 
@@ -146,8 +163,8 @@ export default function RawMaterialStockReportPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50">
-      <nav className="bg-white/80 backdrop-blur-lg shadow border-b border-white/20"><div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between"><Link href="/dashboard/reports" className="text-black hover:text-amber-600">Back to Reports</Link><span className="text-sm text-black">Raw Material Report</span></div></nav>
-      <main className="max-w-7xl mx-auto py-8 px-4">
+      <nav className="bg-white/80 backdrop-blur-lg shadow border-b border-white/20"><div className="w-full px-3 sm:px-4 lg:px-6 h-16 flex items-center justify-between"><Link href="/dashboard/reports" className="text-black hover:text-amber-600">Back to Reports</Link><span className="text-sm text-black">Raw Material Report</span></div></nav>
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6">
         <h1 className="text-3xl font-bold text-black mb-2">Raw Material Stock Report</h1>
         <p className="text-black mb-6">Raw material quantities and stock-risk overview.</p>
         {errorMessage && <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{errorMessage}</div>}
@@ -169,7 +186,45 @@ export default function RawMaterialStockReportPage() {
           <div className="px-4 py-3 border-b border-gray-100 bg-amber-50 flex flex-wrap gap-3 text-sm text-black"><span>Total: <strong>{summary.total}</strong></span><span>Low: <strong>{summary.low}</strong></span><span>Out: <strong>{summary.out}</strong></span></div>
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200"><thead className="bg-gray-50"><tr><th className="px-4 py-3 text-left text-xs font-medium text-black uppercase">Code</th><th className="px-4 py-3 text-left text-xs font-medium text-black uppercase">Item</th><th className="px-4 py-3 text-left text-xs font-medium text-black uppercase">Category</th><th className="px-4 py-3 text-right text-xs font-medium text-black uppercase">Current</th><th className="px-4 py-3 text-right text-xs font-medium text-black uppercase">Min</th><th className="px-4 py-3 text-right text-xs font-medium text-black uppercase">Max</th></tr></thead>
-              <tbody className="bg-white divide-y divide-gray-100">{filteredRows.length === 0 ? <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-black">No raw materials found.</td></tr> : filteredRows.map((r, i) => <tr key={r.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}><td className="px-4 py-3 text-sm text-black">{r.code || '-'}</td><td className="px-4 py-3 text-sm text-black font-medium">{r.name || '-'}</td><td className="px-4 py-3 text-sm text-black">{r.category || '-'}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.current_stock)}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.minimum_stock)}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.maximum_stock)}</td></tr>)}</tbody></table>
+              <tbody className="bg-white divide-y divide-gray-100">{filteredRows.length === 0 ? <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-black">No raw materials found.</td></tr> : pagedRows.map((r, i) => <tr key={r.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}><td className="px-4 py-3 text-sm text-black">{r.code || '-'}</td><td className="px-4 py-3 text-sm text-black font-medium">{r.name || '-'}</td><td className="px-4 py-3 text-sm text-black">{r.category || '-'}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.current_stock)}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.minimum_stock)}</td><td className="px-4 py-3 text-sm text-black text-right">{qty(r.maximum_stock)}</td></tr>)}</tbody></table>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-black">
+              Showing {filteredRows.length === 0 ? 0 : pageStart + 1} to {Math.min(pageEnd, filteredRows.length)} of {filteredRows.length} records
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-sm text-black">Rows:</label>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-black hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-black">Page {currentPage} of {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-black hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
       </main>

@@ -460,13 +460,13 @@ export default function BalanceSheetReportPage() {
       </div>
 
       <nav className="bg-white/82 backdrop-blur-lg shadow border-b border-white/50 relative z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <div className="w-full px-3 sm:px-4 lg:px-6 h-16 flex items-center justify-between">
           <Link href="/dashboard/reports" className="text-sm font-semibold text-slate-700 hover:text-blue-700 transition-colors">← Back to Reports</Link>
           <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold tracking-wide uppercase text-blue-700">Accounting</span>
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6 relative z-10">
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6 relative z-10">
         <section className="rounded-3xl border border-white/70 bg-white/80 backdrop-blur-lg p-6 md:p-7 shadow-2xl">
           <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
             <div>

@@ -18,8 +18,33 @@ class LoadItemController extends Controller
     public function index(Request $request): JsonResponse
     {
         $loadId = $request->query('load_id');
-        if (!$loadId) {
+        $loadIdsParam = $request->query('load_ids');
+
+        if (!$loadId && !$loadIdsParam) {
             return response()->json(['message' => 'Load ID is required'], 400);
+        }
+
+        if ($loadIdsParam) {
+            $loadIds = is_array($loadIdsParam)
+                ? $loadIdsParam
+                : explode(',', (string) $loadIdsParam);
+
+            $normalizedIds = collect($loadIds)
+                ->map(function ($id) {
+                    return (int) trim((string) $id);
+                })
+                ->filter(function ($id) {
+                    return $id > 0;
+                })
+                ->unique()
+                ->values();
+
+            if ($normalizedIds->isEmpty()) {
+                return response()->json([]);
+            }
+
+            $loadItems = LoadItem::whereIn('load_id', $normalizedIds->all())->get();
+            return response()->json($loadItems);
         }
 
         $loadItems = LoadItem::where('load_id', $loadId)->get();
@@ -165,7 +190,7 @@ class LoadItemController extends Controller
             // Return quantity back to inventory
             $inventoryItem = InventoryItem::where('code', $loadItem->product_code)->first();
             if ($inventoryItem) {
-                $inventoryItem->increment('current_stock', $loadItem->qty);
+                $inventoryItem->increment('current_stock', (float) $loadItem->qty);
             }
 
             $loadItem->delete();

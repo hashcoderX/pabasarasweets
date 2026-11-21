@@ -24,6 +24,13 @@ type InvoiceRow = {
   customer?: CustomerInfo | null;
   invoice_date?: string;
   load_id?: number | null;
+  items_count?: number;
+  items?: Array<{
+    id?: number;
+    quantity?: number;
+    qty?: number;
+    sold_qty?: number;
+  }>;
   total?: number;
   paid_amount?: number;
   status?: InvoiceStatus;
@@ -31,10 +38,13 @@ type InvoiceRow = {
 
 type PaymentRow = {
   id: number;
+  payment_number?: string;
   distribution_invoice_id?: number | null;
   amount?: number;
   payment_date?: string;
   status?: string;
+  payment_method?: string | null;
+  notes?: string | null;
 };
 
 type LoadRow = {
@@ -112,6 +122,29 @@ const getLoadRouteEntries = (load?: LoadRow | null) => {
   return Array.from(map.values());
 };
 
+const isOutstandingCollectionNote = (note?: string | null) => {
+  const text = String(note || '').toLowerCase();
+  return text.includes('outstanding settlement') || text.includes('outstanding collection');
+};
+
+const toPaymentGroupKey = (paymentNumber?: string | null) => {
+  const raw = String(paymentNumber || '').trim();
+  if (!raw) return '';
+  const parts = raw.split('-');
+  if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1])) {
+    return parts.slice(0, -1).join('-');
+  }
+  return raw;
+};
+
+const normalizeCollectionMethod = (value?: string | null) => {
+  const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, '_');
+  if (normalized === 'cash') return 'cash' as const;
+  if (normalized === 'check' || normalized === 'cheque') return 'check' as const;
+  if (normalized.includes('bank') || normalized.includes('transfer')) return 'bank_transfer' as const;
+  return 'other' as const;
+};
+
 type PaginatedExtractResult<T> = {
   rows: T[];
   nextPageUrl: string | null;
@@ -142,7 +175,7 @@ type SalesRowsCache = {
   loads: LoadRow[];
 };
 
-const SALES_ROWS_CACHE_KEY = 'distribution-sales-report:rows:v1';
+const SALES_ROWS_CACHE_KEY = 'distribution-sales-report:rows:v4';
 const SALES_ROWS_CACHE_TTL_MS = 5 * 60 * 1000;
 const SALES_ROWS_CACHE_MAX_CHARS = 2_000_000;
 const SALES_ROWS_CACHE_LIMITS = {
@@ -293,6 +326,15 @@ export default function DistributionSalesReportPage() {
           : null,
         invoice_date: invoice.invoice_date,
         load_id: invoice.load_id,
+        items_count: invoice.items_count,
+        items: Array.isArray(invoice.items)
+          ? invoice.items.map((item) => ({
+              id: item.id,
+              quantity: item.quantity,
+              qty: item.qty,
+              sold_qty: item.sold_qty,
+            }))
+          : undefined,
         total: invoice.total,
         paid_amount: invoice.paid_amount,
         status: invoice.status,
@@ -300,10 +342,13 @@ export default function DistributionSalesReportPage() {
 
       const compactPayments: PaymentRow[] = rows.payments.map((payment) => ({
         id: payment.id,
+        payment_number: payment.payment_number,
         distribution_invoice_id: payment.distribution_invoice_id,
         amount: payment.amount,
         payment_date: payment.payment_date,
         status: payment.status,
+        payment_method: payment.payment_method,
+        notes: payment.notes,
       }));
 
       const compactLoads: LoadRow[] = rows.loads.map((load) => ({
@@ -824,15 +869,232 @@ export default function DistributionSalesReportPage() {
     const grossSales = filteredRows.reduce((sum, row) => sum + row.salesAmount, 0);
     const totalCollected = filteredRows.reduce((sum, row) => sum + row.collectedAmount, 0);
     const totalOutstanding = filteredRows.reduce((sum, row) => sum + row.outstandingAmount, 0);
+    const visibleInvoiceIdSet = new Set(filteredRows.map((row) => Number(row.id)).filter((id) => id > 0));
+
+    const fromDateFilter = fromDate ? new Date(fromDate) : null;
+    const toDateFilter = toDate ? new Date(toDate + 'T23:59:59') : null;
+
+    const outstandingGroupKeys = new Set(
+      payments
+        .filter((payment) => {
+          const paymentStatus = String(payment.status || '').trim().toLowerCase();
+          if (paymentStatus === 'closed' || paymentStatus === 'bounced' || paymentStatus === 'pending') return false;
+          if (!isOutstandingCollectionNote(payment.notes)) return false;
+          const groupKey = toPaymentGroupKey(payment.payment_number);
+          return Boolean(groupKey);
+        })
+        .map((payment) => toPaymentGroupKey(payment.payment_number))
+    );
+
+    const outstandingCollected = payments.reduce((sum, payment) => {
+      const paymentStatus = String(payment.status || '').trim().toLowerCase();
+      if (paymentStatus === 'closed' || paymentStatus === 'bounced' || paymentStatus === 'pending') return sum;
+
+      const groupKey = toPaymentGroupKey(payment.payment_number);
+      const isOutstandingPayment = isOutstandingCollectionNote(payment.notes) || (groupKey && outstandingGroupKeys.has(groupKey));
+      if (!isOutstandingPayment) return sum;
+
+      const invoiceId = Number(payment.distribution_invoice_id || 0);
+      if (!invoiceId || !visibleInvoiceIdSet.has(invoiceId)) return sum;
+
+      const amount = Number(payment.amount || 0);
+      if (amount <= 0) return sum;
+
+      return sum + amount;
+    }, 0);
+
+    const outstandingCollectedByFilterDate = payments.reduce((sum, payment) => {
+      const paymentStatus = String(payment.status || '').trim().toLowerCase();
+      if (paymentStatus === 'closed' || paymentStatus === 'bounced' || paymentStatus === 'pending') return sum;
+
+      const groupKey = toPaymentGroupKey(payment.payment_number);
+      const isOutstandingPayment = isOutstandingCollectionNote(payment.notes) || (groupKey && outstandingGroupKeys.has(groupKey));
+      if (!isOutstandingPayment) return sum;
+
+      const amount = Number(payment.amount || 0);
+      if (amount <= 0) return sum;
+
+      const paymentDate = payment.payment_date ? new Date(payment.payment_date) : null;
+      if (!paymentDate || Number.isNaN(paymentDate.getTime())) return sum;
+
+      if (fromDateFilter && !Number.isNaN(fromDateFilter.getTime()) && paymentDate < fromDateFilter) return sum;
+      if (toDateFilter && !Number.isNaN(toDateFilter.getTime()) && paymentDate > toDateFilter) return sum;
+
+      return sum + amount;
+    }, 0);
+
+    const filteredInvoiceIdSet = new Set(filteredRows.map((row) => Number(row.id)).filter((id) => id > 0));
+
+    const soldProductCount = invoices.reduce((sum, invoice) => {
+      const invoiceId = Number(invoice.id || 0);
+      if (!invoiceId || !filteredInvoiceIdSet.has(invoiceId)) return sum;
+
+      const itemsCount = Number(invoice.items_count || 0);
+      if (itemsCount > 0) return sum + itemsCount;
+
+      if (Array.isArray(invoice.items)) {
+        return sum + invoice.items.length;
+      }
+
+      return sum;
+    }, 0);
 
     return {
       totalInvoices,
       grossSales,
       totalCollected,
       totalOutstanding,
+      outstandingCollected,
+      outstandingCollectedByFilterDate,
+      soldProductCount,
       averageInvoice: totalInvoices > 0 ? grossSales / totalInvoices : 0,
     };
-  }, [filteredRows]);
+  }, [filteredRows, payments, invoices, fromDate, toDate]);
+
+  const soldProductDetailRows = useMemo(() => {
+    const invoiceById = new Map<number, InvoiceRow>();
+    invoices.forEach((invoice) => {
+      const invoiceId = Number(invoice.id || 0);
+      if (invoiceId > 0) {
+        invoiceById.set(invoiceId, invoice);
+      }
+    });
+
+    return filteredRows.map((row) => {
+      const invoice = invoiceById.get(Number(row.id));
+      const itemLines = Array.isArray(invoice?.items) ? invoice.items.length : 0;
+      const soldProductLines = Number(invoice?.items_count || 0) || itemLines;
+
+      const soldUnitQty = Array.isArray(invoice?.items)
+        ? invoice.items.reduce((sum, item) => {
+            const qty = Number(item?.quantity ?? item?.qty ?? item?.sold_qty ?? 0);
+            return sum + (Number.isFinite(qty) ? qty : 0);
+          }, 0)
+        : 0;
+
+      return {
+        rowKey: `${row.rowKey}-sold-products`,
+        invoiceNumber: row.invoiceNumber,
+        invoiceDate: row.invoiceDate,
+        customerName: `${row.customerCode} - ${row.customerName}`,
+        deliveryNo: row.loadNumber,
+        soldProductLines,
+        soldUnitQty,
+      };
+    });
+  }, [filteredRows, invoices]);
+
+  const collectionDetailRows = useMemo(() => {
+    const visibleRowsByInvoiceId = new Map<number, SalesViewRow>();
+    filteredRows.forEach((row) => {
+      const invoiceId = Number(row.id || 0);
+      if (invoiceId > 0) {
+        visibleRowsByInvoiceId.set(invoiceId, row);
+      }
+    });
+
+    const fromDateFilter = fromDate ? new Date(fromDate) : null;
+    const toDateFilter = toDate ? new Date(toDate + 'T23:59:59') : null;
+
+    return payments
+      .filter((payment) => {
+        const paymentStatus = String(payment.status || '').trim().toLowerCase();
+        if (paymentStatus === 'closed' || paymentStatus === 'bounced' || paymentStatus === 'pending') return false;
+
+        const invoiceId = Number(payment.distribution_invoice_id || 0);
+        if (!invoiceId || !visibleRowsByInvoiceId.has(invoiceId)) return false;
+
+        const amount = Number(payment.amount || 0);
+        if (amount <= 0) return false;
+
+        const paymentDate = payment.payment_date ? new Date(payment.payment_date) : null;
+        if (!paymentDate || Number.isNaN(paymentDate.getTime())) return false;
+
+        if (fromDateFilter && !Number.isNaN(fromDateFilter.getTime()) && paymentDate < fromDateFilter) return false;
+        if (toDateFilter && !Number.isNaN(toDateFilter.getTime()) && paymentDate > toDateFilter) return false;
+
+        return true;
+      })
+      .map((payment) => {
+        const invoiceId = Number(payment.distribution_invoice_id || 0);
+        const row = visibleRowsByInvoiceId.get(invoiceId);
+
+        return {
+          id: Number(payment.id || 0),
+          paymentNumber: String(payment.payment_number || `PAY-${payment.id}`),
+          paymentDate: String(payment.payment_date || ''),
+          method: normalizeCollectionMethod(payment.payment_method),
+          methodLabel: String(payment.payment_method || '').replace(/_/g, ' ') || '-',
+          invoiceNumber: row?.invoiceNumber || `INV-${invoiceId}`,
+          customerName: row ? `${row.customerCode} - ${row.customerName}` : '-',
+          deliveryNo: row?.loadNumber || '-',
+          amount: Number(payment.amount || 0),
+          note: String(payment.notes || '-'),
+        };
+      })
+      .sort((a, b) => {
+        const aTime = a.paymentDate ? new Date(a.paymentDate).getTime() : 0;
+        const bTime = b.paymentDate ? new Date(b.paymentDate).getTime() : 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return b.id - a.id;
+      });
+  }, [payments, filteredRows, fromDate, toDate]);
+
+  const cashCollectionRows = useMemo(
+    () => collectionDetailRows.filter((row) => row.method === 'cash'),
+    [collectionDetailRows]
+  );
+
+  const checkCollectionRows = useMemo(
+    () => collectionDetailRows.filter((row) => row.method === 'check'),
+    [collectionDetailRows]
+  );
+
+  const bankTransferCollectionRows = useMemo(
+    () => collectionDetailRows.filter((row) => row.method === 'bank_transfer'),
+    [collectionDetailRows]
+  );
+
+  const collectionMethodChart = useMemo(() => {
+    const cashTotal = cashCollectionRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    const checkTotal = checkCollectionRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    const bankTotal = bankTransferCollectionRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    const total = cashTotal + checkTotal + bankTotal;
+
+    const baseSegments = [
+      { label: 'Cash', value: cashTotal, color: '#10b981' },
+      { label: 'Check', value: checkTotal, color: '#f59e0b' },
+      { label: 'Bank Transfer', value: bankTotal, color: '#06b6d4' },
+    ];
+
+    const segments = baseSegments.map((segment) => ({
+      ...segment,
+      percent: total > 0 ? (segment.value / total) * 100 : 0,
+    }));
+
+    if (total <= 0) {
+      return {
+        total,
+        segments,
+        gradient: 'conic-gradient(#e2e8f0 0deg 360deg)',
+      };
+    }
+
+    let angleCursor = 0;
+    const gradientStops = segments.map((segment) => {
+      const start = angleCursor;
+      const sweep = (segment.value / total) * 360;
+      const end = start + sweep;
+      angleCursor = end;
+      return `${segment.color} ${start}deg ${end}deg`;
+    });
+
+    return {
+      total,
+      segments,
+      gradient: `conic-gradient(${gradientStops.join(', ')})`,
+    };
+  }, [cashCollectionRows, checkCollectionRows, bankTransferCollectionRows]);
 
   const formatMoney = (value?: number) => {
     return Number(value || 0).toLocaleString(undefined, {
@@ -946,7 +1208,7 @@ export default function DistributionSalesReportPage() {
       didDrawPage: () => {
         doc.setFontSize(9);
         doc.text(
-          `Invoices: ${summary.totalInvoices} | Gross Sales: ${formatMoney(summary.grossSales)} | Collected: ${formatMoney(summary.totalCollected)} | Outstanding: ${formatMoney(summary.totalOutstanding)}`,
+          `Invoices: ${summary.totalInvoices} | Sold Products: ${summary.soldProductCount} | Gross Sales: ${formatMoney(summary.grossSales)} | Collected: ${formatMoney(summary.totalCollected)} | Outstanding Collected (All): ${formatMoney(summary.outstandingCollected)} | Outstanding Collected (Filter Date): ${formatMoney(summary.outstandingCollectedByFilterDate)} | Outstanding: ${formatMoney(summary.totalOutstanding)}`,
           20,
           doc.internal.pageSize.getHeight() - 20
         );
@@ -984,7 +1246,7 @@ export default function DistributionSalesReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-cyan-700 transition-colors duration-300">
@@ -1002,7 +1264,7 @@ export default function DistributionSalesReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Sales <span className="bg-gradient-to-r from-cyan-700 to-teal-700 bg-clip-text text-transparent">Report</span>
@@ -1016,24 +1278,30 @@ export default function DistributionSalesReportPage() {
           </div>
         )}
 
-        <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-10 gap-3">
+        <section className="mb-6 overflow-hidden rounded-3xl border border-cyan-100/70 bg-white/90 shadow-[0_20px_50px_-24px_rgba(8,47,73,0.45)] backdrop-blur-lg">
+          <div className="border-b border-cyan-100/70 bg-gradient-to-r from-cyan-50 via-sky-50 to-teal-50 px-4 py-3 md:px-5">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-cyan-700">Filter Sales Data</p>
+            <p className="mt-1 text-xs text-slate-600">Use filters to narrow invoices, route flow, and collection performance.</p>
+          </div>
+
+          <div className="p-4 md:p-5">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-10">
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Search</label>
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Invoice, customer, delivery, route"
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Status</label>
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as 'all' | InvoiceStatus)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 <option value="all">All</option>
                 <option value="pending">Pending</option>
@@ -1042,11 +1310,11 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Customer</label>
               <select
                 value={customerFilter}
                 onChange={(e) => setCustomerFilter(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 <option value="all">All</option>
                 {customerOptions.map((customerName) => (
@@ -1055,11 +1323,11 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Delivery</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Delivery</label>
               <select
                 value={loadFilter}
                 onChange={(e) => setLoadFilter(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 <option value="all">All</option>
                 {loadOptions.map((loadOption) => (
@@ -1068,11 +1336,11 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Route (Delivery No)</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Route (Delivery No)</label>
               <select
                 value={routeFilter}
                 onChange={(e) => setRouteFilter(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 <option value="all">All</option>
                 {routeOptions.map((routeOption) => (
@@ -1081,20 +1349,29 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">From Date</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">From Date</label>
               <input
                 type="date"
                 value={fromDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">View Scope</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">To Date</label>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">View Scope</label>
               <select
                 value={viewScope}
                 onChange={(e) => setViewScope(e.target.value as 'all' | 'my' | 'team')}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 {isAdminUser && <option value="all">All Sales Refs</option>}
                 {currentEmployeeId > 0 && <option value="my">My Sales</option>}
@@ -1103,11 +1380,11 @@ export default function DistributionSalesReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Sales Ref</label>
+              <label className="mb-1 block text-xs font-semibold text-slate-700">Sales Ref</label>
               <select
                 value={salesRefFilter}
                 onChange={(e) => setSalesRefFilter(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
               >
                 <option value="all">All</option>
                 {salesRefOptions.map((salesRef) => (
@@ -1115,63 +1392,83 @@ export default function DistributionSalesReportPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">To Date</label>
-              <input
-                type="date"
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
-              />
-            </div>
-            <div className="md:col-span-10 flex justify-end">
+            <div className="md:col-span-10 mt-1 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap gap-2">
+                <button onClick={viewPdf} className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100">
+                  View PDF
+                </button>
+                <button onClick={downloadPdf} className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100">
+                  Download PDF
+                </button>
+                <button onClick={exportCsv} className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100">
+                  Download CSV (Excel)
+                </button>
+              </div>
               <button
                 type="button"
                 onClick={() => fetchRows()}
                 disabled={loading}
-                className="px-4 py-2 bg-gradient-to-r from-cyan-700 to-teal-700 border border-transparent rounded-md text-sm font-semibold text-white hover:from-cyan-800 hover:to-teal-800 disabled:opacity-60"
+                className="rounded-xl border border-transparent bg-gradient-to-r from-cyan-700 to-teal-700 px-5 py-2.5 text-sm font-semibold text-white shadow-md transition hover:-translate-y-0.5 hover:from-cyan-800 hover:to-teal-800 disabled:opacity-60"
               >
                 {loading ? 'Loading...' : 'Refresh Data'}
               </button>
             </div>
           </div>
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button onClick={viewPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">
-              View PDF
-            </button>
-            <button onClick={downloadPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100">
-              Download PDF
-            </button>
-            <button onClick={exportCsv} className="px-4 py-2 rounded-md text-sm font-medium border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
-              Download CSV (Excel)
-            </button>
           </div>
         </section>
 
-        <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-teal-50 flex flex-wrap gap-3 text-sm text-black">
-            <span>Invoices: <strong>{summary.totalInvoices}</strong></span>
-            <span>Gross Sales: <strong>{formatMoney(summary.grossSales)}</strong></span>
-            <span>Collected: <strong>{formatMoney(summary.totalCollected)}</strong></span>
-            <span>Outstanding: <strong>{formatMoney(summary.totalOutstanding)}</strong></span>
-            <span>Avg Invoice: <strong>{formatMoney(summary.averageInvoice)}</strong></span>
+        <section className="overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-[0_22px_60px_-28px_rgba(8,47,73,0.5)] backdrop-blur-lg">
+          <div className="border-b border-cyan-100/70 bg-gradient-to-r from-cyan-50 via-sky-50 to-teal-50 px-4 py-4 md:px-5">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-8">
+              <div className="rounded-xl border border-cyan-100 bg-white/80 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Invoices</p>
+                <p className="mt-1 text-lg font-bold text-slate-900">{summary.totalInvoices}</p>
+              </div>
+              <div className="rounded-xl border border-violet-100 bg-violet-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-violet-700">Sold Product Count</p>
+                <p className="mt-1 text-lg font-bold text-violet-800">{summary.soldProductCount}</p>
+              </div>
+              <div className="rounded-xl border border-cyan-100 bg-white/80 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Gross Sales</p>
+                <p className="mt-1 text-lg font-bold text-slate-900">{formatMoney(summary.grossSales)}</p>
+              </div>
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700">Collected</p>
+                <p className="mt-1 text-lg font-bold text-emerald-800">{formatMoney(summary.totalCollected)}</p>
+              </div>
+              <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-amber-700">Outstanding Collected</p>
+                <p className="mt-1 text-lg font-bold text-amber-800">{formatMoney(summary.outstandingCollected)}</p>
+              </div>
+              <div className="rounded-xl border border-orange-100 bg-orange-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-orange-700">Outstanding Collected (Filter Date)</p>
+                <p className="mt-1 text-lg font-bold text-orange-800">{formatMoney(summary.outstandingCollectedByFilterDate)}</p>
+              </div>
+              <div className="rounded-xl border border-rose-100 bg-rose-50/70 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-rose-700">Outstanding</p>
+                <p className="mt-1 text-lg font-bold text-rose-800">{formatMoney(summary.totalOutstanding)}</p>
+              </div>
+              <div className="rounded-xl border border-cyan-100 bg-white/80 px-3 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Avg Invoice</p>
+                <p className="mt-1 text-lg font-bold text-slate-900">{formatMoney(summary.averageInvoice)}</p>
+              </div>
+            </div>
           </div>
 
           {teamPerformanceRows.length > 0 && (
-            <div className="border-b border-gray-100 bg-white px-4 py-4">
-              <h3 className="mb-3 text-sm font-semibold uppercase tracking-[0.12em] text-gray-600">Team Performance</h3>
+            <div className="border-b border-slate-100 bg-white px-4 py-4 md:px-5">
+              <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-600">Team Performance</h3>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 {teamPerformanceRows.map((member) => {
                   const progress = member.sales > 0 ? Math.min(100, (member.collected / member.sales) * 100) : 0;
                   return (
-                    <div key={member.id} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    <div key={member.id} className="rounded-xl border border-slate-200 bg-gradient-to-r from-slate-50 to-cyan-50/40 p-3">
                       <div className="mb-1 flex items-center justify-between">
-                        <p className="text-sm font-semibold text-gray-900">{member.name}</p>
-                        <p className="text-xs text-gray-600">Invoices: {member.invoices}</p>
+                        <p className="text-sm font-semibold text-slate-900">{member.name}</p>
+                        <p className="text-xs text-slate-600">Invoices: {member.invoices}</p>
                       </div>
-                      <p className="text-xs text-gray-700">Sales {formatMoney(member.sales)} | Collected {formatMoney(member.collected)} | Outstanding {formatMoney(member.outstanding)}</p>
-                      <div className="mt-2 h-2 rounded-full bg-gray-200">
+                      <p className="text-xs text-slate-700">Sales {formatMoney(member.sales)} | Collected {formatMoney(member.collected)} | Outstanding {formatMoney(member.outstanding)}</p>
+                      <div className="mt-2 h-2 rounded-full bg-slate-200/80">
                         <div className="h-2 rounded-full bg-gradient-to-r from-cyan-500 to-teal-500" style={{ width: `${progress}%` }} />
                       </div>
                     </div>
@@ -1183,42 +1480,42 @@ export default function DistributionSalesReportPage() {
 
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+              <thead className="bg-slate-50/95">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Invoice #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Customer</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Delivery</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Route</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Sales</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Collected</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Outstanding</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Invoice #</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Date</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Customer</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Delivery</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Route</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Status</th>
+                  <th className="px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Sales</th>
+                  <th className="px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Collected</th>
+                  <th className="px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Outstanding</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-100">
+              <tbody className="divide-y divide-slate-100 bg-white">
                 {filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-10 text-center text-sm text-gray-500">No sales records found.</td>
+                    <td colSpan={9} className="px-4 py-12 text-center text-sm text-slate-500">No sales records found.</td>
                   </tr>
                 ) : (
                   paginatedRows.map((row, idx) => {
                     const absoluteIndex = ((currentPage - 1) * rowsPerPage) + idx;
                     return (
-                    <tr key={row.rowKey} className={absoluteIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.invoiceNumber}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.invoiceDate)}</td>
-                      <td className="px-4 py-3 text-sm text-gray-900 font-medium">{row.customerCode} - {row.customerName}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.loadNumber}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.routeName}</td>
+                    <tr key={row.rowKey} className={`${absoluteIndex % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'} transition hover:bg-cyan-50/50`}>
+                      <td className="px-4 py-3 text-sm text-slate-700">{row.invoiceNumber}</td>
+                      <td className="px-4 py-3 text-sm text-slate-700">{toDateLabel(row.invoiceDate)}</td>
+                      <td className="px-4 py-3 text-sm font-medium text-slate-900">{row.customerCode} - {row.customerName}</td>
+                      <td className="px-4 py-3 text-sm text-slate-700">{row.loadNumber}</td>
+                      <td className="px-4 py-3 text-sm text-slate-700">{row.routeName}</td>
                       <td className="px-4 py-3 text-sm">
                         <span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${statusBadgeClass(row.status)}`}>
                           {row.status.toUpperCase()}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">{formatMoney(row.salesAmount)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.collectedAmount)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.outstandingAmount)}</td>
+                      <td className="px-4 py-3 text-right text-sm font-semibold text-slate-900">{formatMoney(row.salesAmount)}</td>
+                      <td className="px-4 py-3 text-right text-sm text-emerald-700">{formatMoney(row.collectedAmount)}</td>
+                      <td className="px-4 py-3 text-right text-sm text-rose-700">{formatMoney(row.outstandingAmount)}</td>
                     </tr>
                     );
                   })
@@ -1227,8 +1524,8 @@ export default function DistributionSalesReportPage() {
             </table>
           </div>
           {filteredRows.length > 0 && (
-            <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
-              <div className="text-sm text-gray-600">
+            <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50/50 px-4 py-3 md:flex-row md:items-center md:justify-between">
+              <div className="text-sm text-slate-600">
                 {(() => {
                   const startRow = (currentPage - 1) * rowsPerPage + 1;
                   const endRow = Math.min(filteredRows.length, currentPage * rowsPerPage);
@@ -1236,12 +1533,12 @@ export default function DistributionSalesReportPage() {
                 })()}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <label className="text-sm text-gray-600" htmlFor="sales-rows-per-page">Rows</label>
+                <label className="text-sm text-slate-600" htmlFor="sales-rows-per-page">Rows</label>
                 <select
                   id="sales-rows-per-page"
                   value={rowsPerPage}
                   onChange={(e) => setRowsPerPage(Number(e.target.value))}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+                  className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900"
                 >
                   <option value={10}>10</option>
                   <option value={25}>25</option>
@@ -1252,24 +1549,185 @@ export default function DistributionSalesReportPage() {
                   type="button"
                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
                   disabled={currentPage <= 1}
-                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Previous
                 </button>
-                <span className="text-sm text-gray-700">
+                <span className="text-sm text-slate-700">
                   Page {currentPage} of {totalPages}
                 </span>
                 <button
                   type="button"
                   onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
                   disabled={currentPage >= totalPages}
-                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Next
                 </button>
               </div>
             </div>
           )}
+        </section>
+
+        <section className="mt-6 overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-[0_20px_50px_-24px_rgba(8,47,73,0.45)] backdrop-blur-lg">
+          <div className="border-b border-violet-100/70 bg-gradient-to-r from-violet-50 via-fuchsia-50 to-cyan-50 px-4 py-3 md:px-5">
+            <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-700">Sold Product Count Details</h3>
+            <p className="mt-1 text-xs text-slate-600">Detailed sold product lines and unit quantities for the currently filtered invoices.</p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200">
+              <thead className="bg-slate-50/95">
+                <tr>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Invoice #</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Date</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Customer</th>
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Delivery</th>
+                  <th className="px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Sold Product Lines</th>
+                  <th className="px-4 py-3 text-right text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">Sold Unit Qty</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 bg-white">
+                {soldProductDetailRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">No sold product details found for current filters.</td>
+                  </tr>
+                ) : (
+                  soldProductDetailRows.map((row, idx) => (
+                    <tr key={row.rowKey} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'} transition hover:bg-violet-50/40`}>
+                      <td className="px-4 py-3 text-sm text-slate-700">{row.invoiceNumber}</td>
+                      <td className="px-4 py-3 text-sm text-slate-700">{toDateLabel(row.invoiceDate)}</td>
+                      <td className="px-4 py-3 text-sm font-medium text-slate-900">{row.customerName}</td>
+                      <td className="px-4 py-3 text-sm text-slate-700">{row.deliveryNo}</td>
+                      <td className="px-4 py-3 text-right text-sm font-semibold text-violet-800">{row.soldProductLines}</td>
+                      <td className="px-4 py-3 text-right text-sm font-semibold text-cyan-800">{row.soldUnitQty.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              {soldProductDetailRows.length > 0 && (
+                <tfoot className="bg-violet-50/60">
+                  <tr>
+                    <td colSpan={4} className="px-4 py-3 text-right text-sm font-semibold uppercase tracking-[0.08em] text-violet-700">Total</td>
+                    <td className="px-4 py-3 text-right text-sm font-bold text-violet-800">
+                      {soldProductDetailRows.reduce((sum, row) => sum + Number(row.soldProductLines || 0), 0).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-right text-sm font-bold text-cyan-800">
+                      {soldProductDetailRows
+                        .reduce((sum, row) => sum + Number(row.soldUnitQty || 0), 0)
+                        .toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
+            </table>
+          </div>
+        </section>
+
+        <section className="mt-6 overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-[0_20px_50px_-24px_rgba(8,47,73,0.45)] backdrop-blur-lg">
+          <div className="border-b border-emerald-100/70 bg-gradient-to-r from-emerald-50 via-cyan-50 to-sky-50 px-4 py-3 md:px-5">
+            <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Collection Method Details</h3>
+            <p className="mt-1 text-xs text-slate-600">Cash, check, and bank transfer collections within current filters and date range.</p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-3 md:p-5">
+            {[
+              { title: 'Cash Collection Details', rows: cashCollectionRows, border: 'border-emerald-200', head: 'text-emerald-700', total: 'text-emerald-800' },
+              { title: 'Check Collection Details', rows: checkCollectionRows, border: 'border-amber-200', head: 'text-amber-700', total: 'text-amber-800' },
+              { title: 'Bank Transfer Collection Details', rows: bankTransferCollectionRows, border: 'border-cyan-200', head: 'text-cyan-700', total: 'text-cyan-800' },
+            ].map((section) => (
+              <div key={section.title} className={`overflow-hidden rounded-2xl border ${section.border} bg-white`}>
+                <div className="border-b border-slate-100 px-3 py-2">
+                  <p className={`text-[11px] font-semibold uppercase tracking-[0.12em] ${section.head}`}>{section.title}</p>
+                  <p className="mt-1 text-xs text-slate-500">Entries: {section.rows.length}</p>
+                </div>
+
+                <div className="max-h-80 overflow-auto">
+                  <table className="min-w-full divide-y divide-slate-100">
+                    <thead className="bg-slate-50/80">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">Date</th>
+                        <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">Payment #</th>
+                        <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {section.rows.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-3 py-6 text-center text-xs text-slate-500">No records</td>
+                        </tr>
+                      ) : (
+                        section.rows.map((row, idx) => (
+                          <tr key={`${section.title}-${row.id}-${row.paymentNumber}-${row.paymentDate}-${row.amount}-${idx}`} className="transition hover:bg-slate-50/70">
+                            <td className="px-3 py-2 text-xs text-slate-700">{toDateLabel(row.paymentDate)}</td>
+                            <td className="px-3 py-2 text-xs text-slate-700">
+                              <p className="font-medium text-slate-900">{row.paymentNumber}</p>
+                              <p className="mt-0.5 text-[10px] text-slate-500">{row.invoiceNumber}</p>
+                            </td>
+                            <td className="px-3 py-2 text-right text-xs font-semibold text-slate-900">{formatMoney(row.amount)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                    {section.rows.length > 0 && (
+                      <tfoot className="bg-slate-50/90">
+                        <tr>
+                          <td colSpan={2} className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">Total</td>
+                          <td className={`px-3 py-2 text-right text-xs font-bold ${section.total}`}>
+                            {formatMoney(section.rows.reduce((sum, row) => sum + Number(row.amount || 0), 0))}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="mt-6 overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-[0_20px_50px_-24px_rgba(8,47,73,0.45)] backdrop-blur-lg">
+          <div className="border-b border-sky-100/70 bg-gradient-to-r from-sky-50 via-cyan-50 to-emerald-50 px-4 py-3 md:px-5">
+            <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-sky-700">Collection Mix Pie Chart</h3>
+            <p className="mt-1 text-xs text-slate-600">Visual split of cash, check, and bank transfer collections for the current filtered view.</p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 p-4 md:grid-cols-[280px_1fr] md:p-5">
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-200 bg-white p-4">
+              <div
+                className="relative h-44 w-44 rounded-full border border-slate-200"
+                style={{ background: collectionMethodChart.gradient }}
+                aria-label="Collection method pie chart"
+              >
+                <div className="absolute left-1/2 top-1/2 h-20 w-20 -translate-x-1/2 -translate-y-1/2 rounded-full border border-slate-200 bg-white shadow-sm" />
+              </div>
+              <p className="mt-3 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Total Collection</p>
+              <p className="text-lg font-bold text-slate-900">{formatMoney(collectionMethodChart.total)}</p>
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="space-y-3">
+                {collectionMethodChart.segments.map((segment) => (
+                  <div key={segment.label} className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-block h-3 w-3 rounded-full" style={{ backgroundColor: segment.color }} />
+                        <p className="text-sm font-semibold text-slate-800">{segment.label}</p>
+                      </div>
+                      <p className="text-sm font-semibold text-slate-900">{formatMoney(segment.value)}</p>
+                    </div>
+                    <div className="mt-2 h-2 rounded-full bg-slate-200">
+                      <div
+                        className="h-2 rounded-full"
+                        style={{ width: `${Math.max(0, Math.min(100, segment.percent))}%`, backgroundColor: segment.color }}
+                      />
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">{segment.percent.toFixed(1)}% of total collection</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </section>
       </main>
     </div>

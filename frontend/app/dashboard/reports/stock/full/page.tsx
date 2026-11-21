@@ -40,6 +40,8 @@ export default function FullStockReportPage() {
   const [typeFilter, setTypeFilter] = useState<'all' | StockType>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | StockStatus>('all');
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'out'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
@@ -168,6 +170,21 @@ export default function FullStockReportPage() {
     return { total, raw, finished, low, out };
   }, [filteredRows]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  const pageStart = (currentPage - 1) * rowsPerPage;
+  const pageEnd = pageStart + rowsPerPage;
+  const pagedRows = filteredRows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, typeFilter, statusFilter, stockFilter, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const formatQty = (value?: number) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const toType = (value?: string) => (value ? value.replace('_', ' ').toUpperCase() : '-');
 
@@ -234,13 +251,13 @@ export default function FullStockReportPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-red-50 relative overflow-hidden">
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <div className="w-full px-3 sm:px-4 lg:px-6 h-16 flex items-center justify-between">
           <Link href="/dashboard/reports" className="flex items-center space-x-2 text-black hover:text-orange-600 transition-colors"><span>Back to Reports</span></Link>
           <span className="text-sm text-black hidden md:block">Full Stock Report Ready</span>
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-black mb-2">Full <span className="bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent">Stock Report</span></h1>
           <p className="text-black">Overall stock report by type, category, and stock health.</p>
@@ -297,7 +314,7 @@ export default function FullStockReportPage() {
                 <th className="px-4 py-3 text-left text-xs font-medium text-black uppercase">Status</th>
               </tr></thead>
               <tbody className="bg-white divide-y divide-gray-100">
-                {filteredRows.length === 0 ? <tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-black">No stock items found.</td></tr> : filteredRows.map((row, idx) => (
+                {filteredRows.length === 0 ? <tr><td colSpan={8} className="px-4 py-10 text-center text-sm text-black">No stock items found.</td></tr> : pagedRows.map((row, idx) => (
                   <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                     <td className="px-4 py-3 text-sm text-black">{row.code || '-'}</td>
                     <td className="px-4 py-3 text-sm text-black font-medium">{row.name || '-'}</td>
@@ -311,6 +328,46 @@ export default function FullStockReportPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-black">
+              Showing {filteredRows.length === 0 ? 0 : pageStart + 1} to {Math.min(pageEnd, filteredRows.length)} of {filteredRows.length} records
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-sm text-black">Rows:</label>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-black hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-black">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-black hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
       </main>

@@ -573,7 +573,7 @@ export default function CashBookPage() {
   return (
     <div className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.2),_transparent_24%),radial-gradient(circle_at_top_right,_rgba(16,185,129,0.16),_transparent_30%),linear-gradient(180deg,_#f0f9ff_0%,_#ecfeff_48%,_#f0fdfa_100%)]">
       <nav className="relative z-10 bg-white/75 backdrop-blur-xl shadow-lg border-b border-white/30">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <Link href="/dashboard/accounts" className="flex items-center space-x-2 text-gray-700 hover:text-sky-600">
               <span>←</span>
@@ -587,7 +587,7 @@ export default function CashBookPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-7">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-7">
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-[0_18px_65px_-35px_rgba(13,148,136,0.45)] overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 bg-gradient-to-r from-amber-50 to-orange-50">
             <h2 className="text-base font-semibold text-gray-900">Transfer and Withdrawal Journal</h2>

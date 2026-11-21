@@ -41,6 +41,8 @@ export default function PoReportPage() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'approved' | 'received' | 'cancelled'>('all');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
   const [errorMessage, setErrorMessage] = useState('');
 
   const router = useRouter();
@@ -157,6 +159,21 @@ export default function PoReportPage() {
     return { total, pending, approved, received, cancelled, totalAmount };
   }, [filteredRows]);
 
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / rowsPerPage));
+  const pageStart = (currentPage - 1) * rowsPerPage;
+  const pageEnd = pageStart + rowsPerPage;
+  const pagedRows = filteredRows.slice(pageStart, pageEnd);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, startDate, endDate, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const formatMoney = (value?: number) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const toDateLabel = (value?: string) => {
     if (!value) return '-';
@@ -246,7 +263,7 @@ export default function PoReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-cyan-600 transition-colors duration-300">
@@ -262,7 +279,7 @@ export default function PoReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">PO <span className="bg-gradient-to-r from-cyan-600 to-blue-600 bg-clip-text text-transparent">Report</span></h1>
           <p className="text-gray-600">Purchase orders overview with supplier and value analytics.</p>
@@ -333,7 +350,7 @@ export default function PoReportPage() {
                 {filteredRows.length === 0 ? (
                   <tr><td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">No PO records found.</td></tr>
                 ) : (
-                  filteredRows.map((row, idx) => {
+                  pagedRows.map((row, idx) => {
                     const itemCount = Array.isArray(row.items) ? row.items.length : 0;
                     const totalQty = Array.isArray(row.items) ? row.items.reduce((sum, it) => sum + Number(it.quantity || 0), 0) : 0;
                     return (
@@ -351,6 +368,46 @@ export default function PoReportPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm text-gray-600">
+              Showing {filteredRows.length === 0 ? 0 : pageStart + 1} to {Math.min(pageEnd, filteredRows.length)} of {filteredRows.length} records
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="text-sm text-gray-600">Rows:</label>
+              <select
+                value={rowsPerPage}
+                onChange={(e) => setRowsPerPage(Number(e.target.value))}
+                className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+              >
+                <option value={10}>10</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                disabled={currentPage === 1}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Prev
+              </button>
+              <span className="text-sm text-gray-700">
+                Page {currentPage} of {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                disabled={currentPage === totalPages}
+                className="rounded-md border border-gray-300 px-3 py-1 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </section>
       </main>

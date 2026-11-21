@@ -32,6 +32,13 @@ type PaginatedResponse<T> = {
   next_page_url?: string | null;
 };
 
+type OutstandingRowsCache = {
+  savedAt: number;
+  rows: InvoiceRow[];
+};
+
+const OUTSTANDING_ROWS_CACHE_TTL_MS = 15 * 60 * 1000;
+
 const todayAtMidnight = () => {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -48,9 +55,50 @@ export default function DistributionOutstandingReportPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const getOutstandingCacheKey = (authToken: string) => `distribution_outstanding_rows_${authToken.slice(-16)}`;
+
+  const hydrateRowsFromCache = (authToken?: string) => {
+    if (typeof window === 'undefined') return false;
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return false;
+
+    try {
+      const raw = window.localStorage.getItem(getOutstandingCacheKey(tokenToUse));
+      if (!raw) return false;
+
+      const parsed = JSON.parse(raw) as OutstandingRowsCache | null;
+      if (!parsed || !Array.isArray(parsed.rows)) return false;
+
+      const age = Date.now() - Number(parsed.savedAt || 0);
+      if (age > OUTSTANDING_ROWS_CACHE_TTL_MS) return false;
+
+      setRows(parsed.rows);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const saveRowsToCache = (nextRows: InvoiceRow[], authToken?: string) => {
+    if (typeof window === 'undefined') return;
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    try {
+      const payload: OutstandingRowsCache = {
+        savedAt: Date.now(),
+        rows: nextRows,
+      };
+      window.localStorage.setItem(getOutstandingCacheKey(tokenToUse), JSON.stringify(payload));
+    } catch {
+      // Ignore cache persistence failures.
+    }
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -110,24 +158,33 @@ export default function DistributionOutstandingReportPage() {
           return;
         }
 
-        await fetchRows(token);
+        const hydrated = hydrateRowsFromCache(token);
+        setAccessReady(true);
+        void fetchRows(token, { silent: hydrated, progressive: true });
+        return;
       } catch (error) {
         console.error('Error checking outstanding report access:', error);
         router.push('/dashboard');
-      } finally {
-        setAccessReady(true);
       }
     };
 
     verifyAccess();
   }, [token, router]);
 
-  const fetchRows = async (authToken?: string) => {
+  const fetchRows = async (
+    authToken?: string,
+    options?: { silent?: boolean; progressive?: boolean }
+  ) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
 
+    const silent = Boolean(options?.silent);
+    const progressive = options?.progressive !== false;
+
     try {
-      setLoading(true);
+      if (!silent) {
+        setLoading(true);
+      }
       setErrorMessage('');
 
       const allRows: InvoiceRow[] = [];
@@ -143,17 +200,23 @@ export default function DistributionOutstandingReportPage() {
         const pageRows = Array.isArray(payload?.data) ? payload.data : [];
         allRows.push(...pageRows);
 
+        if (progressive) {
+          setRows([...allRows]);
+        }
+
         nextUrl = payload?.next_page_url || null;
         pageCount += 1;
       }
 
       setRows(allRows);
+      saveRowsToCache(allRows, tokenToUse);
     } catch (error) {
       console.error('Error fetching outstanding rows:', error);
-      setRows([]);
       setErrorMessage('Failed to load outstanding data.');
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -245,6 +308,38 @@ export default function DistributionOutstandingReportPage() {
     };
   }, [filteredRows]);
 
+  const agingProgress = useMemo(() => {
+    const total = Number(summary.totalOutstanding || 0);
+    const toPct = (value: number) => (total > 0 ? (Number(value || 0) / total) * 100 : 0);
+
+    return {
+      currentPct: toPct(summary.aging.current),
+      oneTo30Pct: toPct(summary.aging.oneTo30),
+      thirtyOneTo60Pct: toPct(summary.aging.thirtyOneTo60),
+      sixtyOnePlusPct: toPct(summary.aging.sixtyOnePlus),
+    };
+  }, [summary]);
+
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredRows.length / pageSize)),
+    [filteredRows.length, pageSize]
+  );
+
+  const pagedRows = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [filteredRows, currentPage, pageSize]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, agingFilter, fromDate, toDate, pageSize]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const toDateLabel = (value?: string | null) => {
     if (!value) return '-';
     const parsed = new Date(value);
@@ -278,6 +373,13 @@ export default function DistributionOutstandingReportPage() {
     if (bucket === '1_30') return '1-30 Days';
     if (bucket === '31_60') return '31-60 Days';
     return '61+ Days';
+  };
+
+  const agingRowClass = (bucket: string, idx: number) => {
+    if (bucket === 'current') return idx % 2 === 0 ? 'bg-emerald-50/40' : 'bg-emerald-50/20';
+    if (bucket === '1_30') return idx % 2 === 0 ? 'bg-yellow-50/40' : 'bg-yellow-50/20';
+    if (bucket === '31_60') return idx % 2 === 0 ? 'bg-orange-50/40' : 'bg-orange-50/20';
+    return idx % 2 === 0 ? 'bg-red-50/40' : 'bg-red-50/20';
   };
 
   const rowToExport = (row: InvoiceRow) => {
@@ -412,7 +514,7 @@ export default function DistributionOutstandingReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-600 transition-colors duration-300">
@@ -430,7 +532,7 @@ export default function DistributionOutstandingReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Outstanding <span className="bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">Report</span>
@@ -505,7 +607,7 @@ export default function DistributionOutstandingReportPage() {
             <div className="md:col-span-6 flex justify-end">
               <button
                 type="button"
-                onClick={() => fetchRows()}
+                onClick={() => fetchRows(undefined, { silent: false, progressive: true })}
                 disabled={loading}
                 className="px-4 py-2 bg-gradient-to-r from-green-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-green-700 hover:to-teal-700 disabled:opacity-60"
               >
@@ -537,6 +639,24 @@ export default function DistributionOutstandingReportPage() {
             <span>61+ Days: <strong>{formatMoney(summary.aging.sixtyOnePlus)}</strong></span>
           </div>
 
+          <div className="px-4 py-3 border-b border-gray-100 bg-white">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-600">Aging Distribution</p>
+            <div className="h-4 w-full overflow-hidden rounded-full border border-gray-200 bg-gray-100">
+              <div className="flex h-full w-full">
+                <div className="h-full bg-emerald-500" style={{ width: `${agingProgress.currentPct}%` }} title={`Current ${agingProgress.currentPct.toFixed(1)}%`} />
+                <div className="h-full bg-yellow-500" style={{ width: `${agingProgress.oneTo30Pct}%` }} title={`1-30 Days ${agingProgress.oneTo30Pct.toFixed(1)}%`} />
+                <div className="h-full bg-orange-500" style={{ width: `${agingProgress.thirtyOneTo60Pct}%` }} title={`31-60 Days ${agingProgress.thirtyOneTo60Pct.toFixed(1)}%`} />
+                <div className="h-full bg-red-500" style={{ width: `${agingProgress.sixtyOnePlusPct}%` }} title={`61+ Days ${agingProgress.sixtyOnePlusPct.toFixed(1)}%`} />
+              </div>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-emerald-700"><span className="h-2 w-2 rounded-full bg-emerald-500" />Current {agingProgress.currentPct.toFixed(1)}%</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-yellow-50 px-2 py-1 text-yellow-700"><span className="h-2 w-2 rounded-full bg-yellow-500" />1-30 {agingProgress.oneTo30Pct.toFixed(1)}%</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-orange-50 px-2 py-1 text-orange-700"><span className="h-2 w-2 rounded-full bg-orange-500" />31-60 {agingProgress.thirtyOneTo60Pct.toFixed(1)}%</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-1 text-red-700"><span className="h-2 w-2 rounded-full bg-red-500" />61+ {agingProgress.sixtyOnePlusPct.toFixed(1)}%</span>
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
@@ -559,10 +679,11 @@ export default function DistributionOutstandingReportPage() {
                     <td colSpan={10} className="px-4 py-10 text-center text-sm text-gray-500">No outstanding invoice records found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => {
+                  pagedRows.map((row, idx) => {
                     const bucket = getAgingBucket(row);
+                    const rowKey = `${row.id}-${row.invoice_number || 'no-invoice'}-${row.customer_id || 0}-${row.invoice_date || 'no-date'}-${idx}`;
                     return (
-                      <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                      <tr key={rowKey} className={agingRowClass(bucket, idx)}>
                         <td className="px-4 py-3 text-sm text-gray-700">{row.invoice_number || '-'}</td>
                         <td className="px-4 py-3 text-sm text-gray-900 font-medium">
                           {(row.customer?.customer_code || '-') + ' - ' + (row.customer?.shop_name || '-')}
@@ -590,6 +711,52 @@ export default function DistributionOutstandingReportPage() {
               </tbody>
             </table>
           </div>
+
+          {filteredRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-gray-600">
+                Showing {(currentPage - 1) * pageSize + 1}
+                {' - '}
+                {Math.min(currentPage * pageSize, filteredRows.length)}
+                {' of '}
+                {filteredRows.length} records
+              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs text-gray-600">Rows:</label>
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value) || 20)}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-black"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage <= 1}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+
+                <span className="text-xs text-gray-600">Page {currentPage} of {totalPages}</span>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>

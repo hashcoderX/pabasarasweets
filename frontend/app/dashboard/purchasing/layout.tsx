@@ -18,7 +18,7 @@ export default function PurchasingLayout({
     <div className="min-h-screen bg-gray-50">
       {/* Purchasing Navigation */}
       <div className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex justify-between items-center py-4">
             <div className="flex items-center space-x-8">
               <h1 className="text-2xl font-bold text-gray-900">Purchasing</h1>
@@ -50,7 +50,7 @@ export default function PurchasingLayout({
       </div>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <main className="w-full py-6 px-3 sm:px-4 lg:px-6">
         {children}
       </main>
     </div>

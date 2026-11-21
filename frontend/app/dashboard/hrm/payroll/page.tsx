@@ -714,7 +714,7 @@ export default function Payroll() {
 
       {/* Header */}
       <div className="relative z-10 bg-white/80 backdrop-blur-xl shadow-lg border-b border-white/50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-8">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-100 text-cyan-700 text-xs font-semibold mb-3">
@@ -764,7 +764,7 @@ export default function Payroll() {
       </div>
 
       {/* Filters */}
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <div className="relative z-10 w-full px-3 sm:px-4 lg:px-6 py-6">
         <div className="bg-white/85 backdrop-blur-sm rounded-2xl shadow-xl border border-white/60 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-bold text-slate-900">Filter & Recalculate</h3>
@@ -853,7 +853,7 @@ export default function Payroll() {
       </div>
 
       {/* Payroll Table */}
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
+      <div className="relative z-10 w-full px-3 sm:px-4 lg:px-6 pb-8">
         <div className="bg-white/90 backdrop-blur-sm rounded-2xl shadow-xl border border-white/60 overflow-hidden">
           <div className="bg-gradient-to-r from-slate-900 via-cyan-900 to-blue-900 px-6 py-4">
             <h3 className="text-white text-lg font-bold">Payroll Ledger</h3>

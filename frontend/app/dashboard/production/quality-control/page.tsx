@@ -587,7 +587,7 @@ export default function QualityControlPage() {
       </div>
 
       {isWidgetVisible('production-qc-nav-bar') && <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-16">
             <div>
               <h1 className="text-lg font-bold bg-gradient-to-r from-violet-600 to-purple-600 bg-clip-text text-transparent">Quality Control</h1>
@@ -602,7 +602,7 @@ export default function QualityControlPage() {
         {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-qc-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
       </nav>}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         {message && <div className="rounded-md border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-700">{message}</div>}
 
         {isWidgetVisible('production-qc-summary-cards') && <section className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">

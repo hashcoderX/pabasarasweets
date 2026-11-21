@@ -579,7 +579,7 @@ export default function ProductionRawMaterialConsumptionReportsPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-3">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3">
             <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-emerald-600 transition-colors">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -599,7 +599,7 @@ export default function ProductionRawMaterialConsumptionReportsPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         <div className="text-center">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900">Raw Material Consumption Reports</h1>
           <p className="mt-2 text-gray-600">Critical inventory-facing production report to detect excess usage, variance, and stock leakage.</p>

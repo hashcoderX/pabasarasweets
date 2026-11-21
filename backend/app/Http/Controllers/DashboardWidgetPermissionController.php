@@ -63,6 +63,7 @@ class DashboardWidgetPermissionController extends Controller
         'purchasing-grn-records-view-card',
         'purchasing-grn-form-modal-pane',
         'purchasing-grn-po-edit-modal-pane',
+        'branches',
         'outlets',
         'stock',
         'vehicle-loading',
@@ -245,6 +246,7 @@ class DashboardWidgetPermissionController extends Controller
         'distribution-module-returns-card',
         'distribution-module-payments-card',
         'distribution-module-outstanding-payment-card',
+        'distribution-module-delivery-expenses-card',
         'distribution-module-live-locations-card',
         'distribution-module-reports-card',
         'distribution-customers-nav-back-button',
@@ -596,8 +598,11 @@ class DashboardWidgetPermissionController extends Controller
             ], 422);
         }
 
+        $userId = (int) $user->id;
+        $controlsLocked = $this->getWidgetControlsLockedForUser($userId);
+
         $actorIsSuperAdmin = $this->isSuperAdminUser($user);
-        if (!$actorIsSuperAdmin) {
+        if (!$actorIsSuperAdmin && $controlsLocked) {
             $email = (string) ($payload['super_admin_email'] ?? '');
             $password = (string) ($payload['super_admin_password'] ?? '');
             if ($email === '' || $password === '') {
@@ -617,7 +622,6 @@ class DashboardWidgetPermissionController extends Controller
             }
         }
 
-        $userId = (int) $user->id;
         $this->setWidgetVisibilityForUser($userId, $widgetKey, (bool) $payload['is_visible']);
         if (array_key_exists('lock_widget_controls', $payload)) {
             $this->setWidgetControlsLockedForUser($userId, (bool) $payload['lock_widget_controls']);

@@ -68,20 +68,66 @@ type LoadInfo = {
   loadRoutes?: LoadRouteEntry[];
 };
 
+type CustomerReportCache = {
+  savedAt: number;
+  rows: CustomerRow[];
+};
+
 export default function DistributionCustomerReportPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadProgress, setLoadProgress] = useState({ loadedPages: 0, totalPages: 0 });
   const [rows, setRows] = useState<CustomerRow[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | CustomerStatus>('all');
   const [routeFilter, setRouteFilter] = useState('all');
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [allocatedRoutes, setAllocatedRoutes] = useState<RouteInfo[]>([]);
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const CACHE_TTL_MS = 15 * 60 * 1000;
+
+  const getCacheKey = useCallback((authToken: string) => {
+    const tokenSuffix = String(authToken || '').slice(-16) || 'anonymous';
+    return `distribution-customer-report-cache-v1-${tokenSuffix}`;
+  }, []);
+
+  const readRowsCache = useCallback((authToken: string) => {
+    try {
+      const raw = localStorage.getItem(getCacheKey(authToken));
+      if (!raw) return null;
+
+      const parsed = JSON.parse(raw) as CustomerReportCache;
+      if (!parsed || !Array.isArray(parsed.rows) || typeof parsed.savedAt !== 'number') {
+        return null;
+      }
+
+      if (Date.now() - parsed.savedAt > CACHE_TTL_MS) {
+        return null;
+      }
+
+      return parsed.rows;
+    } catch {
+      return null;
+    }
+  }, [CACHE_TTL_MS, getCacheKey]);
+
+  const writeRowsCache = useCallback((authToken: string, reportRows: CustomerRow[]) => {
+    try {
+      const payload: CustomerReportCache = {
+        savedAt: Date.now(),
+        rows: reportRows,
+      };
+      localStorage.setItem(getCacheKey(authToken), JSON.stringify(payload));
+    } catch {
+      // Ignore quota/serialization failures and continue with live data.
+    }
+  }, [getCacheKey]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -161,40 +207,87 @@ export default function DistributionCustomerReportPage() {
     }
   }, [API_URL]);
 
+  const mergeRows = (currentRows: CustomerRow[], incomingRows: CustomerRow[]) => {
+    const byKey = new Map<string, CustomerRow>();
+
+    [...currentRows, ...incomingRows].forEach((row) => {
+      const key = `${row.id}-${row.customer_code || ''}-${row.route_id || row.route?.id || 0}-${row.created_at || ''}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, row);
+      }
+    });
+
+    return Array.from(byKey.values());
+  };
+
   const fetchRows = useCallback(async (authToken?: string) => {
     const tokenToUse = authToken || token;
     if (!tokenToUse) return;
 
     try {
+      const cachedRows = readRowsCache(tokenToUse);
+      if (cachedRows && cachedRows.length > 0) {
+        setRows(cachedRows);
+      }
+
       setLoading(true);
       setErrorMessage('');
 
-      const allRows: CustomerRow[] = [];
-      let nextUrl: string | null = `${API_URL}/api/distribution/customers?per_page=200`;
-      let pageCount = 0;
+      const firstPageUrl = `${API_URL}/api/distribution/customers?per_page=200&page=1`;
+      const firstPageResponse: { data: { data?: PaginatedResponse<CustomerRow> & { last_page?: number } } } = await axios.get(firstPageUrl, {
+        headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
+      });
+
+      const firstPayload = firstPageResponse.data?.data;
+      const firstPageRows = Array.isArray(firstPayload?.data) ? firstPayload.data : [];
+      const firstTotalPages = Math.max(1, Number((firstPayload as { last_page?: number } | undefined)?.last_page || 1));
+
+      setRows(firstPageRows);
+      writeRowsCache(tokenToUse, firstPageRows);
+      setLoadProgress({ loadedPages: 1, totalPages: firstTotalPages });
+
+      let nextUrl = firstPayload?.next_page_url || null;
+      let pageCount = 1;
 
       while (nextUrl && pageCount < 50) {
-        const response: { data: { data?: PaginatedResponse<CustomerRow> } } = await axios.get(nextUrl, {
+        const response: { data: { data?: PaginatedResponse<CustomerRow> & { last_page?: number } } } = await axios.get(nextUrl, {
           headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
         });
 
         const payload = response.data?.data;
         const pageRows = Array.isArray(payload?.data) ? payload.data : [];
-        allRows.push(...pageRows);
+
+        setRows((previousRows) => {
+          const merged = mergeRows(previousRows, pageRows);
+          writeRowsCache(tokenToUse, merged);
+          return merged;
+        });
 
         nextUrl = payload?.next_page_url || null;
         pageCount += 1;
+        const reportedTotalPages = Number((payload as { last_page?: number } | undefined)?.last_page || firstTotalPages || pageCount);
+        setLoadProgress({ loadedPages: pageCount, totalPages: Math.max(reportedTotalPages, pageCount) });
       }
 
-      setRows(allRows);
+      setLoadProgress((prev) => ({
+        loadedPages: Math.max(prev.loadedPages, prev.totalPages || prev.loadedPages),
+        totalPages: Math.max(prev.totalPages, prev.loadedPages),
+      }));
     } catch (error) {
       console.error('Error fetching customer report rows:', error);
-      setRows([]);
-      setErrorMessage('Failed to load customer report data.');
+      setRows((prevRows) => {
+        if (prevRows.length > 0) {
+          setErrorMessage('Latest customer data loaded. Failed to load some older pages.');
+          return prevRows;
+        }
+
+        setErrorMessage('Failed to load customer report data.');
+        return [];
+      });
     } finally {
       setLoading(false);
     }
-  }, [API_URL, token]);
+  }, [API_URL, token, readRowsCache, writeRowsCache]);
 
   useEffect(() => {
     if (!token) return;
@@ -247,18 +340,18 @@ export default function DistributionCustomerReportPage() {
         }
 
         setIsSalesRefUser(isSalesRef && !isAdminUser);
+        setAccessReady(true);
+
+        void fetchRows(token);
+
         if (isSalesRef && employeeId > 0) {
-          await loadSalesRefAllocatedRoutes(token, employeeId);
+          void loadSalesRefAllocatedRoutes(token, employeeId);
         } else {
           setAllocatedRoutes([]);
         }
-
-        await fetchRows(token);
       } catch (error) {
         console.error('Error checking customer report access:', error);
         router.push('/dashboard');
-      } finally {
-        setAccessReady(true);
       }
     };
 
@@ -335,6 +428,26 @@ export default function DistributionCustomerReportPage() {
 
     return { total, active, inactive, totalOutstanding };
   }, [filteredRows]);
+
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredRows.length / pageSize)),
+    [filteredRows.length, pageSize]
+  );
+
+  const pagedRows = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [filteredRows, currentPage, pageSize]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, routeFilter, pageSize]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const toDateLabel = (value?: string) => {
     if (!value) return '-';
@@ -477,7 +590,7 @@ export default function DistributionCustomerReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-600 transition-colors duration-300">
@@ -495,7 +608,7 @@ export default function DistributionCustomerReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Customer <span className="bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">Report</span>
@@ -569,6 +682,14 @@ export default function DistributionCustomerReportPage() {
               Download CSV (Excel)
             </button>
           </div>
+
+          {loading && (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Loading latest customers first, then older pages... {loadProgress.loadedPages > 0 && loadProgress.totalPages > 0
+                ? `(${Math.min(loadProgress.loadedPages, loadProgress.totalPages)}/${loadProgress.totalPages} pages)`
+                : ''}
+            </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
@@ -600,8 +721,10 @@ export default function DistributionCustomerReportPage() {
                     <td colSpan={9} className="px-4 py-10 text-center text-sm text-gray-500">No customer records found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
-                    <tr key={row.id} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
+                  pagedRows.map((row, idx) => {
+                    const rowKey = `${row.id}-${row.customer_code || 'no-code'}-${row.shop_name || 'no-shop'}-${row.route_id || row.route?.id || 0}-${idx}`;
+                    return (
+                    <tr key={rowKey} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.customer_code || '-'}</td>
                       <td className="px-4 py-3 text-sm text-gray-900 font-medium">{row.shop_name || '-'}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.owner_name || '-'}</td>
@@ -618,11 +741,58 @@ export default function DistributionCustomerReportPage() {
                       <td className="px-4 py-3 text-sm text-gray-900 font-semibold text-right">{formatMoney(row.outstanding)}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.created_at)}</td>
                     </tr>
-                  ))
+                  );
+                  })
                 )}
               </tbody>
             </table>
           </div>
+
+          {filteredRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-gray-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-gray-600">
+                Showing {(currentPage - 1) * pageSize + 1}
+                {' - '}
+                {Math.min(currentPage * pageSize, filteredRows.length)}
+                {' of '}
+                {filteredRows.length} records
+              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-xs text-gray-600">Rows:</label>
+                <select
+                  value={pageSize}
+                  onChange={(e) => setPageSize(Number(e.target.value) || 20)}
+                  className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-black"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage <= 1}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+
+                <span className="text-xs text-gray-600">Page {currentPage} of {totalPages}</span>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="rounded-md border border-gray-300 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>

@@ -14,6 +14,8 @@ class LoadExpense extends Model
         'amount',
         'reference',
         'note',
+        'bill_attachment_path',
+        'bill_attachment_name',
         'delivery_cash_transaction_id',
         'created_by',
     ];

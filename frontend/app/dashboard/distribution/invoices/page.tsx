@@ -13,6 +13,16 @@ interface CompanyProfile {
   phone?: string;
   email?: string;
   logo_url?: string;
+  bank_accounts?: CompanyBankAccount[];
+}
+
+interface CompanyBankAccount {
+  id: number;
+  company_id?: number;
+  bank_name?: string | null;
+  branch?: string | null;
+  account_no?: string | null;
+  current_balance?: number | null;
 }
 
 interface LoadItemInfo {
@@ -33,6 +43,7 @@ interface LoadItemSuggestion {
   unit: string;
   load_qty: number;
   load_available_qty: number;
+  return_damaged_qty: number;
   sell_price: number;
   warehouse_stock: number;
 }
@@ -59,6 +70,7 @@ interface GpsSnapshot {
 interface InvoiceRecord {
   id: number;
   invoice_number: string;
+  created_at?: string;
   customer_id: number;
   load_id?: number | null;
   customer?: { shop_name: string; customer_code?: string; route_id?: number | null };
@@ -71,9 +83,12 @@ interface InvoiceRecord {
   due_amount?: number;
   balance_amount?: number;
   status: string;
+  is_dispatch_order?: boolean;
+  dispatch_order_number?: string | null;
   items: InvoiceItem[];
   payments?: Array<{
     id: number;
+    created_at?: string;
     payment_date?: string;
     cheque_date?: string | null;
     amount?: number;
@@ -105,7 +120,8 @@ interface PaymentEntry {
 }
 
 interface DeliveryOrderRecord {
-  id: number;
+  id: number | string;
+  source: 'outlet_pos' | 'distribution_do';
   sale_number: string;
   do_number?: string | null;
   load_id?: number | null;
@@ -164,6 +180,7 @@ interface PendingOfflineInvoice {
     billing_longitude?: number | null;
     billing_gps_accuracy?: number | null;
     billing_gps_captured_at?: string | null;
+    mark_as_dispatch_order?: boolean;
     items: {
       inventory_item_id: number | null;
       item_code: string;
@@ -185,6 +202,15 @@ interface PendingOfflineInvoice {
       settlement_amount: number;
       exchange_inventory_item_id: number | null;
       exchange_quantity: number;
+      return_lines?: Array<{
+        inventory_item_id: number | null;
+        item_code: string;
+        item_name: string;
+        quantity: number;
+        unit_price: number;
+        amount: number;
+        is_damaged: boolean;
+      }>;
       reason?: string | null;
       status: string;
       notes?: string | null;
@@ -231,6 +257,8 @@ const OFFLINE_INVOICE_STORAGE_KEY = 'distribution_offline_invoices';
 const INVOICES_PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_API_TIMEOUT_MS = 30000;
 const LONG_API_TIMEOUT_MS = 45000;
+const INVOICES_CACHE_MAX_RECORDS = 120;
+const INVOICES_CACHE_RETRY_STEPS = [120, 80, 50, 30, 15];
 
 type InvoicesPageCache = {
   savedAt: number;
@@ -238,14 +266,53 @@ type InvoicesPageCache = {
   invoices: InvoiceRecord[];
 };
 
+const compactInvoiceForCache = (invoice: InvoiceRecord): InvoiceRecord => {
+  const compactItems = Array.isArray(invoice.items)
+    ? invoice.items.slice(0, 40).map((item) => ({
+        id: Number(item.id) || 0,
+        inventory_item_id: item.inventory_item_id ?? null,
+        source_load_item_id: item.source_load_item_id ?? null,
+        item_code: String(item.item_code || ''),
+        item_name: String(item.item_name || ''),
+        unit: item.unit ?? null,
+        quantity: Number(item.quantity) || 0,
+        unit_price: Number(item.unit_price) || 0,
+        discount: Number(item.discount || 0),
+      }))
+    : [];
+
+  const compactPayments = Array.isArray(invoice.payments)
+    ? invoice.payments.slice(0, 20).map((payment) => ({
+        id: Number(payment.id) || 0,
+        created_at: payment.created_at,
+        payment_date: payment.payment_date,
+        cheque_date: payment.cheque_date ?? null,
+        amount: Number(payment.amount || 0),
+        payment_method: payment.payment_method,
+        reference_no: payment.reference_no ?? null,
+        bank_name: payment.bank_name ?? null,
+        status: payment.status,
+      }))
+    : undefined;
+
+  return {
+    ...invoice,
+    items: compactItems,
+    payments: compactPayments,
+    notes: invoice.notes ? String(invoice.notes).slice(0, 500) : invoice.notes,
+  };
+};
+
 export default function DistributionInvoicesPage() {
   const [token, setToken] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [assignedRouteId, setAssignedRouteId] = useState('');
   const [assignedRouteIds, setAssignedRouteIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [createDocumentMode, setCreateDocumentMode] = useState<'invoice' | 'dispatch_order'>('invoice');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [serverAllocatedRouteIds, setServerAllocatedRouteIds] = useState<string[] | null>(null);
   const [items, setItems] = useState<Item[]>([]);
@@ -288,6 +355,7 @@ export default function DistributionInvoicesPage() {
   const [returnLines, setReturnLines] = useState<ReturnLine[]>([]);
   const customerLookupRequestRef = useRef(0);
   const deliveryOrderRequestRef = useRef(0);
+  const customerSearchDebounceTimerRef = useRef<number | null>(null);
 
   const [lineFreeQty, setLineFreeQty] = useState('');
   const [lineItemDiscountType, setLineItemDiscountType] = useState<'percentage' | 'amount'>('percentage');
@@ -302,6 +370,8 @@ export default function DistributionInvoicesPage() {
   const [paymentChequeDate, setPaymentChequeDate] = useState(new Date().toISOString().split('T')[0]);
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentBankName, setPaymentBankName] = useState('');
+  const [paymentCompanyBankAccounts, setPaymentCompanyBankAccounts] = useState<CompanyBankAccount[]>([]);
+  const [paymentCompanyBankAccountId, setPaymentCompanyBankAccountId] = useState('');
   const [paymentCheques, setPaymentCheques] = useState<Array<{ amount: string; chequeDate: string; reference: string; bankName: string }>>([]);
   const [refGpsSnapshot, setRefGpsSnapshot] = useState<GpsSnapshot | null>(null);
   const [billingGpsSnapshot, setBillingGpsSnapshot] = useState<GpsSnapshot | null>(null);
@@ -354,6 +424,19 @@ export default function DistributionInvoicesPage() {
   const [originalLoadReservedByLoadItemId, setOriginalLoadReservedByLoadItemId] = useState<Record<number, number>>({});
 
   const router = useRouter();
+  const selectedPaymentCompanyBankAccount = useMemo(
+    () => paymentCompanyBankAccounts.find((account) => String(account.id) === paymentCompanyBankAccountId) || null,
+    [paymentCompanyBankAccounts, paymentCompanyBankAccountId]
+  );
+  const selectedPaymentCompanyBankAccountLabel = useMemo(() => {
+    if (!selectedPaymentCompanyBankAccount) return '';
+    const name = String(selectedPaymentCompanyBankAccount.bank_name || 'Bank Account').trim();
+    const branch = String(selectedPaymentCompanyBankAccount.branch || '').trim();
+    const accountNo = String(selectedPaymentCompanyBankAccount.account_no || '').trim();
+    const branchPart = branch ? ` - ${branch}` : '';
+    const accountPart = accountNo ? ` (A/C: ${accountNo})` : '';
+    return `${name}${branchPart}${accountPart}`.trim();
+  }, [selectedPaymentCompanyBankAccount]);
   const createLineId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const getInvoicesPageCacheKey = (authToken: string) => `distribution_invoices_page_cache_${authToken.slice(-16)}`;
 
@@ -384,13 +467,37 @@ export default function DistributionInvoicesPage() {
 
   const saveInvoicesPageToCache = (nextItems: Item[], nextInvoices: InvoiceRecord[]) => {
     if (typeof window === 'undefined' || !token) return;
+
+    const maxRecords = Math.max(1, INVOICES_CACHE_MAX_RECORDS);
+    const compactInvoices = nextInvoices
+      .slice(0, maxRecords)
+      .map((invoice) => compactInvoiceForCache(invoice));
+
+    const recordSteps = Array.from(new Set(INVOICES_CACHE_RETRY_STEPS.filter((step) => step > 0))).sort((a, b) => b - a);
+
     try {
-      const payload: InvoicesPageCache = {
-        savedAt: Date.now(),
-        items: nextItems,
-        invoices: nextInvoices,
-      };
-      window.localStorage.setItem(getInvoicesPageCacheKey(token), JSON.stringify(payload));
+      const cacheKey = getInvoicesPageCacheKey(token);
+      let saved = false;
+
+      for (const step of recordSteps) {
+        const payload: InvoicesPageCache = {
+          savedAt: Date.now(),
+          items: nextItems,
+          invoices: compactInvoices.slice(0, step),
+        };
+
+        try {
+          window.localStorage.setItem(cacheKey, JSON.stringify(payload));
+          saved = true;
+          break;
+        } catch {
+          // Retry with a smaller payload size.
+        }
+      }
+
+      if (!saved) {
+        window.localStorage.removeItem(cacheKey);
+      }
     } catch (error) {
       console.error('Failed to persist invoices page cache:', error);
     }
@@ -590,14 +697,47 @@ export default function DistributionInvoicesPage() {
     else setToken(storedToken);
   }, [router]);
 
+  const fetchCompanyBankAccounts = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    try {
+      const response = await axios.get('/api/companies', {
+        headers: { Authorization: `Bearer ${tokenToUse}` },
+        params: { per_page: 50 },
+        timeout: DEFAULT_API_TIMEOUT_MS,
+      });
+      const rows = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+      const firstCompany = Array.isArray(rows) && rows[0] ? rows[0] as CompanyProfile : null;
+      const bankAccounts = Array.isArray(firstCompany?.bank_accounts) ? firstCompany.bank_accounts : [];
+      setPaymentCompanyBankAccounts(bankAccounts);
+      setPaymentCompanyBankAccountId((prev) => prev || (bankAccounts[0]?.id ? String(bankAccounts[0].id) : ''));
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        console.warn('Company bank accounts request timed out.');
+      } else {
+        console.error('Error loading company bank accounts:', error);
+      }
+      setPaymentCompanyBankAccounts([]);
+      setPaymentCompanyBankAccountId('');
+    }
+  };
+
   useEffect(() => {
     if (token) {
       hydrateInvoicesPageFromCache(token);
       resolveAssignedRoute();
-      fetchData();
       fetchWidgetVisibility(token);
+      fetchCompanyBankAccounts(token);
     }
   }, [token]);
+
+  useEffect(() => {
+    if (!addPayment || paymentMethod !== 'bank_transfer') return;
+    if (paymentCompanyBankAccountId) return;
+    if (!paymentCompanyBankAccounts.length) return;
+    setPaymentCompanyBankAccountId(String(paymentCompanyBankAccounts[0].id));
+  }, [addPayment, paymentMethod, paymentCompanyBankAccountId, paymentCompanyBankAccounts]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -685,7 +825,12 @@ export default function DistributionInvoicesPage() {
         }) : []),
       ].join(' ').toLowerCase();
       const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
+      const salesRefUser =
+        !adminUser &&
+        employeeId > 0 &&
+        (roleNames.includes('sales ref') || roleNames.includes('sales representative') || roleNames.includes('sales_ref'));
       setIsAdmin(adminUser);
+      setIsSalesRefUser(salesRefUser);
 
       const loadsRes = await axios.get('/api/vehicle-loading/loads', {
         headers: { Authorization: `Bearer ${token}` },
@@ -768,6 +913,10 @@ export default function DistributionInvoicesPage() {
       } else if (!routeFromQuery) {
         setAssignedRouteId('');
         setAssignedRouteIds([]);
+        if (salesRefUser) {
+          setActiveLoadId('');
+          localStorage.removeItem('distribution_active_load_id');
+        }
         localStorage.removeItem('distribution_assigned_route_id');
         localStorage.removeItem('distribution_assigned_route_ids');
       } else {
@@ -793,6 +942,31 @@ export default function DistributionInvoicesPage() {
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) return value;
     return parsed.toLocaleDateString();
+  };
+
+  const formatDateTimeDisplay = (value?: string | null) => {
+    if (!value) return '-';
+    const raw = String(value).trim();
+    if (!raw) return '-';
+
+    // Date-only values should remain date-only without timezone-shifted times.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const [year, month, day] = raw.split('-').map(Number);
+      const localDate = new Date(year, (month || 1) - 1, day || 1);
+      return localDate.toLocaleDateString();
+    }
+
+    // Midnight UTC timestamps are commonly stored for date-only fields.
+    if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.\d+)?Z$/i.test(raw)) {
+      const datePart = raw.slice(0, 10);
+      const [year, month, day] = datePart.split('-').map(Number);
+      const localDate = new Date(year, (month || 1) - 1, day || 1);
+      return localDate.toLocaleDateString();
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    return parsed.toLocaleString();
   };
 
   const generateInvoiceNumber = () => `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 900 + 100)}`;
@@ -885,7 +1059,11 @@ export default function DistributionInvoicesPage() {
       for (const entry of pendingOfflineInvoices) {
         const inv = entry.payload;
         try {
-          const invoiceRes = await axios.post('/api/distribution/invoices', {
+          const createEndpoint = inv.mark_as_dispatch_order
+            ? '/api/distribution/dos'
+            : '/api/distribution/invoices';
+
+          const invoiceRes = await axios.post(createEndpoint, {
             load_id: inv.load_id ?? (activeLoadId ? Number(activeLoadId) : (isAdmin && selectedLoadFilter ? Number(selectedLoadFilter) : null)),
             invoice_number: inv.invoice_number,
             customer_id: inv.customer_id,
@@ -920,7 +1098,7 @@ export default function DistributionInvoicesPage() {
                 payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
                 reference_no: payment.reference || null,
                 bank_name: payment.bank_name || null,
-                status: 'received',
+                status: payment.method === 'bank_transfer' ? 'pending' : 'received',
                 notes: payment.is_outstanding_settlement
                   ? `Outstanding settlement from invoice ${createdInvoice.invoice_number} (offline sync)`
                   : `Auto payment from invoice ${createdInvoice.invoice_number} (offline sync)`,
@@ -947,6 +1125,7 @@ export default function DistributionInvoicesPage() {
                 settlement_amount: rp.settlement_amount,
                 exchange_inventory_item_id: rp.exchange_inventory_item_id,
                 exchange_quantity: rp.exchange_quantity,
+                return_lines: rp.return_lines || [],
                 reason: rp.reason,
                 status: rp.status,
                 notes: rp.notes,
@@ -1138,26 +1317,50 @@ export default function DistributionInvoicesPage() {
     deliveryOrderRequestRef.current = requestId;
 
     try {
-      const doRes = await axios.get('/api/outlet-pos/sales', {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          per_page: 200,
-          do_only: 1,
-          ...(loadId ? { load_id: Number(loadId) } : {}),
-        },
-        timeout: LONG_API_TIMEOUT_MS,
-      });
+      const extractDoNumberFromNotes = (notes: unknown): string | null => {
+        const raw = String(notes || '');
+        if (!raw) return null;
+        const match = raw.match(/DO\s*Number:\s*([A-Za-z0-9-]+)/i);
+        return match?.[1] ? String(match[1]).toUpperCase() : null;
+      };
 
-      const payload = doRes.data?.data;
-      const rows = Array.isArray(payload?.data)
-        ? payload.data
-        : Array.isArray(payload)
-          ? payload
+      const [outletDoRes, distributionDoRes] = await Promise.all([
+        axios.get('/api/outlet-pos/sales', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: {
+            per_page: 200,
+            do_only: 1,
+            ...(loadId ? { load_id: Number(loadId) } : {}),
+          },
+          timeout: LONG_API_TIMEOUT_MS,
+        }),
+        axios.get('/api/distribution/dos', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: {
+            per_page: 200,
+            ...(loadId ? { load_id: Number(loadId) } : {}),
+          },
+          timeout: LONG_API_TIMEOUT_MS,
+        }),
+      ]);
+
+      const outletPayload = outletDoRes.data?.data;
+      const outletRows = Array.isArray(outletPayload?.data)
+        ? outletPayload.data
+        : Array.isArray(outletPayload)
+          ? outletPayload
+          : [];
+
+      const distributionPayload = distributionDoRes.data?.data;
+      const distributionRows = Array.isArray(distributionPayload?.data)
+        ? distributionPayload.data
+        : Array.isArray(distributionPayload)
+          ? distributionPayload
           : [];
 
           if (requestId !== deliveryOrderRequestRef.current) return;
 
-      const mapped: DeliveryOrderRecord[] = rows.map((row: {
+      const mappedOutlet: DeliveryOrderRecord[] = outletRows.map((row: {
         id?: unknown;
         sale_number?: unknown;
         do_number?: unknown;
@@ -1171,6 +1374,7 @@ export default function DistributionInvoicesPage() {
         outlet?: { name?: string; code?: string } | null;
       }) => ({
         id: Number(row.id),
+        source: 'outlet_pos',
         sale_number: String(row.sale_number || ''),
         do_number: row.do_number || null,
         load_id: row.load_id
@@ -1183,7 +1387,45 @@ export default function DistributionInvoicesPage() {
         outlet: row.outlet || null,
       }));
 
-      setDeliveryOrders(mapped.filter((row) => !!row.do_number));
+      const mappedDistribution: DeliveryOrderRecord[] = distributionRows.map((row: {
+        id?: unknown;
+        do_number?: unknown;
+        invoice_number?: unknown;
+        dispatch_order_number?: unknown;
+        notes?: unknown;
+        load_id?: unknown;
+        do_date?: unknown;
+        invoice_date?: unknown;
+        total?: unknown;
+        status?: unknown;
+        customer?: { shop_name?: unknown; customer_code?: unknown } | null;
+      }) => ({
+        id: Number(row.id),
+        source: 'distribution_do',
+        sale_number: String(row.invoice_number || row.do_number || ''),
+        do_number: row.do_number
+          ? String(row.do_number)
+          : row.dispatch_order_number
+            ? String(row.dispatch_order_number)
+          : extractDoNumberFromNotes(row.notes),
+        load_id: row.load_id ? Number(row.load_id) : null,
+        sale_date: String(row.do_date || row.invoice_date || ''),
+        customer_name: row.customer?.shop_name ? String(row.customer.shop_name) : null,
+        total_amount: Number(row.total || 0),
+        status: row.status ? String(row.status) : null,
+        outlet: null,
+      }));
+
+      const merged = [...mappedOutlet, ...mappedDistribution]
+        .filter((row) => !!row.do_number)
+        .sort((a, b) => {
+          const aTime = new Date(String(a.sale_date || 0)).getTime();
+          const bTime = new Date(String(b.sale_date || 0)).getTime();
+          if (aTime !== bTime) return bTime - aTime;
+          return Number(b.id || 0) - Number(a.id || 0);
+        });
+
+      setDeliveryOrders(merged);
     } catch (error: unknown) {
       if (requestId !== deliveryOrderRequestRef.current) return;
       const status = toApiErrorLike(error).response?.status;
@@ -1382,6 +1624,19 @@ export default function DistributionInvoicesPage() {
     [lines]
   );
 
+  const totalLineItemDiscount = useMemo(
+    () =>
+      lines.reduce((sum, line) => {
+        const freeQty = line.free_quantity || 0;
+        const paidQty =
+          typeof line.paid_quantity === 'number'
+            ? line.paid_quantity
+            : line.quantity - freeQty;
+        return sum + paidQty * Number(line.item_discount || 0);
+      }, 0),
+    [lines]
+  );
+
   const updateLineQuantities = (lineId: string, newPaid: number, newFree: number) => {
     setLines((prev) => {
       const line = prev.find((l) => l.line_id === lineId);
@@ -1560,6 +1815,8 @@ export default function DistributionInvoicesPage() {
     return customers.filter((customer) => routeIdSet.has(String(customer.route_id || '')));
   }, [customers, assignedRouteIds, isAdmin, serverAllocatedRouteIds]);
 
+  const isSalesRefWithoutAllocatedRoute = isSalesRefUser && assignedRouteIds.length === 0;
+
   const selectedCustomer = useMemo(
     () => scopedCustomers.find((customer) => customer.id === Number(customerId)) || null,
     [scopedCustomers, customerId]
@@ -1638,14 +1895,47 @@ export default function DistributionInvoicesPage() {
 
   useEffect(() => {
     if (!token) return;
+    if (!isAdmin && !activeLoadId) {
+      setDeliveryOrders([]);
+      return;
+    }
     void fetchDeliveryOrders(effectiveLoadFilter || undefined);
-  }, [token, effectiveLoadFilter]);
+  }, [token, effectiveLoadFilter, isAdmin, activeLoadId]);
 
   useEffect(() => {
-    if (token && activeLoadId) {
+    if (token && (isAdmin || activeLoadId)) {
       void fetchData();
+      return;
     }
-  }, [token, activeLoadId]);
+    if (token && !isAdmin && !activeLoadId) {
+      setInvoices([]);
+    }
+  }, [token, activeLoadId, isAdmin]);
+
+  useEffect(() => {
+    if (!showModal || !showCustomerPicker) return;
+
+    const term = customerPickerSearch.trim();
+    if (!term) {
+      setCustomers([]);
+      return;
+    }
+
+    if (customerSearchDebounceTimerRef.current !== null) {
+      window.clearTimeout(customerSearchDebounceTimerRef.current);
+    }
+
+    customerSearchDebounceTimerRef.current = window.setTimeout(() => {
+      void fetchCustomerSuggestions(term);
+    }, 220);
+
+    return () => {
+      if (customerSearchDebounceTimerRef.current !== null) {
+        window.clearTimeout(customerSearchDebounceTimerRef.current);
+        customerSearchDebounceTimerRef.current = null;
+      }
+    };
+  }, [showModal, showCustomerPicker, customerPickerSearch, token, activeLoadId, isAdmin]);
 
   const filteredInvoices = useMemo(() => {
     const searchTerm = invoiceSearch.trim().toLowerCase();
@@ -1746,6 +2036,15 @@ export default function DistributionInvoicesPage() {
     if (!search) return [] as LoadItemSuggestion[];
 
     const inventoryByCode = new Map(items.map((item) => [item.code, item] as const));
+    const damagedReturnQtyByCode = inlineReturnMode === 'deduct'
+      ? returnLines.reduce((map, line) => {
+          if (!line.is_damaged) return map;
+          const code = String(line.item_code || '').trim();
+          if (!code) return map;
+          map.set(code, (map.get(code) || 0) + Number(line.quantity || 0));
+          return map;
+        }, new Map<string, number>())
+      : new Map<string, number>();
     const lineQtyByLoadItemId = lines.reduce((map, line) => {
       if (!line.source_load_item_id) return map;
       const previous = map.get(line.source_load_item_id) || 0;
@@ -1770,6 +2069,7 @@ export default function DistributionInvoicesPage() {
           unit: matchedInventory?.unit || 'qty',
           load_qty: loadQty,
           load_available_qty: Math.max(0, currentAvailableFromServer + originalReserved - usedQty),
+          return_damaged_qty: Number(damagedReturnQtyByCode.get(loadItem.product_code) || 0),
           sell_price: loadItem.sell_price > 0 ? loadItem.sell_price : Number(matchedInventory?.sell_price || 0),
           warehouse_stock: Number(matchedInventory?.current_stock || 0),
         } as LoadItemSuggestion;
@@ -1778,19 +2078,21 @@ export default function DistributionInvoicesPage() {
         item.item_code.toLowerCase().includes(search) || item.item_name.toLowerCase().includes(search)
       )
       .slice(0, 8);
-  }, [itemSearch, loadItems, items, activeLoadId, lines, originalLoadReservedByLoadItemId]);
+  }, [itemSearch, loadItems, items, activeLoadId, lines, originalLoadReservedByLoadItemId, returnLines, inlineReturnMode]);
   const selectedItem = useMemo(() => {
     if (selectedLoadItemId) {
       const selectedLoadRow = loadItems.find((li) => String(li.id) === String(selectedLoadItemId));
       if (selectedLoadRow) {
         const matchedInventory = items.find((item) => item.code === selectedLoadRow.product_code);
+        const warehouseStock = Number(matchedInventory?.current_stock || 0);
         return {
           id: matchedInventory?.id || 0,
           name: selectedLoadRow.name || matchedInventory?.name || selectedLoadRow.product_code,
           code: selectedLoadRow.product_code,
           unit: matchedInventory?.unit || 'qty',
           sell_price: selectedLoadRow.sell_price > 0 ? selectedLoadRow.sell_price : Number(matchedInventory?.sell_price || 0),
-          current_stock: Number(selectedLoadRow.qty) || Number(matchedInventory?.current_stock || 0),
+          // Warehouse must reflect inventory stock, not current load qty.
+          current_stock: warehouseStock,
         } as Item;
       }
     }
@@ -1804,6 +2106,10 @@ export default function DistributionInvoicesPage() {
     }
     return Math.max(0, value);
   }, [discountType, discountValue, subtotal]);
+  const totalDiscountPreview = useMemo(
+    () => totalLineItemDiscount + discountAmount,
+    [totalLineItemDiscount, discountAmount]
+  );
   const totalReturnValue = useMemo(
     () => returnLines.reduce((sum, line) => sum + Number(line.amount || 0), 0),
     [returnLines]
@@ -1824,16 +2130,42 @@ export default function DistributionInvoicesPage() {
     [subtotal, payloadDiscount]
   );
 
+  const exchangeLoadAvailableByCode = useMemo(() => {
+    const reservedByCode = returnLines.reduce((map, line) => {
+      const code = String(line.item_code || '').trim();
+      if (!code) return map;
+      map.set(code, (map.get(code) || 0) + Number(line.quantity || 0));
+      return map;
+    }, new Map<string, number>());
+
+    return loadItems
+      .filter((loadItem) => !activeLoadId || String(loadItem.load_id) === String(activeLoadId))
+      .reduce((map, loadItem) => {
+        const code = String(loadItem.product_code || '').trim();
+        if (!code) return map;
+        const availableFromLoad = Number(loadItem.qty || 0);
+        const reservedQty = Number(reservedByCode.get(code) || 0);
+        const remaining = Math.max(0, availableFromLoad - reservedQty);
+        map.set(code, (map.get(code) || 0) + remaining);
+        return map;
+      }, new Map<string, number>());
+  }, [loadItems, activeLoadId, returnLines]);
+
   const returnSuggestionItems = useMemo(() => {
     const term = returnSearch.trim().toLowerCase();
     if (!term) return [] as Item[];
+
     return items
       .filter((item) =>
         item.code.toLowerCase().includes(term) ||
         item.name.toLowerCase().includes(term)
       )
+      .filter((item) => {
+        if (inlineReturnMode !== 'exchange') return true;
+        return Number(exchangeLoadAvailableByCode.get(item.code) || 0) > 0;
+      })
       .slice(0, 8);
-  }, [returnSearch, items]);
+  }, [returnSearch, items, inlineReturnMode, exchangeLoadAvailableByCode]);
   const resetInvoiceForm = () => {
     setInvoiceNumber(generateInvoiceNumber());
     setCustomerId('');
@@ -1872,6 +2204,7 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+    setPaymentCompanyBankAccountId('');
     setPaymentCheques([]);
     setRefGpsSnapshot(null);
     setBillingGpsSnapshot(null);
@@ -1933,6 +2266,7 @@ export default function DistributionInvoicesPage() {
   };
 
   const startEditInvoice = (invoice: InvoiceRecord) => {
+    setCreateDocumentMode('invoice');
     setEditingInvoiceId(invoice.id);
 
     setInvoiceNumber(invoice.invoice_number);
@@ -1977,6 +2311,7 @@ export default function DistributionInvoicesPage() {
     setPaymentChequeDate(new Date().toISOString().split('T')[0]);
     setPaymentReference('');
     setPaymentBankName('');
+    setPaymentCompanyBankAccountId('');
     setPaymentCheques([]);
 
     const refLat = Number(invoice.ref_latitude);
@@ -2079,7 +2414,8 @@ export default function DistributionInvoicesPage() {
     }
   };
 
-  const openCreate = () => {
+  const openCreate = (mode: 'invoice' | 'dispatch_order' = 'invoice') => {
+    setCreateDocumentMode(mode);
     setEditingInvoiceId(null);
     resetInvoiceForm();
     if (assignedRouteIds.length > 0 && scopedCustomers.length === 1) {
@@ -2204,25 +2540,39 @@ export default function DistributionInvoicesPage() {
     };
   }, [showModal, showReturnModal]);
 
-  const submitInvoice = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitInvoiceWithMode = async (markAsDispatchOrder: boolean) => {
     const isEditing = editingInvoiceId !== null;
     const selectedLoadId = activeLoadId || (isAdmin ? selectedLoadFilter : '');
     const effectiveLoadId = selectedLoadId ? Number(selectedLoadId) : null;
-    const hasBillToBillSettlement = addPayment && paymentMethod === 'bill_to_bill' && billToBillPreviousSettlementAmount > 0;
+    const hasBillToBillSettlement = !markAsDispatchOrder && addPayment && paymentMethod === 'bill_to_bill' && billToBillPreviousSettlementAmount > 0;
     const hasBillToBillCurrentInvoicePayment = addPayment && paymentMethod === 'bill_to_bill' && billToBillCurrentInvoicePaidAmount > 0;
-    const outstandingSettlementAmount = Number(outstandingPaymentAmount || 0);
-    const hasOutstandingSettlement = addPayment && paymentMethod !== 'bill_to_bill' && outstandingSettlementAmount > 0;
+    const outstandingSettlementAmount = markAsDispatchOrder ? 0 : Number(outstandingPaymentAmount || 0);
+    const hasOutstandingSettlement = !markAsDispatchOrder && addPayment && paymentMethod !== 'bill_to_bill' && outstandingSettlementAmount > 0;
     const chequeEntries = [
       { amount: paymentAmount, chequeDate: paymentChequeDate, reference: paymentReference, bankName: paymentBankName },
       ...paymentCheques,
     ];
+    const resolvedPaymentBankName = paymentMethod === 'bank_transfer'
+      ? selectedPaymentCompanyBankAccountLabel
+      : paymentBankName.trim();
     const normalPaymentAmount = paymentMethod === 'check'
       ? chequeEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0)
       : Number(paymentAmount || 0);
-    const hasNormalPayment = addPayment && paymentMethod !== 'bill_to_bill' && normalPaymentAmount > 0;
+    const hasNormalPayment = !markAsDispatchOrder && addPayment && paymentMethod !== 'bill_to_bill' && normalPaymentAmount > 0;
     if (!customerId || lines.length === 0) {
       setQtyWarningMessage('Select customer and add at least one item line.');
+      setQtyWarningOpen(true);
+      return;
+    }
+
+    if (markAsDispatchOrder && addPayment) {
+      setQtyWarningMessage('DO is stored in a separate table and does not accept invoice payment entries. Save payment after final invoice.');
+      setQtyWarningOpen(true);
+      return;
+    }
+
+    if (markAsDispatchOrder && returnLines.length > 0) {
+      setQtyWarningMessage('DO is separate from invoice returns. Remove return lines before creating DO.');
       setQtyWarningOpen(true);
       return;
     }
@@ -2258,7 +2608,7 @@ export default function DistributionInvoicesPage() {
       }
     }
 
-    if (!isEditing && !refGpsSnapshot && !bypassRefGpsCheckOnce) {
+    if (!isEditing && !markAsDispatchOrder && !refGpsSnapshot && !bypassRefGpsCheckOnce) {
       setQtyWarningMessage('Capture Ref GPS before creating the invoice to enable location tracking.');
       setQtyWarningOpen(true);
       return;
@@ -2295,9 +2645,21 @@ export default function DistributionInvoicesPage() {
         setQtyWarningOpen(true);
         return;
       }
+
+      if (paymentMethod === 'bank_transfer' && (hasNormalPayment || hasOutstandingSettlement) && !selectedPaymentCompanyBankAccount) {
+        setQtyWarningMessage('Select a company bank account for bank transfer payments.');
+        setQtyWarningOpen(true);
+        return;
+      }
     }
 
     if (addPayment && paymentMethod === 'bill_to_bill') {
+      if (markAsDispatchOrder) {
+        setQtyWarningMessage('DO (Proforma Invoice) cannot settle previous bill balances. Please use Cash/Check/Bank Transfer for current invoice only.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
       if (isEditing) {
         setQtyWarningMessage('Bill To Bill option is available for new invoices only.');
         setQtyWarningOpen(true);
@@ -2351,6 +2713,11 @@ export default function DistributionInvoicesPage() {
 
     const composedNotes = (() => {
         const parts: string[] = [];
+        if (markAsDispatchOrder) {
+          parts.push('[DO (PROFORMA INVOICE)]');
+          parts.push('Mode: Dispatch Order (Proforma Invoice)');
+          parts.push('Outstanding policy: Previous bill balances are excluded from this DO invoice.');
+        }
         if (notes.trim()) parts.push(notes.trim());
 
         if (lines.length > 0) {
@@ -2380,7 +2747,7 @@ export default function DistributionInvoicesPage() {
           returnLines.forEach((line) => {
             const lineValue = Number(line.amount || 0);
             parts.push(
-              `- ${line.quantity.toFixed(2)} x ${line.item_name} (${line.item_code}) @ ${line.unit_price.toFixed(2)} => amount ${lineValue.toFixed(2)}${line.is_damaged ? ' [DAMAGED]' : ''}`
+              `- ${line.quantity.toFixed(2)} x ${line.item_name} (${line.item_code}) @ ${line.unit_price.toFixed(2)} => amount ${lineValue.toFixed(2)}${line.is_damaged ? ' [DAMAGED]' : ''}${inlineReturnMode === 'exchange' ? ' [EXCHANGE]' : ''}`
             );
           });
           parts.push(`Total return value: ${totalReturnValue.toFixed(2)}`);
@@ -2428,8 +2795,8 @@ export default function DistributionInvoicesPage() {
                   parts.push(`Cheque ${index + 1}: ${Number(entry.amount).toFixed(2)} on ${entry.chequeDate}${entry.reference ? ` (${entry.reference})` : ''}${entry.bankName ? ` - ${entry.bankName}` : ''}`);
                 });
               }
-              if (paymentBankName.trim()) {
-                parts.push(`Bank: ${paymentBankName.trim()}`);
+              if (resolvedPaymentBankName) {
+                parts.push(`Bank: ${resolvedPaymentBankName}`);
               }
               if (paymentReference.trim()) {
                 parts.push(`Reference: ${paymentReference.trim()}`);
@@ -2538,7 +2905,7 @@ export default function DistributionInvoicesPage() {
             date: paymentDate || invoiceDate,
             cheque_date: null,
             reference: paymentReference || null,
-            bank_name: paymentBankName || null,
+            bank_name: resolvedPaymentBankName || null,
             target_invoice_id: null,
             is_outstanding_settlement: false,
           });
@@ -2551,7 +2918,7 @@ export default function DistributionInvoicesPage() {
             date: paymentDate || invoiceDate,
             cheque_date: null,
             reference: paymentReference || null,
-            bank_name: paymentBankName || null,
+            bank_name: resolvedPaymentBankName || null,
             target_invoice_id: Number(billToBillTargetInvoice.id || 0),
             is_outstanding_settlement: true,
           });
@@ -2564,7 +2931,7 @@ export default function DistributionInvoicesPage() {
             date: paymentDate || invoiceDate,
             cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
             reference: paymentReference || null,
-            bank_name: paymentBankName || null,
+            bank_name: resolvedPaymentBankName || null,
             target_invoice_id: null,
             is_outstanding_settlement: false,
           });
@@ -2578,7 +2945,7 @@ export default function DistributionInvoicesPage() {
             date: paymentDate || invoiceDate,
             cheque_date: paymentMethod === 'check' ? (paymentChequeDate || null) : null,
             reference: paymentReference || null,
-            bank_name: paymentBankName || null,
+            bank_name: resolvedPaymentBankName || null,
             target_invoice_id: Number(outstandingTargetInvoice.id || 0),
             is_outstanding_settlement: true,
           });
@@ -2606,6 +2973,15 @@ export default function DistributionInvoicesPage() {
             settlement_amount: inlineReturnMode === 'deduct' ? totalReturnValue : 0,
             exchange_inventory_item_id: null,
             exchange_quantity: 0,
+            return_lines: returnLines.map((line) => ({
+              inventory_item_id: Number(line.inventory_item_id || 0) || null,
+              item_code: String(line.item_code || ''),
+              item_name: String(line.item_name || ''),
+              quantity: Number(line.quantity || 0),
+              unit_price: Number(line.unit_price || 0),
+              amount: Number(line.amount || 0),
+              is_damaged: Boolean(line.is_damaged),
+            })),
             reason: inlineReturnMode === 'deduct' && hasDamagedReturns ? 'damaged_items' : null,
             status: 'approved',
             notes: composedNotes,
@@ -2617,6 +2993,7 @@ export default function DistributionInvoicesPage() {
         createdAt: new Date().toISOString(),
         payload: {
           ...baseInvoicePayload,
+          mark_as_dispatch_order: markAsDispatchOrder,
           payment: paymentPayload,
           payments: paymentPayloads,
           returnPayload,
@@ -2665,7 +3042,7 @@ export default function DistributionInvoicesPage() {
           payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
           reference_no: payment.reference,
           bank_name: payment.bank_name,
-          status: 'received',
+          status: payment.method === 'bank_transfer' ? 'pending' : 'received',
         })),
         notes: composedNotes,
       };
@@ -2698,6 +3075,7 @@ export default function DistributionInvoicesPage() {
             due_date: dueDate || null,
             discount: payloadDiscount,
             status: undefined,
+            mark_as_dispatch_order: markAsDispatchOrder,
             notes: composedNotes,
             ref_latitude: refGpsSnapshot?.latitude ?? null,
             ref_longitude: refGpsSnapshot?.longitude ?? null,
@@ -2713,13 +3091,16 @@ export default function DistributionInvoicesPage() {
         );
         savedInvoice = updateRes.data?.data;
       } else {
-        const invoiceRes = await axios.post('/api/distribution/invoices', {
+        const createEndpoint = markAsDispatchOrder
+          ? '/api/distribution/dos'
+          : '/api/distribution/invoices';
+        const invoiceRes = await axios.post(createEndpoint, {
           ...baseInvoicePayload,
         }, { headers: { Authorization: `Bearer ${token}` } });
         savedInvoice = invoiceRes.data?.data;
       }
 
-      if (paymentPayloads.length > 0 && savedInvoice?.id) {
+      if (!markAsDispatchOrder && paymentPayloads.length > 0 && savedInvoice?.id) {
         try {
           const paymentRows = paymentPayloads.map((payment) => ({
             payment_number: generatePaymentNumber(),
@@ -2732,7 +3113,7 @@ export default function DistributionInvoicesPage() {
             payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
             reference_no: payment.reference || null,
             bank_name: payment.bank_name || null,
-            status: 'received',
+            status: payment.method === 'bank_transfer' ? 'pending' : 'received',
             notes: payment.is_outstanding_settlement
               ? `Outstanding settlement from invoice ${savedInvoice.invoice_number}`
               : `Auto payment from invoice ${savedInvoice.invoice_number}`,
@@ -2747,7 +3128,7 @@ export default function DistributionInvoicesPage() {
         }
       }
 
-      if (returnLines.length > 0 && savedInvoice?.id) {
+      if (!markAsDispatchOrder && returnLines.length > 0 && savedInvoice?.id) {
         try {
           const hasDamagedReturns = returnLines.some((line) => line.is_damaged);
           const totalReturnQty = returnLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0);
@@ -2763,6 +3144,15 @@ export default function DistributionInvoicesPage() {
             settlement_amount: inlineReturnMode === 'deduct' ? totalReturnValue : 0,
             exchange_inventory_item_id: null,
             exchange_quantity: 0,
+            return_lines: returnLines.map((line) => ({
+              inventory_item_id: Number(line.inventory_item_id || 0) || null,
+              item_code: String(line.item_code || ''),
+              item_name: String(line.item_name || ''),
+              quantity: Number(line.quantity || 0),
+              unit_price: Number(line.unit_price || 0),
+              amount: Number(line.amount || 0),
+              is_damaged: Boolean(line.is_damaged),
+            })),
             reason: inlineReturnMode === 'deduct' && hasDamagedReturns ? 'damaged_items' : null,
             status: 'approved',
             notes: composedNotes,
@@ -2773,10 +3163,14 @@ export default function DistributionInvoicesPage() {
       }
 
       setShowModal(false);
+      setCreateDocumentMode('invoice');
       setEditingInvoiceId(null);
       resetInvoiceForm();
 
       await fetchData();
+      if (activeLoadId) {
+        await fetchLoadItems(activeLoadId);
+      }
 
       if (!isEditing && savedInvoice) {
         const currentInvoicePayments = savedPaymentEntries.filter((payment) => !payment.target_invoice_id);
@@ -2793,7 +3187,7 @@ export default function DistributionInvoicesPage() {
             payment_method: payment.method === 'bill_to_bill' ? 'cash' : payment.method,
             reference_no: payment.reference,
             bank_name: payment.bank_name,
-            status: 'received',
+            status: payment.method === 'bank_transfer' ? 'pending' : 'received',
           })),
         } as InvoiceRecord;
         openReceiptPreview(receiptInvoice);
@@ -2809,6 +3203,12 @@ export default function DistributionInvoicesPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const submitInvoice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const markAsDispatchOrder = editingInvoiceId === null && createDocumentMode === 'dispatch_order';
+    await submitInvoiceWithMode(markAsDispatchOrder);
   };
   const handleReturnSuggestionClick = (item: Item) => {
     setReturnSelectedItemId(String(item.id));
@@ -3007,6 +3407,28 @@ export default function DistributionInvoicesPage() {
     );
   }
 
+  if (isSalesRefWithoutAllocatedRoute) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex items-center justify-center px-4">
+        <div className="max-w-xl w-full rounded-2xl border border-amber-200 bg-white/90 p-6 shadow-lg">
+          <h1 className="text-lg font-semibold text-slate-900">Invoices Hidden For Security</h1>
+          <p className="mt-2 text-sm text-slate-700">
+            No allocated route was found for this sales ref account, so invoice access is blocked. Please contact admin to assign a route.
+          </p>
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              onClick={() => router.push('/dashboard/distribution')}
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Back to Distribution
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 distribution-invoices-page relative overflow-hidden">
       <div className="absolute inset-0 opacity-40 pointer-events-none">
@@ -3016,7 +3438,7 @@ export default function DistributionInvoicesPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-md shadow-sm border-b border-white/60">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 h-auto">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <div className="flex items-center gap-3">
@@ -3036,13 +3458,12 @@ export default function DistributionInvoicesPage() {
               >
                 Back to Dashboard
               </button>}
-              {!widgetControlsLocked && isWidgetVisible('distribution-invoices-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-nav-back-button', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
           </div>
         </div>
       </nav>
 
-      <div className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <div className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
 
         {isWidgetVisible('distribution-invoices-hero-card') && <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div>
@@ -3070,14 +3491,18 @@ export default function DistributionInvoicesPage() {
               Distribution Home
             </button>
             <button
-              onClick={openCreate}
+              onClick={() => openCreate('invoice')}
               className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 w-full sm:w-auto shadow-lg shadow-emerald-200/50 transition-all"
             >
               Add Invoice
             </button>
-            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-hero-action-buttons', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+            <button
+              onClick={() => openCreate('dispatch_order')}
+              className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 border border-transparent rounded-md text-sm font-semibold text-white hover:from-cyan-700 hover:to-blue-700 w-full sm:w-auto shadow-lg shadow-cyan-200/50 transition-all"
+            >
+              Add DO
+            </button>
           </div>}
-          {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-hero-card', false)} className="w-fit rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
         </div>}
 
         {isWidgetVisible('distribution-invoices-filters-card') && <div className="mb-4 rounded-xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-lg p-3 sm:p-4">
@@ -3094,7 +3519,7 @@ export default function DistributionInvoicesPage() {
               className="text-xs text-gray-600 hover:text-gray-800 underline"
             >
               Clear Filters
-            </button>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-filters-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
+            </button></div>
           </div>
 
           <div className={`grid grid-cols-1 gap-3 sm:gap-4 items-end ${isAdmin ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
@@ -3158,9 +3583,8 @@ export default function DistributionInvoicesPage() {
           <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-emerald-50 flex items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-semibold text-gray-800">Delivery Orders By Load</h3>
-              <p className="text-xs text-gray-500 mt-0.5">DO records created from Outlet POS orders with assigned loads.</p>
+              <p className="text-xs text-gray-500 mt-0.5">DO records from Outlet POS and Distribution DO (Proforma Invoice).</p>
             </div>
-            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-invoices-delivery-orders-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
 
           <div className="hidden md:block overflow-x-auto">
@@ -3185,7 +3609,7 @@ export default function DistributionInvoicesPage() {
                   </tr>
                 ) : (
                   filteredDeliveryOrders.map((record) => (
-                    <tr key={record.id} className="hover:bg-cyan-50/40 transition-colors">
+                    <tr key={`${record.source}-${record.id}`} className="hover:bg-cyan-50/40 transition-colors">
                       <td className="px-4 py-2 text-sm font-semibold text-cyan-700">{record.do_number || '-'}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{record.sale_number}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">{record.load_id ? `Load #${record.load_id}` : '-'}</td>
@@ -3193,7 +3617,7 @@ export default function DistributionInvoicesPage() {
                       <td className="px-4 py-2 text-sm text-gray-700">{record.sale_date ? new Date(record.sale_date).toLocaleDateString() : '-'}</td>
                       <td className="px-4 py-2 text-sm text-gray-700 text-right">{Number(record.total_amount || 0).toFixed(2)}</td>
                       <td className="px-4 py-2 text-sm text-gray-700">
-                        {record.outlet?.name || '-'}
+                        {record.source === 'distribution_do' ? 'Distribution' : (record.outlet?.name || '-')}
                         {record.outlet?.code ? ` (${record.outlet.code})` : ''}
                       </td>
                     </tr>
@@ -3210,7 +3634,7 @@ export default function DistributionInvoicesPage() {
               </div>
             ) : (
               filteredDeliveryOrders.map((record) => (
-                <div key={record.id} className="space-y-1.5 px-4 py-3">
+                <div key={`${record.source}-${record.id}`} className="space-y-1.5 px-4 py-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold text-cyan-700">{record.do_number || '-'}</p>
                     <p className="text-xs text-gray-500">{record.sale_date ? new Date(record.sale_date).toLocaleDateString() : '-'}</p>
@@ -3222,7 +3646,7 @@ export default function DistributionInvoicesPage() {
                     <span className="font-semibold text-gray-900">{Number(record.total_amount || 0).toFixed(2)}</span>
                   </div>
                   <p className="text-xs text-gray-500">
-                    {record.outlet?.name || '-'}
+                    {record.source === 'distribution_do' ? 'Distribution' : (record.outlet?.name || '-')}
                     {record.outlet?.code ? ` (${record.outlet.code})` : ''}
                   </p>
                 </div>
@@ -3257,7 +3681,16 @@ export default function DistributionInvoicesPage() {
                 ) : (
                   pagedInvoices.map((invoice) => (
                     <tr key={invoice.id} className="hover:bg-emerald-50/50 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{invoice.invoice_number}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        <div className="flex items-center gap-2">
+                          <span>{invoice.invoice_number}</span>
+                          {invoice.is_dispatch_order && (
+                            <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-700">
+                              {invoice.dispatch_order_number || 'DO'}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{invoice.customer?.shop_name || '-'}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{new Date(invoice.invoice_date).toLocaleDateString()}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 text-right">{Number(invoice.total).toFixed(2)}</td>
@@ -3306,7 +3739,14 @@ export default function DistributionInvoicesPage() {
             ) : pagedInvoices.map((invoice) => (
               <div key={invoice.id} className="p-4 space-y-2">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold text-gray-900">{invoice.invoice_number}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-semibold text-gray-900">{invoice.invoice_number}</p>
+                    {invoice.is_dispatch_order && (
+                      <span className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-cyan-700">
+                        {invoice.dispatch_order_number || 'DO'}
+                      </span>
+                    )}
+                  </div>
                   <span className="text-xs text-gray-600">{invoice.status}</span>
                 </div>
                 <p className="text-sm text-gray-700">{invoice.customer?.shop_name || '-'}</p>
@@ -3385,13 +3825,26 @@ export default function DistributionInvoicesPage() {
           <div className="relative mx-auto flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white/92 shadow-[0_35px_120px_-45px_rgba(16,185,129,0.6)] md:h-auto md:max-h-[92vh]">
             <div className="flex items-start justify-between border-b border-slate-200/80 bg-gradient-to-r from-emerald-50/80 via-white to-cyan-50/70 px-4 pb-3 pt-4 backdrop-blur-sm md:px-6">
               {isWidgetVisible('distribution-invoices-create-modal-heading') && <div>
-                <h3 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg md:text-xl">Create Invoice</h3>
-                <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">Select shop, add items, and optionally record payment in one flow.</p>
+                <h3 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg md:text-xl">
+                  {editingInvoiceId
+                    ? 'Edit Invoice'
+                    : createDocumentMode === 'dispatch_order'
+                      ? 'Create DO (Proforma Invoice)'
+                      : 'Create Invoice'}
+                </h3>
+                <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">
+                  {editingInvoiceId
+                    ? 'Adjust delivered quantities and update this invoice. Use Update as DO when final delivered quantity changed.'
+                    : createDocumentMode === 'dispatch_order'
+                      ? 'Create a Dispatch Order (Proforma Invoice) in a separate flow.'
+                      : 'Select shop, add items, and optionally record payment in one flow.'}
+                </p>
               </div>}
               <button
                 type="button"
                 onClick={() => {
                   setShowModal(false);
+                  setCreateDocumentMode('invoice');
                   resetInvoiceForm();
                 }}
                 className="ml-3 inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-300 bg-white text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
@@ -3435,10 +3888,11 @@ export default function DistributionInvoicesPage() {
                             const value = e.target.value;
                             setCustomerPickerSearch(value);
                             setCustomerId('');
-                            setCustomers([]);
+                            if (!value.trim()) {
+                              setCustomers([]);
+                            }
                             setShowCustomerPicker(true);
                             setHighlightedCustomerIndex(-1);
-                            void fetchCustomerSuggestions(value);
                           }}
                           onFocus={() => {
                             setShowCustomerPicker(true);
@@ -3656,7 +4110,9 @@ export default function DistributionInvoicesPage() {
                                 >
                                   <div className="text-sm font-medium text-slate-900">{item.item_code} - {item.item_name}</div>
                                   <div className="text-xs text-slate-500">
-                                    {`Load: ${item.load_qty.toFixed(2)} ${item.unit} | Load Available: ${item.load_available_qty.toFixed(2)} ${item.unit} | Stock: ${item.warehouse_stock} ${item.unit} | Price: ${item.sell_price.toFixed(2)}`}
+                                    {item.return_damaged_qty > 0
+                                      ? `Load: ${item.load_qty.toFixed(2)} ${item.unit} | Return Damaged: ${item.return_damaged_qty.toFixed(2)} ${item.unit} | Price: ${item.sell_price.toFixed(2)}`
+                                      : `Load: ${item.load_qty.toFixed(2)} ${item.unit} | Load Available: ${item.load_available_qty.toFixed(2)} ${item.unit} | Price: ${item.sell_price.toFixed(2)}`}
                                   </div>
                                 </button>
                               );
@@ -3806,8 +4262,9 @@ export default function DistributionInvoicesPage() {
                           <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Item</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Qty (Paid)</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Free Qty</th>
-                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Disc %</th>
-                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Unit Price</th>
+                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Amount</th>
+                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Discount</th>
+                          <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">After Disc (Unit)</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Line Total</th>
                           <th className="px-4 py-2 text-right text-xs text-gray-500 uppercase">Action</th>
                         </tr>
@@ -3829,6 +4286,11 @@ export default function DistributionInvoicesPage() {
                               typeof line.paid_quantity === 'number'
                                 ? line.paid_quantity
                                 : line.quantity - freeQty;
+                            const baseUnitPrice = getLineBasePrice(line);
+                            const discountPerUnit = line.item_discount || 0;
+                            const amountBeforeDiscount = paidQty * baseUnitPrice;
+                            const lineDiscountAmount = paidQty * discountPerUnit;
+                            const lineTotal = paidQty * line.unit_price;
                             const isEditing = editingLineId === line.line_id;
                             return (
                               <tr key={line.line_id}>
@@ -3874,23 +4336,24 @@ export default function DistributionInvoicesPage() {
                                   )}
                                 </td>
                                 <td className="px-4 py-1 text-sm text-gray-700 text-right align-middle">
+                                  <span>{amountBeforeDiscount.toFixed(2)}</span>
+                                </td>
+                                <td className="px-4 py-1 text-sm text-gray-700 text-right align-middle">
                                   {isEditing ? (
                                     <input
                                       type="number"
-                                      min={0}
-                                      max={100}
                                       step="0.01"
-                                      value={getLineDiscountPercent(line)}
+                                      value={discountPerUnit}
                                       onChange={(e) =>
-                                        updateLineDiscountPercent(
+                                        updateLineUnitPrice(
                                           line.line_id,
-                                          Number(e.target.value) || 0
+                                          Math.max(0, baseUnitPrice - (Number(e.target.value) || 0))
                                         )
                                       }
                                       className="w-24 rounded-md border border-gray-300 text-right text-sm text-black px-2 py-1"
                                     />
                                   ) : (
-                                    <span>{getLineDiscountPercent(line).toFixed(2)}%</span>
+                                    <span>{lineDiscountAmount.toFixed(2)}</span>
                                   )}
                                 </td>
                                 <td className="px-4 py-1 text-sm text-gray-700 text-right align-middle">
@@ -3912,7 +4375,7 @@ export default function DistributionInvoicesPage() {
                                   )}
                                 </td>
                                 <td className="px-4 py-2 text-sm text-gray-700 text-right">
-                                  {(paidQty * line.unit_price).toFixed(2)}
+                                  {lineTotal.toFixed(2)}
                                 </td>
                                 <td className="px-4 py-2 text-right">
                                   <div className="flex justify-end gap-2">
@@ -3950,19 +4413,19 @@ export default function DistributionInvoicesPage() {
                       <tfoot className="bg-gray-50">
                         <tr>
                           <td
-                            colSpan={5}
+                            colSpan={6}
                             className="px-4 py-2 text-right text-sm font-semibold text-gray-700"
                           >
                             Discount
                           </td>
                           <td className="px-4 py-2 text-right text-sm font-semibold text-gray-700">
-                            {discountAmount.toFixed(2)}
+                            {totalDiscountPreview.toFixed(2)}
                           </td>
                           <td></td>
                         </tr>
                         <tr>
                           <td
-                            colSpan={5}
+                            colSpan={6}
                             className="px-4 py-2 text-right text-sm font-semibold text-gray-700"
                           >
                             Bill total (before returns)
@@ -3998,19 +4461,26 @@ export default function DistributionInvoicesPage() {
                           <div className="text-xs text-gray-500 mt-1">
                             Qty: {line.quantity.toFixed(2)} {line.unit}
                           </div>
-                          {(freeQty > 0 || (line.item_discount || 0) > 0) && (
+                          {(() => {
+                            const baseUnitPrice = getLineBasePrice(line);
+                            const discountPerUnit = line.item_discount || 0;
+                            const amountBeforeDiscount = paidQty * baseUnitPrice;
+                            const lineDiscountAmount = paidQty * discountPerUnit;
+                            const lineTotal = paidQty * line.unit_price;
+                            return (
                             <div className="text-[11px] text-gray-500 mt-0.5">
-                              {freeQty > 0 && (
-                                <span>Free: {freeQty.toFixed(2)} {line.unit}</span>
-                              )}
-                              {freeQty > 0 && (line.item_discount || 0) > 0 && (
-                                <span className="mx-1">·</span>
-                              )}
-                              {(line.item_discount || 0) > 0 && (
-                                <span>Disc: {getLineDiscountPercent(line).toFixed(2)}%</span>
-                              )}
+                              {freeQty > 0 && <span>Free: {freeQty.toFixed(2)} {line.unit}</span>}
+                              {freeQty > 0 && <span className="mx-1">·</span>}
+                              <span>Amount: {amountBeforeDiscount.toFixed(2)}</span>
+                              <span className="mx-1">·</span>
+                              <span>Discount: {lineDiscountAmount.toFixed(2)}</span>
+                              <span className="mx-1">·</span>
+                              <span>After Disc: {line.unit_price.toFixed(2)}</span>
+                              <span className="mx-1">·</span>
+                              <span>Total: {lineTotal.toFixed(2)}</span>
                             </div>
-                          )}
+                            );
+                          })()}
                           {isEditing && (
                             <div className="mt-2 space-y-1 text-[11px] text-gray-700">
                               <div className="flex items-center justify-between gap-2">
@@ -4046,17 +4516,15 @@ export default function DistributionInvoicesPage() {
                                 />
                               </div>
                               <div className="flex items-center justify-between gap-2">
-                                <span className="text-gray-500">Disc %</span>
+                                <span className="text-gray-500">Disc / Unit</span>
                                 <input
                                   type="number"
-                                  min={0}
-                                  max={100}
                                   step="0.01"
-                                  value={getLineDiscountPercent(line)}
+                                  value={line.item_discount || 0}
                                   onChange={(e) =>
-                                    updateLineDiscountPercent(
+                                    updateLineUnitPrice(
                                       line.line_id,
-                                      Number(e.target.value) || 0
+                                      Math.max(0, getLineBasePrice(line) - (Number(e.target.value) || 0))
                                     )
                                   }
                                   className="w-20 rounded-md border border-gray-300 text-right text-[11px] text-black px-1 py-0.5"
@@ -4120,7 +4588,7 @@ export default function DistributionInvoicesPage() {
                 )}
                 <div className="px-4 py-2 bg-gray-50 flex justify-between text-sm font-semibold text-gray-700">
                   <span>Discount</span>
-                  <span>{discountAmount.toFixed(2)}</span>
+                  <span>{totalDiscountPreview.toFixed(2)}</span>
                 </div>
                 <div className="px-4 py-2 bg-gray-100 flex justify-between text-sm font-bold text-gray-900 rounded-b-lg">
                   <span>Bill total (before returns)</span>
@@ -4152,7 +4620,7 @@ export default function DistributionInvoicesPage() {
                 <div className="flex sm:items-end justify-between sm:justify-end">
                   <div className="text-xs text-gray-600 text-right">
                     <div>
-                      Discount value: <span className="font-semibold text-gray-900">{discountAmount.toFixed(2)}</span>
+                      Discount value: <span className="font-semibold text-gray-900">{totalDiscountPreview.toFixed(2)}</span>
                     </div>
                     <div>
                       Bill total (before returns): <span className="font-semibold text-gray-900">{invoiceTotalBeforeReturns.toFixed(2)}</span>
@@ -4229,7 +4697,7 @@ export default function DistributionInvoicesPage() {
                         </span>
                       </div>
                     </div>
-                    <div className={`grid grid-cols-1 gap-3 ${inlineReturnMode === 'deduct' ? 'sm:grid-cols-5' : 'sm:grid-cols-4'}`}>
+                    <div className={`grid grid-cols-1 gap-3 ${inlineReturnMode === 'deduct' ? 'sm:grid-cols-5' : 'sm:grid-cols-3'}`}>
                       <div className="sm:col-span-2">
                         <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Return Item</label>
                         <div className="relative">
@@ -4260,7 +4728,11 @@ export default function DistributionInvoicesPage() {
                                   className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-green-50"
                                 >
                                   <div className="text-xs font-medium text-gray-900">{item.code} - {item.name}</div>
-                                  <div className="text-[11px] text-gray-500">Stock: {item.current_stock} {item.unit}</div>
+                                  <div className="text-[11px] text-gray-500">
+                                    {inlineReturnMode === 'exchange'
+                                      ? `Load Available: ${Number(exchangeLoadAvailableByCode.get(item.code) || 0).toFixed(2)} ${item.unit}`
+                                      : `Stock: ${item.current_stock} ${item.unit}`}
+                                  </div>
                                 </button>
                               ))}
                             </div>
@@ -4286,17 +4758,19 @@ export default function DistributionInvoicesPage() {
                           placeholder="0.00"
                         />
                       </div>
-                      <div>
-                        <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Amount</label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={returnAmountInput}
-                          onChange={(e) => setReturnAmountInput(e.target.value)}
-                          className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm"
-                          placeholder="0.00"
-                        />
-                      </div>
+                      {inlineReturnMode === 'deduct' && (
+                        <div>
+                          <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Amount</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={returnAmountInput}
+                            onChange={(e) => setReturnAmountInput(e.target.value)}
+                            className="w-full rounded-xl border border-amber-200 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm"
+                            placeholder="0.00"
+                          />
+                        </div>
+                      )}
                       {inlineReturnMode === 'deduct' && (
                         <div>
                           <label className="mb-1.5 block h-4 whitespace-nowrap text-xs font-medium leading-4 text-gray-700">Damage</label>
@@ -4344,7 +4818,14 @@ export default function DistributionInvoicesPage() {
                                 const isEditing = editingReturnId === line.inventory_item_id;
                                 return (
                                   <tr key={line.inventory_item_id}>
-                                    <td className="px-3 py-1 text-[11px] text-gray-700">{line.item_name} ({line.item_code})</td>
+                                    <td className="px-3 py-1 text-[11px] text-gray-700">
+                                      {line.item_name} ({line.item_code})
+                                      {inlineReturnMode === 'exchange' && (
+                                        <span className="ml-1 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700">
+                                          Exchange
+                                        </span>
+                                      )}
+                                    </td>
                                     <td className="px-3 py-1 text-[11px] text-gray-700 text-right align-middle">
                                       {isEditing ? (
                                         <input
@@ -4470,7 +4951,14 @@ export default function DistributionInvoicesPage() {
                                 className="px-3 py-2 text-xs text-gray-700 flex justify-between gap-3"
                               >
                                 <div className="flex-1">
-                                  <div className="font-medium text-[11px]">{line.item_name}</div>
+                                  <div className="font-medium text-[11px]">
+                                    {line.item_name}
+                                    {inlineReturnMode === 'exchange' && (
+                                      <span className="ml-1 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700">
+                                        Exchange
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className="text-[10px] text-gray-500">{line.item_code}</div>
                                   {isEditing ? (
                                     <div className="mt-1">
@@ -4640,6 +5128,13 @@ export default function DistributionInvoicesPage() {
                               } else if (addPayment) {
                                 setPaymentAmount(invoiceFinalTotal.toFixed(2));
                               }
+                              if (nextMethod === 'bank_transfer') {
+                                if (!paymentCompanyBankAccountId && paymentCompanyBankAccounts.length > 0) {
+                                  setPaymentCompanyBankAccountId(String(paymentCompanyBankAccounts[0].id));
+                                }
+                              } else {
+                                setPaymentCompanyBankAccountId('');
+                              }
                               if (nextMethod !== 'check') {
                                 setPaymentChequeDate('');
                               } else if (!paymentChequeDate) {
@@ -4765,16 +5260,42 @@ export default function DistributionInvoicesPage() {
                         </div>
                       )}
 
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Bank Name (optional)</label>
-                        <input
-                          type="text"
-                          value={paymentBankName}
-                          onChange={(e) => setPaymentBankName(e.target.value)}
-                          className="w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
-                          placeholder="Bank / Branch"
-                        />
-                      </div>
+                      {paymentMethod === 'bank_transfer' ? (
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Company Bank Account</label>
+                          <select
+                            value={paymentCompanyBankAccountId}
+                            onChange={(e) => setPaymentCompanyBankAccountId(e.target.value)}
+                            className="w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                          >
+                            <option value="">Select bank account</option>
+                            {paymentCompanyBankAccounts.map((account) => {
+                              const bankName = String(account.bank_name || 'Bank Account').trim();
+                              const branch = String(account.branch || '').trim();
+                              const accountNo = String(account.account_no || '').trim();
+                              return (
+                                <option key={account.id} value={String(account.id)}>
+                                  {bankName}{branch ? ` - ${branch}` : ''}{accountNo ? ` (A/C: ${accountNo})` : ''}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          {paymentCompanyBankAccounts.length === 0 && (
+                            <p className="mt-1 text-[11px] text-amber-700">No company bank accounts found. Please add one in Main Account.</p>
+                          )}
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">Bank Name (optional)</label>
+                          <input
+                            type="text"
+                            value={paymentBankName}
+                            onChange={(e) => setPaymentBankName(e.target.value)}
+                            className="w-full rounded-xl border border-emerald-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm"
+                            placeholder="Bank / Branch"
+                          />
+                        </div>
+                      )}
 
                       {paymentMethod === 'check' && (
                         <div className="rounded-lg border border-cyan-100 bg-cyan-50/40 p-3 space-y-2">
@@ -4866,6 +5387,7 @@ export default function DistributionInvoicesPage() {
                       type="button"
                       onClick={() => {
                         setShowModal(false);
+                        setCreateDocumentMode('invoice');
                         resetInvoiceForm();
                       }}
                       className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 sm:w-auto"
@@ -4878,7 +5400,13 @@ export default function DistributionInvoicesPage() {
                       disabled={saving}
                       className="w-full rounded-xl border border-transparent bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-200/70 transition hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 sm:w-auto"
                     >
-                      {saving ? 'Saving…' : 'Create Invoice'}
+                      {saving
+                        ? 'Saving…'
+                        : editingInvoiceId !== null
+                          ? 'Update Invoice'
+                          : createDocumentMode === 'dispatch_order'
+                            ? 'Create DO'
+                            : 'Create Invoice'}
                     </button>
                   </div>
                 </div>
@@ -5125,8 +5653,8 @@ export default function DistributionInvoicesPage() {
             <div className="invoice-return-modal-scroll flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 text-sm text-gray-700">
               <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
                 <div>
-                  <div className="text-gray-500">Invoice Date</div>
-                  <div className="font-medium">{new Date(viewInvoice.invoice_date).toLocaleDateString()}</div>
+                  <div className="text-gray-500">Invoice Date & Time</div>
+                  <div className="font-medium">{formatDateTimeDisplay(viewInvoice.created_at || viewInvoice.invoice_date)}</div>
                 </div>
                 <div className="text-right">
                   <div className="text-gray-500">Status</div>
@@ -5155,6 +5683,7 @@ export default function DistributionInvoicesPage() {
                           <th className="px-3 py-2 text-left font-semibold">Code</th>
                           <th className="px-3 py-2 text-right font-semibold">Qty</th>
                           <th className="px-3 py-2 text-right font-semibold">Price</th>
+                          <th className="px-3 py-2 text-right font-semibold">Discount</th>
                           <th className="px-3 py-2 text-right font-semibold">Total</th>
                         </tr>
                       </thead>
@@ -5162,6 +5691,7 @@ export default function DistributionInvoicesPage() {
                         {viewInvoice.items.map((item, index) => {
                           const qty = Number(item.quantity) || 0;
                           const unitPrice = Number(item.unit_price) || 0;
+                          const lineDiscount = qty * Number(item.discount || 0);
                           const lineTotal = qty * unitPrice;
 
                           return (
@@ -5170,6 +5700,7 @@ export default function DistributionInvoicesPage() {
                               <td className="px-3 py-2 text-gray-600">{item.item_code}</td>
                               <td className="px-3 py-2 text-right text-gray-700">{qty.toFixed(2)}</td>
                               <td className="px-3 py-2 text-right text-gray-700">{unitPrice.toFixed(2)}</td>
+                              <td className="px-3 py-2 text-right text-gray-700">{lineDiscount.toFixed(2)}</td>
                               <td className="px-3 py-2 text-right font-semibold text-gray-900">{lineTotal.toFixed(2)}</td>
                             </tr>
                           );
@@ -5181,12 +5712,18 @@ export default function DistributionInvoicesPage() {
               </div>
 
               {(() => {
-                const subtotalVal = typeof viewInvoice.subtotal === 'number'
+                const netSubtotalFromItems = viewInvoice.items.reduce(
+                  (sum, it) => sum + Number(it.quantity || 0) * Number(it.unit_price || 0),
+                  0
+                );
+                const itemDiscountTotalFromItems = viewInvoice.items.reduce(
+                  (sum, it) => sum + Number(it.quantity || 0) * Number(it.discount || 0),
+                  0
+                );
+                const grossSubtotalFromItems = netSubtotalFromItems + itemDiscountTotalFromItems;
+                const storedSubtotal = typeof viewInvoice.subtotal === 'number'
                   ? Number(viewInvoice.subtotal)
-                  : viewInvoice.items.reduce(
-                      (sum, it) => sum + Number(it.quantity || 0) * Number(it.unit_price || 0),
-                      0
-                    );
+                  : netSubtotalFromItems;
 
                 const notesText = String(viewInvoice.notes || '');
                 let rawReturnAmount = 0;
@@ -5211,8 +5748,14 @@ export default function DistributionInvoicesPage() {
 
                 const effectiveReturnAmount = deductsFromInvoice ? Math.max(0, rawReturnAmount) : 0;
                 const rawDiscount = Number(viewInvoice.discount ?? 0);
-                const discountVal = Math.max(0, rawDiscount - effectiveReturnAmount);
-                const totalVal = Number(viewInvoice.total ?? Math.max(0, subtotalVal - rawDiscount));
+                const storedNonReturnDiscount = Math.max(0, rawDiscount - effectiveReturnAmount);
+                const subtotalLooksLegacyNet = Math.abs(storedSubtotal - netSubtotalFromItems) < 0.01
+                  && Math.abs(storedSubtotal - grossSubtotalFromItems) >= 0.01;
+                const subtotalVal = subtotalLooksLegacyNet ? grossSubtotalFromItems : storedSubtotal;
+                const discountVal = subtotalLooksLegacyNet
+                  ? storedNonReturnDiscount + itemDiscountTotalFromItems
+                  : storedNonReturnDiscount;
+                const totalVal = Math.max(0, subtotalVal - discountVal - effectiveReturnAmount);
 
                 return (
                   <div className="mt-1 space-y-1 text-xs sm:text-sm">
@@ -5252,8 +5795,8 @@ export default function DistributionInvoicesPage() {
                           <span>#{index + 1} {String(payment.payment_method || '').toUpperCase()}</span>
                           <span>{Number(payment.amount || 0).toFixed(2)}</span>
                         </div>
-                        <div>Date: {payment.payment_date || '-'}</div>
-                        {payment.cheque_date && <div>Cheque date: {payment.cheque_date}</div>}
+                        <div>Date: {formatDateTimeDisplay(payment.created_at || payment.payment_date)}</div>
+                        {payment.cheque_date && <div>Cheque date: {formatDateTimeDisplay(payment.cheque_date)}</div>}
                         {payment.reference_no && <div>Cheque / Reference: {payment.reference_no}</div>}
                         {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
                         {payment.status && <div>Status: {payment.status}</div>}
@@ -5370,10 +5913,33 @@ export default function DistributionInvoicesPage() {
         const returnTotalLine = itemReturnsLines.find((line) => line.trim().startsWith('Total return value:'));
         const returnModeLine = itemReturnsLines.find((line) => line.trim().startsWith('Return mode:'));
         const hasReturnSection = returnLines.length > 0 || Boolean(returnTotalLine) || Boolean(returnModeLine);
-        const subtotal = Number(invoice.subtotal ?? invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0));
+
+        const parseAmountFromLine = (line?: string): number => {
+          if (!line) return 0;
+          const parsed = Number.parseFloat(line.replace(/[^0-9.\-]/g, ''));
+          return Number.isFinite(parsed) ? parsed : 0;
+        };
+        const rawReturnAmount = parseAmountFromLine(returnTotalLine);
+        const deductsFromInvoice = returnModeLine?.includes('DEDUCT FROM INVOICE') ?? false;
+        const effectiveReturnAmount = deductsFromInvoice ? Math.max(0, rawReturnAmount) : 0;
+
+        const netSubtotalFromItems = invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0);
+        const itemDiscountTotalFromItems = invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.discount || 0), 0);
+        const grossSubtotalFromItems = netSubtotalFromItems + itemDiscountTotalFromItems;
+        const storedSubtotal = typeof invoice.subtotal === 'number'
+          ? Number(invoice.subtotal)
+          : netSubtotalFromItems;
+        const rawDiscount = Number(invoice.discount || 0);
+        const storedNonReturnDiscount = Math.max(0, rawDiscount - effectiveReturnAmount);
+        const subtotalLooksLegacyNet = Math.abs(storedSubtotal - netSubtotalFromItems) < 0.01
+          && Math.abs(storedSubtotal - grossSubtotalFromItems) >= 0.01;
+        const subtotal = subtotalLooksLegacyNet ? grossSubtotalFromItems : storedSubtotal;
+        const discountAmount = subtotalLooksLegacyNet
+          ? storedNonReturnDiscount + itemDiscountTotalFromItems
+          : storedNonReturnDiscount;
         const paid = Number(invoice.paid_amount || 0);
         const effectivePaid = Math.max(paid, billToBillAppliedCurrent);
-        const total = Number(invoice.total || 0);
+        const total = Math.max(0, subtotal - discountAmount - effectiveReturnAmount);
         const outstanding = Math.max(0, total - effectivePaid);
 
         return (
@@ -5414,7 +5980,7 @@ export default function DistributionInvoicesPage() {
                   <div className="receipt-divider" />
                   <section className="receipt-meta">
                     <p><strong>Invoice:</strong> {invoice.invoice_number}</p>
-                    <p><strong>Date:</strong> {new Date(invoice.invoice_date).toLocaleString()}</p>
+                    <p><strong>Date:</strong> {formatDateTimeDisplay(invoice.created_at || invoice.invoice_date)}</p>
                     <p><strong>Customer:</strong> {invoice.customer?.shop_name || '-'}</p>
                     {invoice.customer?.customer_code && <p><strong>Code:</strong> {invoice.customer.customer_code}</p>}
                   </section>
@@ -5422,12 +5988,23 @@ export default function DistributionInvoicesPage() {
                   <div className="receipt-divider" />
                   <section>
                     <h2>Billing Item Details</h2>
-                    {invoice.items.map((item) => (
-                      <div key={item.id} className="receipt-item">
-                        <div className="flex justify-between gap-2"><span>{item.item_name}</span><strong>{(Number(item.quantity) * Number(item.unit_price)).toFixed(2)}</strong></div>
-                        <div>{Number(item.quantity).toFixed(2)} x {Number(item.unit_price).toFixed(2)} {item.unit ? ` / ${item.unit}` : ''}</div>
-                      </div>
-                    ))}
+                    {invoice.items.map((item) => {
+                      const qty = Number(item.quantity || 0);
+                      const unitPrice = Number(item.unit_price || 0);
+                      const discountPerUnit = Number(item.discount || 0);
+                      const lineDiscount = qty * discountPerUnit;
+                      const lineTotal = qty * unitPrice;
+
+                      return (
+                        <div key={item.id} className="receipt-item">
+                          <div className="flex justify-between gap-2"><span>{item.item_name}</span><strong>{lineTotal.toFixed(2)}</strong></div>
+                          <div>{qty.toFixed(2)} x {unitPrice.toFixed(2)} {item.unit ? ` / ${item.unit}` : ''}</div>
+                          {lineDiscount > 0 && (
+                            <div>Discount: {lineDiscount.toFixed(2)} ({discountPerUnit.toFixed(2)} / unit)</div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </section>
 
                   {hasReturnSection && (
@@ -5446,7 +6023,7 @@ export default function DistributionInvoicesPage() {
                         {invoice.payments?.map((payment) => (
                           <div key={payment.id} className="receipt-item">
                             <div className="flex justify-between gap-2"><span>{String(payment.payment_method || '').toUpperCase()} {payment.reference_no ? `(${payment.reference_no})` : ''}</span><strong>{Number(payment.amount || 0).toFixed(2)}</strong></div>
-                            <div>Date: {payment.payment_date || '-'}{payment.cheque_date ? ` | Cheque date: ${payment.cheque_date}` : ''}</div>
+                            <div>Date: {formatDateTimeDisplay(payment.created_at || payment.payment_date)}{payment.cheque_date ? ` | Cheque date: ${formatDateTimeDisplay(payment.cheque_date)}` : ''}</div>
                             {payment.bank_name && <div>Bank: {payment.bank_name}</div>}
                           </div>
                         ))}
@@ -5468,13 +6045,25 @@ export default function DistributionInvoicesPage() {
                   <div className="receipt-divider" />
                   <section className="receipt-summary">
                     <p><span>Subtotal</span><strong>{subtotal.toFixed(2)}</strong></p>
-                    <p><span>Discount</span><strong>-{Number(invoice.discount || 0).toFixed(2)}</strong></p>
+                    {discountAmount > 0 && <p><span>Discount</span><strong>-{discountAmount.toFixed(2)}</strong></p>}
+                    {effectiveReturnAmount > 0 && <p><span>Return deductions</span><strong>-{effectiveReturnAmount.toFixed(2)}</strong></p>}
                     <p className="receipt-total"><span>Total</span><strong>{total.toFixed(2)}</strong></p>
                     {hasBillToBillEvidence && <p><span>Last Bill Payment</span><strong>{billToBillAppliedPrevious.toFixed(2)}</strong></p>}
                     <p><span>Paid</span><strong>{effectivePaid.toFixed(2)}</strong></p>
                     <p><span>Outstanding</span><strong>{outstanding.toFixed(2)}</strong></p>
                   </section>
-                  <footer className="receipt-footer">Thank you</footer>
+                  {outstanding > 0 && (
+                    <section className="receipt-signature">
+                      <p className="receipt-signature__title">Customer Signature</p>
+                      <div className="receipt-signature__box">
+                        <div className="receipt-signature__line" />
+                      </div>
+                    </section>
+                  )}
+                  <footer className="receipt-footer">
+                    <p>Thank you</p>
+                    <p className="receipt-software-credit">Software By Softcodelk(PVT)Ltd - 0702932000</p>
+                  </footer>
                 </article>
               </div>
             </div>
@@ -5512,7 +6101,21 @@ export default function DistributionInvoicesPage() {
         .receipt-item > div:last-child { color: #64748b; font-size: 11px; }
         .receipt-summary p { display: flex; justify-content: space-between; margin: 4px 0; }
         .receipt-summary .receipt-total { border-top: 1px solid #0f766e; padding-top: 6px; font-size: 16px; }
+        .receipt-signature { margin-top: 12px; }
+        .receipt-signature__title { text-align: center; font-weight: 600; margin-bottom: 8px; }
+        .receipt-signature__box {
+          border: 1px solid #334155;
+          border-radius: 4px;
+          min-height: 52px;
+          padding: 8px 10px;
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+        }
+        .receipt-signature__line { border-top: 1px solid #1f2937; width: 78%; }
         .receipt-footer { border-top: 1px dashed #475569; margin-top: 9px; padding-top: 7px; text-align: center; font-weight: 700; }
+        .receipt-footer p { margin: 2px 0; }
+        .receipt-software-credit { font-size: 11px; font-weight: 600; color: #475569; }
         @media print {
           @page { margin: 0; }
           html, body { width: var(--receipt-width); margin: 0 !important; padding: 0 !important; background: #fff !important; }

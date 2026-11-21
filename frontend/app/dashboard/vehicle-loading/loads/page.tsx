@@ -58,6 +58,9 @@ interface Load {
   driver?: {
     id: number;
     name: string;
+    first_name?: string;
+    last_name?: string;
+    employee_code?: string;
     license_number: string;
   };
   sales_ref?: {
@@ -126,6 +129,8 @@ interface LoadDeliverySummary {
     sold_qty: number;
     sold_value: number;
     return_qty: number;
+    exchange_return_qty?: number;
+    damaged_return_qty?: number;
     return_value: number;
     net_qty: number;
     net_value: number;
@@ -139,6 +144,8 @@ interface ItemReturnRow {
   item_name: string;
   unit: string;
   return_qty: number;
+  exchange_return_qty: number;
+  damaged_return_qty: number;
   return_value: number;
 }
 
@@ -152,8 +159,13 @@ interface DistributionInvoiceRecord {
   id: number;
   load_id?: number | null;
   invoice_number?: string;
+  invoice_date?: string;
   customer_id?: number;
   total?: number;
+  paid_amount?: number;
+  due_amount?: number;
+  balance_amount?: number;
+  status?: string;
   discount?: number;
   customer?: {
     shop_name?: string;
@@ -189,6 +201,7 @@ interface LoadBalanceRow {
   item_name: string;
   loaded_qty: number;
   sold_qty: number;
+  exchange_return_qty: number;
   balance_qty: number;
 }
 
@@ -210,6 +223,7 @@ interface DistributionPaymentRecord {
   reference_no?: string | null;
   bank_name?: string | null;
   status?: string;
+  notes?: string | null;
   customer?: {
     shop_name?: string;
     customer_code?: string;
@@ -217,6 +231,17 @@ interface DistributionPaymentRecord {
   invoice?: {
     invoice_number?: string;
   };
+}
+
+interface LoadOutstandingCollectionRow {
+  id: number;
+  payment_number: string;
+  payment_date: string;
+  customer_name: string;
+  settled_invoice_number: string;
+  payment_method: string;
+  note: string;
+  amount: number;
 }
 
 interface LoadCustomerBaseRow {
@@ -227,6 +252,18 @@ interface LoadCustomerBaseRow {
   total_sale: number;
   collected: number;
   balance: number;
+}
+
+interface LoadOutstandingInvoiceRow {
+  invoice_id: number;
+  invoice_number: string;
+  customer_name: string;
+  customer_code: string;
+  invoice_date: string;
+  invoice_total: number;
+  collected: number;
+  outstanding: number;
+  status: string;
 }
 
 interface DeliveryCashTransactionRecord {
@@ -250,6 +287,11 @@ interface LoadExpenseRecord {
 
 type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
 type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
+type AlertModalState = {
+  open: boolean;
+  title: string;
+  message: string;
+};
 
 const PAGE_SIZE = 10;
 const vehicleLoadingLoadsWidgetItems = [
@@ -281,6 +323,11 @@ export default function LoadsPage() {
   const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
   const [restoreWidgetListVisible, setRestoreWidgetListVisible] = useState(false);
   const [restoreWidgetLoadingKey, setRestoreWidgetLoadingKey] = useState<string | null>(null);
+  const [alertModal, setAlertModal] = useState<AlertModalState>({
+    open: false,
+    title: '',
+    message: '',
+  });
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsMode, setDetailsMode] = useState<'view' | 'complete'>('view');
   const [detailsCompleting, setDetailsCompleting] = useState(false);
@@ -289,6 +336,7 @@ export default function LoadsPage() {
   const [soldItemProfitRows, setSoldItemProfitRows] = useState<SoldItemProfitRow[]>([]);
   const [loadInvoices, setLoadInvoices] = useState<DistributionInvoiceRecord[]>([]);
   const [loadPayments, setLoadPayments] = useState<DistributionPaymentRecord[]>([]);
+  const [relatedOutstandingPayments, setRelatedOutstandingPayments] = useState<DistributionPaymentRecord[]>([]);
   const [editingLoad, setEditingLoad] = useState<Load | null>(null);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
@@ -296,6 +344,8 @@ export default function LoadsPage() {
   const [routes, setRoutes] = useState<Route[]>([]);
   const [confirmAction, setConfirmAction] = useState<{ type: 'delete'; load: Load } | null>(null);
   const [completeDecisionOpen, setCompleteDecisionOpen] = useState(false);
+  const [cashTransferDecisionOpen, setCashTransferDecisionOpen] = useState(false);
+  const [pendingStockAddDecision, setPendingStockAddDecision] = useState<boolean | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [routeAssigning, setRouteAssigning] = useState(false);
   const [routeRemovingId, setRouteRemovingId] = useState<number | null>(null);
@@ -329,6 +379,25 @@ export default function LoadsPage() {
   const router = useRouter();
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
   const hiddenWidgetCount = vehicleLoadingLoadsWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
+  const showAlertModal = (title: string, message: string) => {
+    setAlertModal({ open: true, title, message });
+  };
+
+  const isOutstandingCollectionNote = (note?: string | null) => {
+    const text = String(note || '').toLowerCase();
+    return text.includes('outstanding settlement') || text.includes('outstanding collection');
+  };
+
+  const toPaymentGroupKey = (paymentNumber?: string | null) => {
+    const raw = String(paymentNumber || '').trim();
+    if (!raw) return '';
+    const parts = raw.split('-');
+    // Group split payment ids like PAY-1794846418366-1 / PAY-1794846418366-2 under PAY-1794846418366.
+    if (parts.length >= 3 && /^\d+$/.test(parts[parts.length - 1])) {
+      return parts.slice(0, -1).join('-');
+    }
+    return raw;
+  };
 
   const soldProfitTotals = useMemo(() => {
     return soldItemProfitRows.reduce(
@@ -373,26 +442,36 @@ export default function LoadsPage() {
       soldByCode.set(String(row.item_code || '').trim(), row);
     });
 
+    const exchangeReturnsByCode = new Map<string, number>();
+    (deliverySummary?.items || []).forEach((row) => {
+      const code = String(row.item_code || '').trim();
+      if (!code) return;
+      exchangeReturnsByCode.set(code, Number(row.exchange_return_qty || 0));
+    });
+
     return selectedLoadItems
       .map((item) => {
         const code = String(item.product_code || '').trim();
         const sold = soldByCode.get(code);
+        const exchangeReturnQty = Number(exchangeReturnsByCode.get(code) || 0);
         const soldQty = Number(sold?.sold_qty || 0);
-        // `qty` is the remaining qty in the vehicle (reduced by invoicing), so fall back to remaining + sold.
-        const loadedQty = item.loaded_qty !== undefined && item.loaded_qty !== null
-          ? Number(item.loaded_qty)
-          : Number(item.qty || 0) + soldQty;
+        // `qty` is current vehicle qty, which can include exchange returns.
+        // Rebuild original loaded qty by removing exchange returns from the fallback.
+        // Derive original loaded qty from flow values to avoid counting return-only rows as loaded.
+        const loadedQty = Math.max(0, Number(item.qty || 0) + soldQty - exchangeReturnQty);
 
         return {
           item_code: code,
           item_name: String(item.name || '-'),
           loaded_qty: loadedQty,
           sold_qty: soldQty,
-          balance_qty: loadedQty - soldQty,
+          exchange_return_qty: exchangeReturnQty,
+          // Balance should include exchange returns added back to load.
+          balance_qty: loadedQty + exchangeReturnQty - soldQty,
         };
       })
       .sort((a, b) => b.balance_qty - a.balance_qty);
-  }, [selectedLoadItems, soldItemProfitRows]);
+  }, [selectedLoadItems, soldItemProfitRows, deliverySummary]);
 
   const itemReturnRows = useMemo<ItemReturnRow[]>(() => {
     const rows = deliverySummary?.items || [];
@@ -404,6 +483,8 @@ export default function LoadsPage() {
         item_name: String(row.item_name || '-'),
         unit: String(row.unit || ''),
         return_qty: Number(row.return_qty || 0),
+        exchange_return_qty: Number(row.exchange_return_qty || 0),
+        damaged_return_qty: Number(row.damaged_return_qty || 0),
         return_value: Number(row.return_value || 0),
       }))
       .sort((a, b) => b.return_value - a.return_value);
@@ -460,13 +541,188 @@ export default function LoadsPage() {
       .sort((a, b) => b.total_sale - a.total_sale);
   }, [loadInvoices, loadPayments]);
 
+  const loadOutstandingRows = useMemo<LoadOutstandingInvoiceRow[]>(() => {
+    const collectedByInvoiceId = new Map<number, number>();
+
+    loadPayments.forEach((pay) => {
+      const invoiceId = Number(pay.distribution_invoice_id || 0);
+      if (!invoiceId) return;
+
+      const paymentStatus = String(pay.status || '').trim().toLowerCase();
+      if (paymentStatus === 'closed') return;
+
+      collectedByInvoiceId.set(
+        invoiceId,
+        Number(collectedByInvoiceId.get(invoiceId) || 0) + Number(pay.amount || 0)
+      );
+    });
+
+    return loadInvoices
+      .map((inv) => {
+        const invoiceId = Number(inv.id || 0);
+        const invoiceTotal = Number(inv.total || 0);
+        const collected = Number(collectedByInvoiceId.get(invoiceId) || 0);
+        const dueFromApi = Number(inv.due_amount ?? inv.balance_amount ?? 0);
+        const outstanding = dueFromApi > 0 ? dueFromApi : Math.max(0, invoiceTotal - collected);
+
+        return {
+          invoice_id: invoiceId,
+          invoice_number: String(inv.invoice_number || `INV-${invoiceId}`),
+          customer_name: String(inv.customer?.shop_name || `Customer #${Number(inv.customer_id || 0)}`),
+          customer_code: String(inv.customer?.customer_code || '-'),
+          invoice_date: String(inv.invoice_date || ''),
+          invoice_total: invoiceTotal,
+          collected,
+          outstanding,
+          status: String(inv.status || ''),
+        };
+      })
+      .filter((row) => row.outstanding > 0)
+      .sort((a, b) => {
+        if (b.outstanding !== a.outstanding) return b.outstanding - a.outstanding;
+        return b.invoice_id - a.invoice_id;
+      });
+  }, [loadInvoices, loadPayments]);
+
+  const mergedCollectedPayments = useMemo<DistributionPaymentRecord[]>(() => {
+    return Array.from(
+      [...loadPayments, ...relatedOutstandingPayments].reduce((map, pay) => {
+        map.set(Number(pay.id || 0), pay);
+        return map;
+      }, new Map<number, DistributionPaymentRecord>()).values()
+    ).sort((a, b) => {
+      const aTime = a.payment_date ? new Date(a.payment_date).getTime() : 0;
+      const bTime = b.payment_date ? new Date(b.payment_date).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return Number(b.id || 0) - Number(a.id || 0);
+    });
+  }, [loadPayments, relatedOutstandingPayments]);
+
   const collectedLoadPaymentsTotal = useMemo(() => {
-    return loadPayments.reduce((sum, pay) => {
+    return mergedCollectedPayments.reduce((sum, pay) => {
       const status = String(pay.status || '').trim().toLowerCase();
       if (status === 'closed') return sum;
       return sum + Number(pay.amount || 0);
     }, 0);
-  }, [loadPayments]);
+  }, [mergedCollectedPayments]);
+
+  const collectedByMethodTotals = useMemo(() => {
+    return mergedCollectedPayments.reduce(
+      (acc, pay) => {
+        const status = String(pay.status || '').trim().toLowerCase();
+        if (status === 'closed') return acc;
+
+        const amount = Number(pay.amount || 0);
+        const method = String(pay.payment_method || '').trim().toLowerCase();
+        if (method === 'cash') {
+          acc.cash += amount;
+        } else if (method === 'check') {
+          acc.check += amount;
+        } else if (method === 'bank_transfer') {
+          acc.bank_transfer += amount;
+        }
+        return acc;
+      },
+      { cash: 0, check: 0, bank_transfer: 0 }
+    );
+  }, [mergedCollectedPayments]);
+
+  const outstandingCollectionTotalForSnapshot = useMemo(() => {
+    return mergedCollectedPayments.reduce((sum, pay) => {
+      const status = String(pay.status || '').trim().toLowerCase();
+      if (status === 'closed') return sum;
+      if (!isOutstandingCollectionNote(pay.notes)) return sum;
+      return sum + Number(pay.amount || 0);
+    }, 0);
+  }, [mergedCollectedPayments]);
+
+  const businessOwnerSnapshot = useMemo(() => {
+    const totalOutstanding = loadOutstandingRows.reduce((sum, row) => sum + Number(row.outstanding || 0), 0);
+    const totalExpenses = loadExpenses.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    const totalSales = Number(loadSummaryPreview.sales || 0);
+    const totalCollected = Number(collectedLoadPaymentsTotal || 0);
+    const collectionRate = totalSales > 0 ? (totalCollected / totalSales) * 100 : 0;
+    const netCashAfterExpenses = totalCollected - totalExpenses;
+
+    return {
+      totalSales,
+      totalCollected,
+      cashCollection: Number(collectedByMethodTotals.cash || 0),
+      bankCollection: Number(collectedByMethodTotals.bank_transfer || 0),
+      checkCollection: Number(collectedByMethodTotals.check || 0),
+      totalOutstanding,
+      outstandingCollectionTotal: Number(outstandingCollectionTotalForSnapshot || 0),
+      totalProfit: Number(loadSummaryPreview.profit || 0),
+      marginPct: Number(loadSummaryPreview.marginPct || 0),
+      totalExpenses,
+      netCashAfterExpenses,
+      collectionRate,
+      deliveryCashBalance: Number(deliveryCashBalance || 0),
+    };
+  }, [
+    loadOutstandingRows,
+    loadExpenses,
+    loadSummaryPreview,
+    collectedLoadPaymentsTotal,
+    collectedByMethodTotals,
+    outstandingCollectionTotalForSnapshot,
+    deliveryCashBalance,
+  ]);
+
+  const businessOwnerChartData = useMemo(() => {
+    const totalCollected = Number(businessOwnerSnapshot.totalCollected || 0);
+    const totalSales = Number(businessOwnerSnapshot.totalSales || 0);
+    const totalOutstanding = Number(businessOwnerSnapshot.totalOutstanding || 0);
+    const totalProfit = Number(businessOwnerSnapshot.totalProfit || 0);
+
+    const toPct = (value: number, base: number) => {
+      if (base <= 0) return 0;
+      return Math.max(0, Math.min(100, (value / base) * 100));
+    };
+
+    return {
+      mixCashPct: toPct(Number(businessOwnerSnapshot.cashCollection || 0), totalCollected),
+      mixBankPct: toPct(Number(businessOwnerSnapshot.bankCollection || 0), totalCollected),
+      mixCheckPct: toPct(Number(businessOwnerSnapshot.checkCollection || 0), totalCollected),
+      collectedVsSalesPct: toPct(totalCollected, totalSales),
+      outstandingVsSalesPct: toPct(totalOutstanding, totalSales),
+      profitVsSalesPct: toPct(totalProfit, totalSales),
+    };
+  }, [businessOwnerSnapshot]);
+
+  const outstandingCollectionRows = useMemo<LoadOutstandingCollectionRow[]>(() => {
+    const merged = [...loadPayments, ...relatedOutstandingPayments];
+    const uniqueRows = Array.from(
+      merged.reduce((map, pay) => {
+        map.set(Number(pay.id || 0), pay);
+        return map;
+      }, new Map<number, DistributionPaymentRecord>()).values()
+    );
+
+    return uniqueRows
+      .filter((pay) => {
+        const status = String(pay.status || '').trim().toLowerCase();
+        if (status === 'closed') return false;
+
+        return isOutstandingCollectionNote(pay.notes);
+      })
+      .map((pay) => ({
+        id: Number(pay.id || 0),
+        payment_number: String(pay.payment_number || `PAY-${pay.id}`),
+        payment_date: String(pay.payment_date || ''),
+        customer_name: String(pay.customer?.shop_name || (pay.customer_id ? `Customer #${pay.customer_id}` : '-')),
+        settled_invoice_number: String(pay.invoice?.invoice_number || '-'),
+        payment_method: String((pay.payment_method || '-').replace('_', ' ')),
+        note: String(pay.notes || '-'),
+        amount: Number(pay.amount || 0),
+      }))
+      .sort((a, b) => {
+        const aTime = a.payment_date ? new Date(a.payment_date).getTime() : 0;
+        const bTime = b.payment_date ? new Date(b.payment_date).getTime() : 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return b.id - a.id;
+      });
+  }, [loadPayments, relatedOutstandingPayments]);
 
   const asRecord = useCallback((value: unknown): Record<string, unknown> | null => {
     if (!value || typeof value !== 'object') return null;
@@ -903,13 +1159,18 @@ export default function LoadsPage() {
       fetchLoads(); // Refresh the list
     } catch (error) {
       console.error('Error deleting load:', error);
-      alert('Failed to delete load');
+      showAlertModal('Delete Load Failed', 'Failed to delete load.');
     }
   };
 
-  const handleCompleteLoad = async (load: Load, addBalanceToMainStock: boolean) => {
+  const handleCompleteLoad = async (
+    load: Load,
+    addBalanceToMainStock: boolean,
+    addCollectedCashToMainAccount: boolean
+  ) => {
     await axios.post(`/api/vehicle-loading/loads/${load.id}/complete`, {
       add_balance_to_main_stock: addBalanceToMainStock,
+      add_collected_cash_to_main_account: addCollectedCashToMainAccount,
     }, {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -1035,6 +1296,7 @@ export default function LoadsPage() {
       setSoldItemProfitRows([]);
       setLoadInvoices([]);
       setLoadPayments([]);
+      setRelatedOutstandingPayments([]);
       setLoadExpenses([]);
       setDeliverySummary(null);
       setExpenseError('');
@@ -1089,8 +1351,38 @@ export default function LoadsPage() {
       const loadInvoices = invoicesRes?.data?.data?.data || [];
       setLoadInvoices(loadInvoices);
 
-      const loadPayments = paymentsRes?.data?.data?.data || [];
-      setLoadPayments(loadPayments);
+      const loadPaymentRows = paymentsRes?.data?.data?.data || [];
+      setLoadPayments(loadPaymentRows);
+
+      const outstandingGroupKeys = new Set(
+        (loadPaymentRows as DistributionPaymentRecord[])
+          .filter((pay) => isOutstandingCollectionNote(pay.notes))
+          .map((pay) => toPaymentGroupKey(pay.payment_number))
+          .filter(Boolean)
+      );
+
+      if (outstandingGroupKeys.size > 0) {
+        const allPaymentsRes = await axios.get<DistributionPaymentListResponse>('/api/distribution/payments', {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          params: { per_page: 1000 },
+          timeout: 30000,
+        }).catch(() => null);
+
+        const allPaymentRows = allPaymentsRes?.data?.data?.data || [];
+        const loadPaymentIdSet = new Set((loadPaymentRows as DistributionPaymentRecord[]).map((pay) => Number(pay.id || 0)));
+        const relatedRows = (allPaymentRows as DistributionPaymentRecord[]).filter((pay) => {
+          const paymentId = Number(pay.id || 0);
+          if (loadPaymentIdSet.has(paymentId)) return false;
+          const groupKey = toPaymentGroupKey(pay.payment_number);
+          return groupKey !== '' && outstandingGroupKeys.has(groupKey);
+        });
+
+        setRelatedOutstandingPayments(relatedRows);
+      } else {
+        setRelatedOutstandingPayments([]);
+      }
 
       const soldProfit = computeSoldItemsProfit(loadItems, loadInvoices);
       setSoldItemProfitRows(soldProfit.rows);
@@ -1101,7 +1393,7 @@ export default function LoadsPage() {
       }
     } catch (error) {
       console.error('Error fetching load details:', error);
-      alert('Failed to load vehicle load details');
+      showAlertModal('Load Details Failed', 'Failed to load vehicle load details.');
       setShowDetailsModal(false);
     } finally {
       setDetailsLoading(false);
@@ -1110,28 +1402,33 @@ export default function LoadsPage() {
 
   const handleCompleteFromDetails = async () => {
     if (!selectedLoadDetails) return;
+    setPendingStockAddDecision(null);
+    setCashTransferDecisionOpen(false);
     setCompleteDecisionOpen(true);
   };
 
-  const completeWithDecision = async (addBalanceToMainStock: boolean) => {
+  const completeWithDecision = async (addBalanceToMainStock: boolean, addCollectedCashToMainAccount: boolean) => {
     if (!selectedLoadDetails) return;
 
     try {
       setDetailsCompleting(true);
-      await handleCompleteLoad(selectedLoadDetails, addBalanceToMainStock);
+      await handleCompleteLoad(selectedLoadDetails, addBalanceToMainStock, addCollectedCashToMainAccount);
       setCompleteDecisionOpen(false);
+      setCashTransferDecisionOpen(false);
+      setPendingStockAddDecision(null);
       setShowDetailsModal(false);
       setSelectedLoadDetails(null);
       setSelectedLoadItems([]);
       setSoldItemProfitRows([]);
       setLoadInvoices([]);
       setLoadPayments([]);
+      setRelatedOutstandingPayments([]);
       setLoadExpenses([]);
       setExpenseError('');
       setExpenseSuccess('');
     } catch (error: unknown) {
       console.error('Error completing load:', error);
-      alert(extractApiErrorMessage(error, 'Failed to complete load'));
+      showAlertModal('Complete Load Failed', extractApiErrorMessage(error, 'Failed to complete load'));
     } finally {
       setDetailsCompleting(false);
     }
@@ -1194,7 +1491,7 @@ export default function LoadsPage() {
 
     const win = window.open('', '_blank', 'width=1000,height=800');
     if (!win) {
-      alert('Unable to open print window. Please allow popups.');
+      showAlertModal('Print Failed', 'Unable to open print window. Please allow popups.');
       return;
     }
 
@@ -1220,9 +1517,9 @@ export default function LoadsPage() {
           <p style="margin: 2px 0;"><strong>Load Number:</strong> ${selectedLoadDetails.load_number}</p>
           <p style="margin: 2px 0;"><strong>Status:</strong> ${selectedLoadDetails.status.replace('_', ' ')}</p>
           <p style="margin: 2px 0;"><strong>Load Date:</strong> ${new Date(selectedLoadDetails.load_date).toLocaleDateString()}</p>
-          <p style="margin: 2px 0;"><strong>Delivery Date:</strong> ${selectedLoadDetails.delivery_date ? new Date(selectedLoadDetails.delivery_date).toLocaleDateString() : '-'}</p>
+          <p style="margin: 2px 0;"><strong>Delivery Date:</strong> ${getDeliveryDateDisplay(selectedLoadDetails)}</p>
           <p style="margin: 2px 0;"><strong>Vehicle:</strong> ${selectedLoadDetails.vehicle?.registration_number || '-'} (${selectedLoadDetails.vehicle?.type || '-'})</p>
-          <p style="margin: 2px 0;"><strong>Driver:</strong> ${selectedLoadDetails.driver?.name || '-'}</p>
+          <p style="margin: 2px 0;"><strong>Driver:</strong> ${getDriverDisplayName(selectedLoadDetails)}</p>
           <p style="margin: 2px 0;"><strong>Sales Ref:</strong> ${selectedLoadDetails.sales_ref?.name || `${selectedLoadDetails.sales_ref?.first_name || ''} ${selectedLoadDetails.sales_ref?.last_name || ''}`.trim() || '-'}</p>
           <p style="margin: 2px 0;"><strong>Route:</strong> ${selectedLoadDetails.route?.name || '-'} (${selectedLoadDetails.route?.origin || '-'} → ${selectedLoadDetails.route?.destination || '-'})</p>
           <p style="margin: 2px 0;"><strong>Total Weight:</strong> ${Number(selectedLoadDetails.total_weight).toFixed(2)} kg</p>
@@ -1278,9 +1575,9 @@ export default function LoadsPage() {
       selectedLoadDetails.load_number,
       selectedLoadDetails.status,
       selectedLoadDetails.load_date,
-      selectedLoadDetails.delivery_date || '',
+      getDeliveryDateDisplay(selectedLoadDetails),
       selectedLoadDetails.vehicle?.registration_number || '',
-      selectedLoadDetails.driver?.name || '',
+      getDriverDisplayName(selectedLoadDetails),
       selectedLoadDetails.sales_ref?.name || `${selectedLoadDetails.sales_ref?.first_name || ''} ${selectedLoadDetails.sales_ref?.last_name || ''}`.trim(),
       selectedLoadDetails.route?.name || '',
       Number(selectedLoadDetails.total_weight).toFixed(2),
@@ -1369,6 +1666,30 @@ export default function LoadsPage() {
         return `${index + 1}. ${routeName}${path ? ` (${path})` : ''}`;
       })
       .join('\n');
+  };
+
+  const getDriverDisplayName = (load: Load | null | undefined) => {
+    const directName = String(load?.driver?.name || '').trim();
+    if (directName) return directName;
+
+    const firstName = String(load?.driver?.first_name || '').trim();
+    const lastName = String(load?.driver?.last_name || '').trim();
+    const fullName = `${firstName} ${lastName}`.trim();
+    if (fullName) return fullName;
+
+    const fallbackDriver = drivers.find((driver) => Number(driver.id) === Number(load?.driver_id || 0));
+    if (fallbackDriver) {
+      return `${fallbackDriver.employee_code} - ${fallbackDriver.first_name} ${fallbackDriver.last_name}`.trim();
+    }
+
+    return '-';
+  };
+
+  const getDeliveryDateDisplay = (load: Load | null | undefined) => {
+    if (!load) return '-';
+    if (load.delivery_date) return new Date(load.delivery_date).toLocaleDateString();
+    if (load.status === 'delivered') return new Date(load.load_date).toLocaleDateString();
+    return 'Pending completion';
   };
 
   const applyUpdatedLoadState = (updatedLoad: Load) => {
@@ -1632,7 +1953,7 @@ export default function LoadsPage() {
                     {load.vehicle?.registration_number || '-'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
-                    {load.driver?.name || '-'}
+                    {getDriverDisplayName(load)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
                     <span
@@ -1798,6 +2119,8 @@ export default function LoadsPage() {
                     setLoadPayments([]);
                     setLoadExpenses([]);
                     setCompleteDecisionOpen(false);
+                    setCashTransferDecisionOpen(false);
+                    setPendingStockAddDecision(null);
                     setExpenseError('');
                     setExpenseSuccess('');
                   }}
@@ -1829,7 +2152,7 @@ export default function LoadsPage() {
                     <div className={detailsCardClass}>
                       <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Delivery Date</p>
                       <p className="text-sm font-semibold text-slate-900">
-                        {selectedLoadDetails.delivery_date ? new Date(selectedLoadDetails.delivery_date).toLocaleDateString() : '-'}
+                        {getDeliveryDateDisplay(selectedLoadDetails)}
                       </p>
                     </div>
                   </div>
@@ -1843,7 +2166,7 @@ export default function LoadsPage() {
                     </div>
                     <div className={detailsCardClass}>
                       <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Driver</p>
-                      <p className="text-sm font-semibold text-slate-900">{selectedLoadDetails.driver?.name || '-'}</p>
+                      <p className="text-sm font-semibold text-slate-900">{getDriverDisplayName(selectedLoadDetails)}</p>
                     </div>
                     <div className={detailsCardClass}>
                       <p className="text-xs uppercase tracking-[0.12em] text-slate-500">Sales Ref</p>
@@ -2108,6 +2431,17 @@ export default function LoadsPage() {
                     <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
                       <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Collected Payment Details (By Load)</span>
                     </div>
+                    <div className="px-4 py-2 border-b border-slate-100 bg-white flex flex-wrap items-center gap-2 text-[11px]">
+                      <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">
+                        Cash Collection: {Number(collectedByMethodTotals.cash || 0).toFixed(2)}
+                      </span>
+                      <span className="inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 font-semibold text-blue-700">
+                        Check Collection: {Number(collectedByMethodTotals.check || 0).toFixed(2)}
+                      </span>
+                      <span className="inline-flex rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 font-semibold text-indigo-700">
+                        Bank Collection: {Number(collectedByMethodTotals.bank_transfer || 0).toFixed(2)}
+                      </span>
+                    </div>
                     <table className="min-w-full divide-y divide-gray-200 text-xs">
                       <thead className="bg-gray-50">
                         <tr>
@@ -2123,14 +2457,14 @@ export default function LoadsPage() {
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {loadPayments.length === 0 ? (
+                        {mergedCollectedPayments.length === 0 ? (
                           <tr>
                             <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-500">
                               No collected payments found for this load.
                             </td>
                           </tr>
                         ) : (
-                          loadPayments.map((pay) => (
+                          mergedCollectedPayments.map((pay) => (
                             <tr
                               key={pay.id}
                               className={String(pay.status || '').trim().toLowerCase() === 'closed' ? 'bg-red-50' : ''}
@@ -2158,12 +2492,62 @@ export default function LoadsPage() {
                           ))
                         )}
                       </tbody>
-                      {loadPayments.length > 0 && (
+                      {mergedCollectedPayments.length > 0 && (
                         <tfoot className="bg-gray-50 border-t border-gray-200">
                           <tr>
                             <td colSpan={8} className="px-4 py-2 text-right font-semibold text-gray-800">Total Collected (excluding closed)</td>
                             <td className="px-4 py-2 text-right font-semibold text-gray-900">
                               {collectedLoadPaymentsTotal.toFixed(2)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+
+                  <div className={detailsTableWrapClass}>
+                    <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Outstanding Collections (By Load)</span>
+                    </div>
+                    <table className="min-w-full divide-y divide-gray-200 text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Payment #</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Date</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Customer</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Settled Invoice</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Method</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Notes</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {outstandingCollectionRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="px-4 py-8 text-center text-sm text-gray-500">
+                              No outstanding collections found for this load.
+                            </td>
+                          </tr>
+                        ) : (
+                          outstandingCollectionRows.map((row) => (
+                            <tr key={row.id}>
+                              <td className="px-4 py-2 text-gray-700">{row.payment_number}</td>
+                              <td className="px-4 py-2 text-gray-700">{row.payment_date ? new Date(row.payment_date).toLocaleDateString() : '-'}</td>
+                              <td className="px-4 py-2 text-gray-700">{row.customer_name}</td>
+                              <td className="px-4 py-2 text-gray-700">{row.settled_invoice_number}</td>
+                              <td className="px-4 py-2 text-gray-700 capitalize">{row.payment_method}</td>
+                              <td className="px-4 py-2 text-gray-700">{row.note}</td>
+                              <td className="px-4 py-2 text-right font-semibold text-amber-700">{Number(row.amount || 0).toFixed(2)}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      {outstandingCollectionRows.length > 0 && (
+                        <tfoot className="bg-gray-50 border-t border-gray-200">
+                          <tr>
+                            <td colSpan={6} className="px-4 py-2 text-right font-semibold text-gray-800">Total Outstanding Collection</td>
+                            <td className="px-4 py-2 text-right font-semibold text-amber-800">
+                              {outstandingCollectionRows.reduce((sum, row) => sum + Number(row.amount || 0), 0).toFixed(2)}
                             </td>
                           </tr>
                         </tfoot>
@@ -2200,7 +2584,19 @@ export default function LoadsPage() {
                                 </div>
                               </td>
                               <td className="px-4 py-2 text-right text-gray-700">
-                                {row.return_qty.toFixed(2)} {row.unit}
+                                <div className="flex flex-col items-end gap-1">
+                                  <span>{row.return_qty.toFixed(2)} {row.unit}</span>
+                                  {row.exchange_return_qty > 0 && (
+                                    <span className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
+                                      Exchange {row.exchange_return_qty.toFixed(2)}
+                                    </span>
+                                  )}
+                                  {row.damaged_return_qty > 0 && (
+                                    <span className="rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-700">
+                                      Damage {row.damaged_return_qty.toFixed(2)}
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="px-4 py-2 text-right font-semibold text-amber-700">
                                 {row.return_value.toFixed(2)}
@@ -2278,6 +2674,65 @@ export default function LoadsPage() {
                             </td>
                             <td className="px-4 py-2 text-right font-semibold text-gray-900">
                               {customerBaseRows.reduce((sum, row) => sum + Number(row.balance || 0), 0).toFixed(2)}
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  </div>
+
+                  <div className={detailsTableWrapClass}>
+                    <div className="px-4 pt-3 pb-1 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Outstanding Details (By Load)</span>
+                    </div>
+                    <table className="min-w-full divide-y divide-gray-200 text-xs">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Invoice</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Customer</th>
+                          <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Date</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Invoice Total</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Collected</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Outstanding</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {loadOutstandingRows.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-8 text-center text-sm text-gray-500">
+                              No outstanding invoices found for this load.
+                            </td>
+                          </tr>
+                        ) : (
+                          loadOutstandingRows.map((row) => (
+                            <tr key={row.invoice_id}>
+                              <td className="px-4 py-2 text-gray-700 font-medium">{row.invoice_number}</td>
+                              <td className="px-4 py-2 text-gray-700">
+                                <div className="flex flex-col">
+                                  <span>{row.customer_name}</span>
+                                  <span className="text-[10px] text-gray-500">{row.customer_code}</span>
+                                </div>
+                              </td>
+                              <td className="px-4 py-2 text-gray-700">{row.invoice_date ? new Date(row.invoice_date).toLocaleDateString() : '-'}</td>
+                              <td className="px-4 py-2 text-right text-gray-700">{Number(row.invoice_total).toFixed(2)}</td>
+                              <td className="px-4 py-2 text-right text-gray-700">{Number(row.collected).toFixed(2)}</td>
+                              <td className="px-4 py-2 text-right font-semibold text-amber-700">{Number(row.outstanding).toFixed(2)}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                      {loadOutstandingRows.length > 0 && (
+                        <tfoot className="bg-gray-50 border-t border-gray-200">
+                          <tr>
+                            <td colSpan={3} className="px-4 py-2 font-semibold text-gray-800">Total</td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                              {loadOutstandingRows.reduce((sum, row) => sum + Number(row.invoice_total || 0), 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                              {loadOutstandingRows.reduce((sum, row) => sum + Number(row.collected || 0), 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-amber-800">
+                              {loadOutstandingRows.reduce((sum, row) => sum + Number(row.outstanding || 0), 0).toFixed(2)}
                             </td>
                           </tr>
                         </tfoot>
@@ -2406,13 +2861,14 @@ export default function LoadsPage() {
                           <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase">Item</th>
                           <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Loaded Qty</th>
                           <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Sold Qty</th>
+                          <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Exchange Return Qty</th>
                           <th className="px-4 py-2 text-right font-medium text-gray-500 uppercase">Balance Qty</th>
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
                         {loadBalanceRows.length === 0 ? (
                           <tr>
-                            <td colSpan={4} className="px-4 py-8 text-center text-sm text-gray-500">
+                            <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-500">
                               No load balance data found for this load.
                             </td>
                           </tr>
@@ -2427,6 +2883,7 @@ export default function LoadsPage() {
                               </td>
                               <td className="px-4 py-2 text-right text-gray-700">{Number(row.loaded_qty).toFixed(2)}</td>
                               <td className="px-4 py-2 text-right text-gray-700">{Number(row.sold_qty).toFixed(2)}</td>
+                              <td className="px-4 py-2 text-right text-indigo-700 font-semibold">{Number(row.exchange_return_qty || 0).toFixed(2)}</td>
                               <td className={`px-4 py-2 text-right font-semibold ${row.balance_qty < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
                                 {Number(row.balance_qty).toFixed(2)}
                               </td>
@@ -2444,6 +2901,9 @@ export default function LoadsPage() {
                             <td className="px-4 py-2 text-right font-semibold text-gray-800">
                               {loadBalanceRows.reduce((sum, row) => sum + Number(row.sold_qty || 0), 0).toFixed(2)}
                             </td>
+                            <td className="px-4 py-2 text-right font-semibold text-indigo-800">
+                              {loadBalanceRows.reduce((sum, row) => sum + Number(row.exchange_return_qty || 0), 0).toFixed(2)}
+                            </td>
                             <td className="px-4 py-2 text-right font-semibold text-gray-900">
                               {loadBalanceRows.reduce((sum, row) => sum + Number(row.balance_qty || 0), 0).toFixed(2)}
                             </td>
@@ -2451,6 +2911,141 @@ export default function LoadsPage() {
                         </tfoot>
                       )}
                     </table>
+                  </div>
+
+                  <div className="rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-cyan-50 p-4 shadow-sm">
+                    <div className="mb-3 flex flex-col gap-1 border-b border-emerald-100 pb-2">
+                      <span className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-700">Business Owner Snapshot</span>
+                      <p className="text-xs text-slate-600">Most important business KPIs for this load.</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 text-xs">
+                      <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Total Sales</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">{businessOwnerSnapshot.totalSales.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Total Collected</p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-700">{businessOwnerSnapshot.totalCollected.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Total Outstanding</p>
+                        <p className="mt-1 text-sm font-semibold text-amber-700">{businessOwnerSnapshot.totalOutstanding.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Collection Rate</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">{businessOwnerSnapshot.collectionRate.toFixed(1)}%</p>
+                      </div>
+                      <div className="rounded-xl border border-amber-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Outstanding Collection Amount</p>
+                        <p className="mt-1 text-sm font-semibold text-amber-700">{businessOwnerSnapshot.outstandingCollectionTotal.toFixed(2)}</p>
+                      </div>
+
+                      <div className="rounded-xl border border-cyan-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Cash Collection</p>
+                        <p className="mt-1 text-sm font-semibold text-cyan-700">{businessOwnerSnapshot.cashCollection.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-cyan-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Bank Collection</p>
+                        <p className="mt-1 text-sm font-semibold text-cyan-700">{businessOwnerSnapshot.bankCollection.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-cyan-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Check Collection</p>
+                        <p className="mt-1 text-sm font-semibold text-cyan-700">{businessOwnerSnapshot.checkCollection.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-cyan-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Delivery Cash In Hand</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">{businessOwnerSnapshot.deliveryCashBalance.toFixed(2)}</p>
+                      </div>
+
+                      <div className="rounded-xl border border-blue-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Gross Profit</p>
+                        <p className="mt-1 text-sm font-semibold text-blue-700">{businessOwnerSnapshot.totalProfit.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-blue-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Margin</p>
+                        <p className="mt-1 text-sm font-semibold text-blue-700">{businessOwnerSnapshot.marginPct.toFixed(1)}%</p>
+                      </div>
+                      <div className="rounded-xl border border-rose-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Trip Expenses</p>
+                        <p className="mt-1 text-sm font-semibold text-rose-700">{businessOwnerSnapshot.totalExpenses.toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2">
+                        <p className="text-slate-500 uppercase">Net Cash After Expenses</p>
+                        <p className={`mt-1 text-sm font-semibold ${businessOwnerSnapshot.netCashAfterExpenses < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                          {businessOwnerSnapshot.netCashAfterExpenses.toFixed(2)}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Collection Mix Chart</p>
+                        <div className="mt-3 h-4 w-full overflow-hidden rounded-full border border-slate-200 bg-slate-100">
+                          <div className="flex h-full w-full">
+                            <div
+                              className="h-full bg-emerald-500"
+                              style={{ width: `${businessOwnerChartData.mixCashPct}%` }}
+                              title={`Cash ${businessOwnerChartData.mixCashPct.toFixed(1)}%`}
+                            />
+                            <div
+                              className="h-full bg-cyan-500"
+                              style={{ width: `${businessOwnerChartData.mixBankPct}%` }}
+                              title={`Bank ${businessOwnerChartData.mixBankPct.toFixed(1)}%`}
+                            />
+                            <div
+                              className="h-full bg-indigo-500"
+                              style={{ width: `${businessOwnerChartData.mixCheckPct}%` }}
+                              title={`Check ${businessOwnerChartData.mixCheckPct.toFixed(1)}%`}
+                            />
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-emerald-700">
+                            <span className="h-2 w-2 rounded-full bg-emerald-500" />Cash {businessOwnerChartData.mixCashPct.toFixed(1)}%
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-50 px-2 py-1 text-cyan-700">
+                            <span className="h-2 w-2 rounded-full bg-cyan-500" />Bank {businessOwnerChartData.mixBankPct.toFixed(1)}%
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-1 text-indigo-700">
+                            <span className="h-2 w-2 rounded-full bg-indigo-500" />Check {businessOwnerChartData.mixCheckPct.toFixed(1)}%
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-600">Performance Ratio Chart</p>
+                        <div className="mt-3 space-y-2 text-[11px]">
+                          <div>
+                            <div className="mb-1 flex items-center justify-between text-slate-600">
+                              <span>Collected vs Sales</span>
+                              <span>{businessOwnerChartData.collectedVsSalesPct.toFixed(1)}%</span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-100">
+                              <div className="h-2 rounded-full bg-emerald-500" style={{ width: `${businessOwnerChartData.collectedVsSalesPct}%` }} />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="mb-1 flex items-center justify-between text-slate-600">
+                              <span>Outstanding vs Sales</span>
+                              <span>{businessOwnerChartData.outstandingVsSalesPct.toFixed(1)}%</span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-100">
+                              <div className="h-2 rounded-full bg-amber-500" style={{ width: `${businessOwnerChartData.outstandingVsSalesPct}%` }} />
+                            </div>
+                          </div>
+                          <div>
+                            <div className="mb-1 flex items-center justify-between text-slate-600">
+                              <span>Profit vs Sales</span>
+                              <span>{businessOwnerChartData.profitVsSalesPct.toFixed(1)}%</span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-100">
+                              <div className="h-2 rounded-full bg-blue-500" style={{ width: `${businessOwnerChartData.profitVsSalesPct}%` }} />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="flex justify-end gap-3">
@@ -2483,6 +3078,24 @@ export default function LoadsPage() {
               )}
             </div>
           </div>
+          </div>
+        </div>
+      )}
+
+      {alertModal.open && (
+        <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/55 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-white/70 bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-slate-900">{alertModal.title}</h3>
+            <p className="mt-3 text-sm text-slate-700">{alertModal.message}</p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setAlertModal({ open: false, title: '', message: '' })}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                OK
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2535,7 +3148,7 @@ export default function LoadsPage() {
           <div className="w-full max-w-lg rounded-2xl border border-white/70 bg-white p-6 shadow-2xl">
             <h3 className="text-lg font-semibold text-slate-900">Complete Load Confirmation</h3>
             <p className="mt-3 text-sm text-slate-700">
-              Whould you like add balance qty to main stock?
+              Would you like to add balance qty to main stock?
             </p>
             <p className="mt-2 text-xs text-slate-500">
               Load: {selectedLoadDetails.load_number}
@@ -2545,7 +3158,11 @@ export default function LoadsPage() {
               <button
                 type="button"
                 disabled={detailsCompleting}
-                onClick={() => setCompleteDecisionOpen(false)}
+                onClick={() => {
+                  setCompleteDecisionOpen(false);
+                  setPendingStockAddDecision(null);
+                  setCashTransferDecisionOpen(false);
+                }}
                 className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 Cancel
@@ -2553,18 +3170,70 @@ export default function LoadsPage() {
               <button
                 type="button"
                 disabled={detailsCompleting}
-                onClick={() => completeWithDecision(false)}
+                onClick={() => {
+                  setPendingStockAddDecision(false);
+                  setCompleteDecisionOpen(false);
+                  setCashTransferDecisionOpen(true);
+                }}
                 className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
               >
-                {detailsCompleting ? 'Please wait...' : 'No, Complete Without Stock Add'}
+                No, Complete Without Stock Add
               </button>
               <button
                 type="button"
                 disabled={detailsCompleting}
-                onClick={() => completeWithDecision(true)}
+                onClick={() => {
+                  setPendingStockAddDecision(true);
+                  setCompleteDecisionOpen(false);
+                  setCashTransferDecisionOpen(true);
+                }}
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
               >
-                {detailsCompleting ? 'Please wait...' : 'Yes, Add to Main Stock & Complete'}
+                Yes, Add to Main Stock & Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cashTransferDecisionOpen && selectedLoadDetails && pendingStockAddDecision !== null && (
+        <div className="fixed inset-0 z-[61] bg-slate-900/55 flex items-center justify-center px-4">
+          <div className="w-full max-w-lg rounded-2xl border border-white/70 bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-slate-900">Collected Cash Main-Account Approval</h3>
+            <p className="mt-3 text-sm text-slate-700">
+              Send collected cash to Main Account pending acceptance after completing this load?
+            </p>
+            <p className="mt-2 text-xs text-slate-500">
+              Load: {selectedLoadDetails.load_number}
+            </p>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => {
+                  setCashTransferDecisionOpen(false);
+                  setCompleteDecisionOpen(true);
+                }}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => completeWithDecision(pendingStockAddDecision, false)}
+                className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                {detailsCompleting ? 'Please wait...' : 'No, Complete Without Pending Cash Transfer'}
+              </button>
+              <button
+                type="button"
+                disabled={detailsCompleting}
+                onClick={() => completeWithDecision(pendingStockAddDecision, true)}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {detailsCompleting ? 'Please wait...' : 'Yes, Send to Main Account Pending Acceptance'}
               </button>
             </div>
           </div>

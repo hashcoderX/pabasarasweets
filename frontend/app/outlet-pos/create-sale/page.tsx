@@ -94,7 +94,7 @@ type SaleRow = {
   total_amount: number;
   discount_amount?: number;
   paid_amount?: number;
-  payment_type?: 'cash' | 'bank' | 'card' | 'online' | null;
+  payment_type?: 'cash' | 'bank' | 'card' | 'voucher' | null;
   balance_amount?: number;
   items: SaleItem[];
 };
@@ -122,6 +122,7 @@ type CreatedSale = {
   id: number;
   sale_number: string;
   do_number?: string | null;
+  order_type?: 'outlet_order' | 'factory_order' | null;
   status?: string | null;
   delivery_employee_id?: number | null;
   delivery_employee_name?: string | null;
@@ -133,7 +134,7 @@ type CreatedSale = {
   total_amount: number;
   discount_amount?: number;
   paid_amount?: number;
-  payment_type?: 'cash' | 'bank' | 'card' | 'online' | null;
+  payment_type?: 'cash' | 'bank' | 'card' | 'voucher' | null;
   balance_amount?: number;
   items?: SaleItem[];
   outlet?: { name?: string; code?: string } | null;
@@ -162,6 +163,13 @@ type DistributionCustomer = {
   status?: string;
 };
 
+type RouteOption = {
+  id: number;
+  name: string;
+  origin?: string | null;
+  destination?: string | null;
+};
+
 type CustomerSuggestion = {
   source: 'distribution' | 'loyalty';
   id: number;
@@ -178,7 +186,15 @@ type CashierSessionStatus = {
   session_date?: string;
 };
 
-type SaleMode = 'order' | 'exact_invoice';
+type CompanyBankAccount = {
+  id: number;
+  bank_name?: string;
+  branch?: string;
+  account_no?: string;
+  current_balance?: number;
+};
+
+type SaleMode = 'order' | 'get_order' | 'exact_invoice';
 
 const ISSUE_TYPE_OPTIONS: Array<{ value: 'free' | 'sample' | 'retail' | 'wholesale' | 'van_sale'; label: string }> = [
   { value: 'retail', label: 'Retail' },
@@ -218,6 +234,7 @@ function OutletPosContent() {
   const [outletCode, setOutletCode] = useState('');
   const [outletId, setOutletId] = useState<number | null>(null);
   const [stocks, setStocks] = useState<StockLine[]>([]);
+  const [inventoryCatalog, setInventoryCatalog] = useState<StockLine[]>([]);
   const [sales, setSales] = useState<SaleRow[]>([]);
   const [cart, setCart] = useState<CartLine[]>([]);
   const [customerName, setCustomerName] = useState('');
@@ -225,7 +242,9 @@ function OutletPosContent() {
   const [notes, setNotes] = useState('');
   const [discountAmount, setDiscountAmount] = useState('0.00');
   const [paidAmount, setPaidAmount] = useState('0.00');
-  const [paymentType, setPaymentType] = useState<'cash' | 'bank' | 'card' | 'online'>('cash');
+  const [paymentType, setPaymentType] = useState<'cash' | 'bank' | 'card' | 'voucher'>('cash');
+  const [companyBankAccounts, setCompanyBankAccounts] = useState<CompanyBankAccount[]>([]);
+  const [selectedCompanyBankAccountId, setSelectedCompanyBankAccountId] = useState<number>(0);
   const [message, setMessage] = useState('');
   const [selectedItemId, setSelectedItemId] = useState<number>(0);
   const [itemSearch, setItemSearch] = useState('');
@@ -236,16 +255,39 @@ function OutletPosContent() {
   const [selectedIssueType, setSelectedIssueType] = useState<'free' | 'sample' | 'retail' | 'wholesale' | 'van_sale'>('retail');
   const [selectedLineDiscount, setSelectedLineDiscount] = useState<string>('0');
   const [saleMode, setSaleMode] = useState<SaleMode>('order');
+  const [getOrderType, setGetOrderType] = useState<'outlet_order' | 'factory_order'>('outlet_order');
   const [lastCreatedSale, setLastCreatedSale] = useState<CreatedSale | null>(null);
     const [loads, setLoads] = useState<LoadRecord[]>([]);
     const [selectedLoadId, setSelectedLoadId] = useState<number>(0);
   const [loyaltyCustomers, setLoyaltyCustomers] = useState<LoyaltyCustomer[]>([]);
   const [distributionCustomers, setDistributionCustomers] = useState<DistributionCustomer[]>([]);
+  const [distributionRoutes, setDistributionRoutes] = useState<RouteOption[]>([]);
   const [showCustomerSuggestions, setShowCustomerSuggestions] = useState(false);
+  const [showCustomerRegisterModal, setShowCustomerRegisterModal] = useState(false);
+  const [savingCustomer, setSavingCustomer] = useState(false);
   const [loyaltySearch, setLoyaltySearch] = useState('');
   const [selectedLoyaltyCustomerId, setSelectedLoyaltyCustomerId] = useState<number>(0);
   const [showLoyaltySuggestions, setShowLoyaltySuggestions] = useState(false);
   const [creatingLoyaltyFromCustomerPhone, setCreatingLoyaltyFromCustomerPhone] = useState(false);
+  const [customerFormData, setCustomerFormData] = useState<{
+    shop_name: string;
+    customer_code: string;
+    owner_name: string;
+    phone: string;
+    address: string;
+    route_id: string;
+    outstanding: string;
+    status: 'active' | 'inactive';
+  }>({
+    shop_name: '',
+    customer_code: '',
+    owner_name: '',
+    phone: '',
+    address: '',
+    route_id: '',
+    outstanding: '',
+    status: 'active',
+  });
   const [cashierSession, setCashierSession] = useState<CashierSessionStatus | null>(null);
   const [noticeModal, setNoticeModal] = useState<{ isOpen: boolean; title: string; message: string }>({
     isOpen: false,
@@ -265,15 +307,29 @@ function OutletPosContent() {
 
   const router = useRouter();
   const params = useSearchParams();
+  const isEmbedded = params.get('embedded') === '1';
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const formInputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
   const formInputClassCompact =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3 py-2 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
 
-  const getNextPath = () => {
+  const paymentTypeLabel = (value: 'cash' | 'bank' | 'card' | 'voucher') => {
+    if (value === 'bank') return 'BANK TRANSFER';
+    return value.toUpperCase();
+  };
+
+  const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
-    return `/outlet-pos/create-sale${outletCode ? `?outlet_code=${encodeURIComponent(outletCode)}` : ''}`;
+    const query = new URLSearchParams();
+    if (outletCode) query.set('outlet_code', outletCode);
+    if (isEmbedded) query.set('embedded', '1');
+    const queryString = query.toString();
+    return `${path}${queryString ? `?${queryString}` : ''}`;
+  };
+
+  const getNextPath = () => {
+    return getPathWithCode('/outlet-pos/create-sale');
   };
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
@@ -282,6 +338,15 @@ function OutletPosContent() {
     const now = new Date();
     const tzOffsetMs = now.getTimezoneOffset() * 60000;
     return new Date(now.getTime() - tzOffsetMs).toISOString().slice(0, 10);
+  };
+
+  const generateCustomerCode = (): string => {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const datePart = `${now.getFullYear().toString().slice(-2)}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+    const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const randomPart = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+    return `CUS-${datePart}${timePart}-${randomPart}`;
   };
 
   const todayIsoDate = getLocalIsoDate();
@@ -294,6 +359,12 @@ function OutletPosContent() {
   const showNotice = (message: string, title = 'Notice') => {
     setNoticeModal({ isOpen: true, title, message });
   };
+
+  useEffect(() => {
+    if (!message) return;
+    setNoticeModal({ isOpen: true, title: 'Notice', message });
+    setMessage('');
+  }, [message]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -439,9 +510,160 @@ function OutletPosContent() {
     return true;
   };
 
+  const fetchDistributionRoutes = async (authToken: string): Promise<boolean> => {
+    const res = await axios.get(`${API_URL}/api/vehicle-loading/routes`, {
+      headers: authHeaders(authToken),
+      validateStatus: () => true,
+    });
+
+    if (res.status === 401) {
+      redirectToLoginWithNext();
+      return false;
+    }
+
+    if (res.status >= 400) {
+      setDistributionRoutes([]);
+      return false;
+    }
+
+    const payload = res.data;
+    const rows: RouteOption[] = Array.isArray(payload) ? payload : (payload?.data || []);
+    setDistributionRoutes(rows.filter((route) => Number(route?.id || 0) > 0));
+    return true;
+  };
+
+  const resetCustomerForm = () => {
+    setCustomerFormData({
+      shop_name: customerName.trim(),
+      customer_code: generateCustomerCode(),
+      owner_name: '',
+      phone: isLikelyPhone(customerName) ? normalizePhone(customerName) : '',
+      address: '',
+      route_id: '',
+      outstanding: '',
+      status: 'active',
+    });
+  };
+
+  const openCustomerRegisterModal = async () => {
+    if (!token) return;
+    resetCustomerForm();
+    setShowCustomerRegisterModal(true);
+    if (distributionRoutes.length === 0) {
+      await fetchDistributionRoutes(token);
+    }
+  };
+
+  const handleRegisterCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    try {
+      setSavingCustomer(true);
+      const payload = {
+        ...customerFormData,
+        route_id: customerFormData.route_id ? Number(customerFormData.route_id) : null,
+        outstanding: Number(customerFormData.outstanding || 0),
+      };
+
+      const res = await axios.post(`${API_URL}/api/distribution/customers`, payload, {
+        headers: authHeaders(token),
+        validateStatus: () => true,
+      });
+
+      if (res.status === 401) {
+        redirectToLoginWithNext();
+        return;
+      }
+
+      if (res.status >= 400) {
+        const apiMessage = res.data?.message || 'Failed to create customer.';
+        showNotice(apiMessage, 'Customer Registration');
+        return;
+      }
+
+      await fetchDistributionCustomers(token);
+      setCustomerName(customerFormData.shop_name.trim());
+      setShowCustomerSuggestions(false);
+      setShowCustomerRegisterModal(false);
+      resetCustomerForm();
+      showNotice('Customer registered successfully.', 'Customer Registration');
+    } catch (error) {
+      console.error('Failed to register customer:', error);
+      showNotice('Failed to register customer.', 'Customer Registration');
+    } finally {
+      setSavingCustomer(false);
+    }
+  };
+
+  const fetchInventoryCatalog = async (authToken: string): Promise<boolean> => {
+    const allRows: StockLine[] = [];
+    const perPage = 200;
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      const res = await axios.get(`${API_URL}/api/stock/inventory`, {
+        headers: authHeaders(authToken),
+        params: { per_page: perPage, page, status: 'active' },
+        validateStatus: () => true,
+      });
+
+      if (res.status === 401) {
+        redirectToLoginWithNext();
+        return false;
+      }
+
+      if (res.status >= 400) {
+        setInventoryCatalog([]);
+        return false;
+      }
+
+      const payload = res.data?.data;
+      const rows: Array<{
+        id?: number | string;
+        name?: string;
+        code?: string;
+        unit?: string;
+        sell_price?: number | string;
+        unit_price?: number | string;
+        current_stock?: number | string;
+      }> = Array.isArray(payload?.data) ? payload.data : [];
+      allRows.push(
+        ...rows
+          .map((row) => ({
+            inventory_item_id: Number(row?.id || 0),
+            name: String(row?.name || ''),
+            code: String(row?.code || ''),
+            unit: String(row?.unit || ''),
+            sell_price: Number(row?.sell_price ?? row?.unit_price ?? 0),
+            transferred_qty: 0,
+            sold_qty: 0,
+            available_qty: Number(row?.current_stock ?? 0),
+          }))
+          .filter((row) => row.inventory_item_id > 0 && row.name)
+      );
+
+      const apiLastPage = Number(payload?.last_page || 0);
+      totalPages = apiLastPage > 0 ? apiLastPage : 1;
+      if (apiLastPage <= 0 && rows.length < perPage) break;
+      page += 1;
+    }
+
+    const uniqueByItemId = new Map<number, StockLine>();
+    allRows.forEach((row) => {
+      if (!uniqueByItemId.has(row.inventory_item_id)) {
+        uniqueByItemId.set(row.inventory_item_id, row);
+      }
+    });
+    setInventoryCatalog(Array.from(uniqueByItemId.values()));
+    return true;
+  };
+
   const fetchLoads = async (authToken: string): Promise<boolean> => {
     const res = await axios.get(`${API_URL}/api/vehicle-loading/loads`, {
       headers: authHeaders(authToken),
+      params: { status: 'active' },
       validateStatus: () => true,
     });
 
@@ -471,7 +693,14 @@ function OutletPosContent() {
         vehicle: row?.vehicle ?? null,
         driver: row?.driver ?? null,
       }) as LoadRecord)
-      .filter((row) => row.id > 0 && row.load_number);
+      .filter((row) => {
+        if (!(row.id > 0 && row.load_number)) return false;
+        const normalizedStatus = String(row.status || '')
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, '_');
+        return !normalizedStatus.includes('deliver');
+      });
 
     setLoads(normalizedLoads);
     return true;
@@ -505,6 +734,7 @@ function OutletPosContent() {
     }
 
     await fetchDistributionCustomers(authToken);
+    await fetchInventoryCatalog(authToken);
     await fetchLoads(authToken);
 
     const salesOk = await fetchOutletSales(authToken);
@@ -520,10 +750,16 @@ function OutletPosContent() {
   }, [loads, selectedLoadId]);
 
   useEffect(() => {
-    if (saleMode === 'exact_invoice' && selectedLoadId !== 0) {
+    if (saleMode !== 'order' && selectedLoadId !== 0) {
       setSelectedLoadId(0);
     }
   }, [saleMode, selectedLoadId]);
+
+  useEffect(() => {
+    if (saleMode !== 'get_order' && getOrderType !== 'outlet_order') {
+      setGetOrderType('outlet_order');
+    }
+  }, [saleMode, getOrderType]);
 
   useEffect(() => {
     if (!token) return;
@@ -600,13 +836,16 @@ function OutletPosContent() {
     const hydrateCompanyHeader = async () => {
       try {
         const profileId = Number(window.localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
-        if (profileId <= 0) return;
-
-        const res = await axios.get(`/api/companies/${profileId}`, {
+        const listRes = await axios.get('/api/companies', {
           headers: { Authorization: `Bearer ${token}` },
         });
-
-        const company = (res?.data || {}) as {
+        const listPayload = listRes?.data;
+        const companies = (
+          Array.isArray(listPayload)
+            ? listPayload
+            : (Array.isArray(listPayload?.data) ? listPayload.data : [])
+        ) as Array<{
+          id?: number | string;
           name?: string;
           logo_url?: string;
           logo_path?: string;
@@ -614,7 +853,41 @@ function OutletPosContent() {
           phone?: string;
           email?: string;
           website?: string;
-        };
+          bank_accounts?: Array<{
+            id?: number;
+            bank_name?: string;
+            branch?: string;
+            account_no?: string;
+            current_balance?: number;
+          }>;
+        }>;
+
+        let company = (companies.find((row) => Number(row?.id || 0) === profileId) || null);
+        if (!company) {
+          company = companies.find((row) => Array.isArray(row?.bank_accounts) && row.bank_accounts.length > 0) || companies[0] || null;
+        }
+        if (!company) return;
+
+        const resolvedCompanyId = Number(company?.id || 0);
+        if (resolvedCompanyId > 0) {
+          try {
+            const detailRes = await axios.get(`/api/companies/${resolvedCompanyId}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const detailPayload = detailRes?.data;
+            const detailCompany = (detailPayload?.data && typeof detailPayload.data === 'object')
+              ? detailPayload.data
+              : detailPayload;
+            if (detailCompany && typeof detailCompany === 'object') {
+              company = {
+                ...company,
+                ...detailCompany,
+              };
+            }
+          } catch {
+            // Keep list payload fallback.
+          }
+        }
 
         const latestName = String(company?.name || '').trim();
         if (latestName) {
@@ -627,6 +900,22 @@ function OutletPosContent() {
         setCompanyProfilePhone(String(company?.phone || '').trim());
         setCompanyProfileEmail(String(company?.email || '').trim());
         setCompanyProfileWebsite(String(company?.website || '').trim());
+        const bankAccounts = Array.isArray(company?.bank_accounts) ? company.bank_accounts : [];
+
+        const mappedBankAccounts: CompanyBankAccount[] = bankAccounts
+          .map((account) => ({
+            id: Number(account?.id || 0),
+            bank_name: String(account?.bank_name || ''),
+            branch: String(account?.branch || ''),
+            account_no: String(account?.account_no || ''),
+            current_balance: Number(account?.current_balance || 0),
+          }))
+          .filter((account) => account.id > 0);
+        setCompanyBankAccounts(mappedBankAccounts);
+        setSelectedCompanyBankAccountId((prev) => {
+          if (mappedBankAccounts.some((account) => account.id === prev)) return prev;
+          return mappedBankAccounts[0]?.id || 0;
+        });
 
         const currentRaw = window.localStorage.getItem('company_profile_data');
         const current = currentRaw ? JSON.parse(currentRaw) : {};
@@ -643,6 +932,19 @@ function OutletPosContent() {
 
     hydrateCompanyHeader();
   }, [token]);
+
+  useEffect(() => {
+    if (paymentType !== 'bank') return;
+    if (companyBankAccounts.length === 0) {
+      showNotice('No company bank accounts found. Please add bank account in Company Main Account.', 'Bank Transfer');
+      return;
+    }
+
+    setSelectedCompanyBankAccountId((prev) => {
+      if (companyBankAccounts.some((account) => account.id === prev)) return prev;
+      return companyBankAccounts[0]?.id || 0;
+    });
+  }, [paymentType, companyBankAccounts]);
 
   const stockTotals = useMemo(() => {
     const totalItems = stocks.length;
@@ -700,17 +1002,21 @@ function OutletPosContent() {
     return Math.max(payableTotal - effectivePaidAmount, 0);
   }, [payableTotal, effectivePaidAmount]);
 
+  const selectableItems = useMemo(() => {
+    return saleMode === 'get_order' ? inventoryCatalog : stocks;
+  }, [saleMode, inventoryCatalog, stocks]);
+
   const filteredStocks = useMemo(() => {
     const term = itemSearch.trim().toLowerCase();
-    if (!term) return stocks.slice(0, 12);
+    if (!term) return selectableItems.slice(0, 12);
 
-    return stocks
+    return selectableItems
       .filter((line) => {
         const text = `${line.code} ${line.name} ${line.unit}`.toLowerCase();
         return text.includes(term);
       })
       .slice(0, 12);
-  }, [stocks, itemSearch]);
+  }, [selectableItems, itemSearch]);
 
   const filteredLoyaltyCustomers = useMemo(() => {
     const term = loyaltySearch.trim().toLowerCase();
@@ -740,7 +1046,7 @@ function OutletPosContent() {
       email: customer.email || null,
     }));
 
-    if (saleMode === 'order') {
+    if (saleMode === 'order' || saleMode === 'get_order') {
       return distributionRows;
     }
 
@@ -913,7 +1219,7 @@ function OutletPosContent() {
   };
 
   const addToCart = (): boolean => {
-    const stockLine = stocks.find((s) => s.inventory_item_id === selectedItemId);
+    const stockLine = selectableItems.find((s) => s.inventory_item_id === selectedItemId);
     if (!stockLine) {
       showNotice('Please select an item.');
       return false;
@@ -929,7 +1235,7 @@ function OutletPosContent() {
       return false;
     }
 
-    if (qty > Number(stockLine.available_qty || 0)) {
+    if (saleMode !== 'get_order' && qty > Number(stockLine.available_qty || 0)) {
       showNotice('Quantity exceeds available stock.');
       return false;
     }
@@ -943,7 +1249,7 @@ function OutletPosContent() {
       .filter((line) => line.inventory_item_id === stockLine.inventory_item_id)
       .reduce((sum, line) => sum + Number(line.quantity || 0), 0);
 
-    if (currentQtyForItem + qty > Number(stockLine.available_qty || 0)) {
+    if (saleMode !== 'get_order' && currentQtyForItem + qty > Number(stockLine.available_qty || 0)) {
       showNotice('Combined quantity exceeds available stock.');
       return false;
     }
@@ -1513,7 +1819,7 @@ function OutletPosContent() {
   const submitSale = async () => {
     if (!cashierSession?.is_open) {
       showNotice('Cashier is not open. Please open cash drawer first.');
-      router.push(`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`);
+      router.push(getPathWithCode('/outlet-pos/cash-drawer'));
       return;
     }
 
@@ -1537,6 +1843,11 @@ function OutletPosContent() {
       return;
     }
 
+    if (paymentType === 'bank' && selectedCompanyBankAccountId <= 0) {
+      showNotice('Please select Company Main Account (Bank Account) for bank transfer payment.', 'Bank Transfer');
+      return;
+    }
+
     if (saleMode === 'exact_invoice' && balanceAmount > 0 && !selectedLoyaltyCustomerId) {
       showNotice('Credit sale is allowed only for loyalty customers. Please select a loyalty customer for this credit balance.', 'Credit Validation');
       return;
@@ -1549,6 +1860,7 @@ function OutletPosContent() {
         `${API_URL}/api/outlet-pos/sales`,
         {
           sale_mode: saleMode,
+          ...(saleMode === 'get_order' ? { order_type: getOrderType } : {}),
           outlet_id: outletId,
           sale_date: saleDate || null,
           customer_name: customerName || null,
@@ -1557,6 +1869,7 @@ function OutletPosContent() {
           discount_amount: effectiveDiscountAmount,
           paid_amount: effectivePaidAmount,
           payment_type: paymentType,
+          ...(paymentType === 'bank' ? { company_bank_account_id: selectedCompanyBankAccountId } : {}),
           notes: notes || null,
           items: cart.map((line) => ({
             inventory_item_id: line.inventory_item_id,
@@ -1579,6 +1892,7 @@ function OutletPosContent() {
       setPaidAmount('0.00');
       setPaymentType('cash');
       setSelectedLoadId(0);
+      setGetOrderType('outlet_order');
       setSelectedLoyaltyCustomerId(0);
       setLoyaltySearch('');
       const awarded = Number(createdSale?.loyalty_points_awarded || 0);
@@ -1586,6 +1900,11 @@ function OutletPosContent() {
         setMessage(awarded > 0
           ? `Exact invoice created successfully. ${awarded.toFixed(2)} loyalty points awarded.`
           : 'Exact invoice created successfully. Bill is ready to print.');
+      } else if (saleMode === 'get_order') {
+        const orderTypeLabel = (createdSale?.order_type || getOrderType) === 'factory_order' ? 'Factory Order' : 'Outlet Order';
+        setMessage(awarded > 0
+          ? `Get Order (${orderTypeLabel}) created successfully. ${awarded.toFixed(2)} loyalty points awarded.`
+          : `Get Order (${orderTypeLabel}) created successfully. Bill is ready to print.`);
       } else {
         setMessage(awarded > 0
           ? `Order created successfully. DO ${createdSale?.do_number || '-'} generated. ${awarded.toFixed(2)} loyalty points awarded.`
@@ -1613,7 +1932,7 @@ function OutletPosContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center">
+      <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center`}>
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
       </div>
     );
@@ -1622,7 +1941,7 @@ function OutletPosContent() {
   const handleLogout = () => {
     if (cashierSession?.is_open) {
       showNotice('Cashier is still open. Please close cash drawer before logout.');
-      router.push(`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`);
+      router.push(getPathWithCode('/outlet-pos/cash-drawer'));
       return;
     }
 
@@ -1631,13 +1950,16 @@ function OutletPosContent() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden">
+    <div className={`${isEmbedded ? '' : 'min-h-screen overflow-hidden'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative`}>
+      {!isEmbedded ? (
       <div className="absolute inset-0 opacity-30">
         <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
+      ) : null}
 
+      {!isEmbedded ? (
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -1648,31 +1970,31 @@ function OutletPosContent() {
               </div>
               <div className="hidden md:flex items-center gap-2">
                 <Link
-                  href={`/outlet-pos${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos')}
                   className="px-3 py-1.5 text-sm rounded-md border border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100"
                 >
                   Dashboard
                 </Link>
                 <Link
-                  href={`/outlet-pos/stock${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/stock')}
                   className="px-3 py-1.5 text-sm rounded-md border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
                 >
                   Stock
                 </Link>
                 <Link
-                  href={`/outlet-pos/sales${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/sales')}
                   className="px-3 py-1.5 text-sm rounded-md border border-pink-200 bg-pink-50 text-pink-700 hover:bg-pink-100"
                 >
                   Sales
                 </Link>
                 <Link
-                  href={`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/cash-drawer')}
                   className="px-3 py-1.5 text-sm rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                 >
                   Cash Drawer
                 </Link>
                 <Link
-                  href={`/outlet-pos/loyalty-customers${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/loyalty-customers')}
                   className="px-3 py-1.5 text-sm rounded-md border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                 >
                   Loyalty
@@ -1688,19 +2010,16 @@ function OutletPosContent() {
           </div>
         </div>
       </nav>
+      ) : null}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
-        {message && (
-          <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{message}</div>
-        )}
-
+      <main className={`relative z-10 ${isEmbedded ? 'w-full p-5 sm:p-5 lg:p-5' : 'max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8'} space-y-6`}>
         {!cashierSession?.is_open && (
           <section className="rounded-2xl border border-amber-200 bg-amber-50 shadow-sm p-5">
             <h2 className="text-lg font-semibold text-amber-800">Cashier Not Open</h2>
             <p className="text-sm text-amber-700 mt-1">You must open cash drawer before creating sales for the day.</p>
             <div className="mt-3">
               <Link
-                href={`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                href={getPathWithCode('/outlet-pos/cash-drawer')}
                 className="inline-flex px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-sm font-medium hover:from-emerald-700 hover:to-teal-700"
               >
                 Open Cash Drawer
@@ -1728,27 +2047,6 @@ function OutletPosContent() {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Recent Sales Moved</h2>
-              <p className="text-sm text-gray-600">View, filter, and review sales from the dedicated page.</p>
-            </div>
-            <Link
-              href={`/outlet-pos/sales${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
-              className="px-4 py-2 bg-gradient-to-r from-pink-500 to-rose-500 text-white rounded-md text-sm font-medium hover:from-pink-600 hover:to-rose-600"
-            >
-              Open Recent Sales
-            </Link>
-            <Link
-              href={`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
-              className="px-4 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 rounded-md text-sm font-medium hover:bg-emerald-100"
-            >
-              Cash Drawer
-            </Link>
-          </div>
-        </section>
-
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <section className="lg:col-span-2 rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -1763,6 +2061,13 @@ function OutletPosContent() {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setSaleMode('get_order')}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'get_order' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
+                >
+                  Get Order
+                </button>
+                <button
+                  type="button"
                   onClick={() => setSaleMode('exact_invoice')}
                   className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'exact_invoice' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
                 >
@@ -1771,7 +2076,7 @@ function OutletPosContent() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div className={`grid grid-cols-1 ${(saleMode === 'order' || saleMode === 'get_order') ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4 mb-4`}>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name or Phone</label>
                 <input
@@ -1812,6 +2117,13 @@ function OutletPosContent() {
                   </div>
                 )}
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={openCustomerRegisterModal}
+                    className="rounded-md border border-blue-200 bg-blue-50 px-2 py-1 font-medium text-blue-700 hover:bg-blue-100"
+                  >
+                    Register Customer
+                  </button>
                   {!customerName.trim() && (
                     <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-1 text-gray-600">
                       Walk-in customer will be used automatically.
@@ -1843,6 +2155,19 @@ function OutletPosContent() {
                   className={formInputClass}
                 />
               </div>
+              {saleMode === 'get_order' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Order Remark</label>
+                  <select
+                    value={getOrderType}
+                    onChange={(e) => setGetOrderType(e.target.value as 'outlet_order' | 'factory_order')}
+                    className={formInputClass}
+                  >
+                    <option value="outlet_order">Outlet Order</option>
+                    <option value="factory_order">Factory Order</option>
+                  </select>
+                </div>
+              )}
               {saleMode === 'order' && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">DO Load</label>
@@ -1854,16 +2179,18 @@ function OutletPosContent() {
                     <option value={0}>{loads.length > 0 ? 'Select load record' : 'No load records found'}</option>
                     {loads.map((row) => (
                       <option key={row.id} value={row.id}>
-                        {row.load_number} ({String(row.status || 'pending').replace(/_/g, ' ')})
+                        {`${row.load_number} | Date: ${row.load_date ? String(row.load_date).split('T')[0] : '-'} | Route: ${row.route?.route_name || row.route?.name || row.route?.code || '-'} | Vehicle: ${row.vehicle?.vehicle_no || row.vehicle?.vehicle_number || row.vehicle?.registration_number || '-'} | ${String(row.status || 'pending').replace(/_/g, ' ')}`}
                       </option>
                     ))}
                   </select>
                   {selectedLoad && (
                     <div className="mt-2 rounded-md border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
-                      Route: {selectedLoad.route?.route_name || selectedLoad.route?.name || selectedLoad.route?.code || '-'} |
-                      Vehicle: {selectedLoad.vehicle?.vehicle_no || selectedLoad.vehicle?.vehicle_number || selectedLoad.vehicle?.registration_number || '-'} |
-                      Driver: {selectedLoad.driver?.name || `${String(selectedLoad.driver?.first_name || '').trim()} ${String(selectedLoad.driver?.last_name || '').trim()}`.trim() || '-'} |
-                      Load Date: {selectedLoad.load_date ? new Date(selectedLoad.load_date).toLocaleDateString() : '-'}
+                      <div className="overflow-x-auto whitespace-nowrap">
+                        Route: {selectedLoad.route?.route_name || selectedLoad.route?.name || selectedLoad.route?.code || '-'} |
+                        Vehicle: {selectedLoad.vehicle?.vehicle_no || selectedLoad.vehicle?.vehicle_number || selectedLoad.vehicle?.registration_number || '-'} |
+                        Driver: {selectedLoad.driver?.name || `${String(selectedLoad.driver?.first_name || '').trim()} ${String(selectedLoad.driver?.last_name || '').trim()}`.trim() || '-'} |
+                        Load Date: {selectedLoad.load_date ? new Date(selectedLoad.load_date).toLocaleDateString() : '-'}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1952,7 +2279,7 @@ function OutletPosContent() {
                   <p className="mt-1 text-xs text-gray-500">Use Arrow Up/Down to choose item, Enter to select.</p>
 
                   {showItemSuggestions && (
-                    <div className="absolute z-20 mt-2 w-full max-h-64 overflow-auto rounded-xl border border-rose-100 bg-white shadow-xl">
+                    <div className="absolute z-40 mt-2 w-full max-h-64 overflow-auto rounded-xl border border-rose-100 bg-white shadow-xl">
                       {filteredStocks.length === 0 ? (
                         <div className="px-3 py-2 text-sm text-gray-500">No matching items.</div>
                       ) : (
@@ -1969,10 +2296,13 @@ function OutletPosContent() {
                                 ? 'bg-rose-100'
                                 : 'hover:bg-rose-50'
                             }`}
+                            title={`${line.code} - ${line.name}`}
                           >
-                            <div className="text-sm text-gray-900 font-medium">{line.code} - {line.name}</div>
+                            <div className="text-sm text-gray-900 font-medium truncate">{line.code} - {line.name}</div>
                             <div className="text-xs text-gray-600">
-                              Outlet Avail: {Number(line.available_qty).toFixed(2)} | Sell: {Number(line.sell_price || 0).toFixed(2)}
+                              {saleMode === 'get_order'
+                                ? `Sell: ${Number(line.sell_price || 0).toFixed(2)}`
+                                : `Outlet Avail: ${Number(line.available_qty).toFixed(2)} | Sell: ${Number(line.sell_price || 0).toFixed(2)}`}
                             </div>
                           </button>
                         ))
@@ -2051,7 +2381,7 @@ function OutletPosContent() {
             <div className="flex items-center justify-between gap-2 mb-4">
               <h2 className="text-lg font-semibold text-gray-900">Cart Summary</h2>
               <Link
-                href={`/outlet-pos/stock${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                href={getPathWithCode('/outlet-pos/stock')}
                 className="px-3 py-1.5 text-xs rounded-md border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
               >
                 View Stock Page
@@ -2140,15 +2470,35 @@ function OutletPosContent() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Paid Type</label>
                 <select
                   value={paymentType}
-                  onChange={(e) => setPaymentType(e.target.value as 'cash' | 'bank' | 'card' | 'online')}
+                  onChange={(e) => setPaymentType(e.target.value as 'cash' | 'bank' | 'card' | 'voucher')}
                   className={formInputClassCompact}
                 >
                   <option value="cash">Cash</option>
-                  <option value="bank">Bank</option>
+                  <option value="bank">Bank Transfer</option>
                   <option value="card">Card</option>
-                  <option value="online">Online</option>
+                  <option value="voucher">Voucher</option>
                 </select>
               </div>
+
+              {paymentType === 'bank' && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Company Main Account (Bank Account)</label>
+                  <select
+                    value={selectedCompanyBankAccountId}
+                    onChange={(e) => setSelectedCompanyBankAccountId(Number(e.target.value || 0))}
+                    className={formInputClassCompact}
+                  >
+                    <option value={0}>
+                      {companyBankAccounts.length > 0 ? 'Select company bank account' : 'No company bank accounts available'}
+                    </option>
+                    {companyBankAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {`${account.bank_name || 'Bank'}${account.branch ? ` - ${account.branch}` : ''}${account.account_no ? ` (A/C: ${account.account_no})` : ''}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Balance</label>
@@ -2166,7 +2516,7 @@ function OutletPosContent() {
                 <div className="text-sm text-gray-600">Subtotal: {cartTotal.toFixed(2)}</div>
                 <div className="text-sm text-gray-600">Total Discount: {totalDiscountAmount.toFixed(2)}</div>
                 <div className="text-lg font-semibold text-gray-900">Grand Total: {payableTotal.toFixed(2)}</div>
-                <div className="text-sm text-gray-600">Paid ({paymentType.toUpperCase()}): {effectivePaidAmount.toFixed(2)}</div>
+                <div className="text-sm text-gray-600">Paid ({paymentTypeLabel(paymentType)}): {effectivePaidAmount.toFixed(2)}</div>
                 <div className="text-sm font-semibold text-rose-700">Balance: {balanceAmount.toFixed(2)}</div>
                 {selectedLoyaltyCustomerId > 0 && (
                   <div className="text-xs text-amber-700 font-medium">Loyalty points to award: {loyaltyPointsPreview.toFixed(2)}</div>
@@ -2188,7 +2538,13 @@ function OutletPosContent() {
                   onClick={submitSale}
                   className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md text-sm font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50"
                 >
-                  {saving ? 'Saving...' : saleMode === 'order' ? 'Create Order & Generate DO' : 'Create Exact Invoice'}
+                  {saving
+                    ? 'Saving...'
+                    : saleMode === 'order'
+                      ? 'Create Order & Generate DO'
+                      : saleMode === 'get_order'
+                        ? 'Create Get Order'
+                        : 'Create Exact Invoice'}
                 </button>
               </div>
             </div>
@@ -2196,6 +2552,135 @@ function OutletPosContent() {
         </div>
 
       </main>
+
+      {showCustomerRegisterModal && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/45 px-3 py-6 backdrop-blur-sm sm:px-4">
+          <div className="relative mx-auto w-full max-w-3xl rounded-3xl border border-white/70 bg-white/92 p-5 shadow-[0_30px_90px_-35px_rgba(16,185,129,0.55)] backdrop-blur-xl sm:p-6">
+            <div className="mb-5 flex flex-col gap-3 border-b border-slate-200/80 pb-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 className="text-xl font-bold tracking-tight text-slate-900">Create Customer Shop</h3>
+                <p className="mt-1 text-sm text-slate-600">
+                  Capture complete shop details with route mapping and outstanding balance.
+                </p>
+              </div>
+              <span className="inline-flex w-fit items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-emerald-700">
+                Customer Profile
+              </span>
+            </div>
+
+            <form onSubmit={handleRegisterCustomer} className="space-y-5">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Shop Name</label>
+                  <input
+                    type="text"
+                    value={customerFormData.shop_name}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, shop_name: e.target.value })}
+                    className="w-full rounded-xl border border-emerald-200 bg-gradient-to-b from-white to-emerald-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Customer Code</label>
+                  <input
+                    type="text"
+                    value={customerFormData.customer_code}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, customer_code: e.target.value })}
+                    className="w-full rounded-xl border border-blue-200 bg-gradient-to-b from-white to-blue-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Owner Name</label>
+                  <input
+                    type="text"
+                    value={customerFormData.owner_name}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, owner_name: e.target.value })}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-slate-400 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Phone</label>
+                  <input
+                    type="text"
+                    value={customerFormData.phone}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, phone: e.target.value })}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-slate-400 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Route</label>
+                  <select
+                    value={customerFormData.route_id}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, route_id: e.target.value })}
+                    className="w-full rounded-xl border border-cyan-200 bg-gradient-to-b from-white to-cyan-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                  >
+                    <option value="">Select Route</option>
+                    {distributionRoutes.map((route) => (
+                      <option key={route.id} value={route.id}>
+                        {route.name} ({route.origin || '-'} {'->'} {route.destination || '-'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Status</label>
+                  <select
+                    value={customerFormData.status}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, status: e.target.value as 'active' | 'inactive' })}
+                    className="w-full rounded-xl border border-blue-200 bg-gradient-to-b from-white to-blue-50/35 px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition focus:border-blue-400 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                  >
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Outstanding</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={customerFormData.outstanding}
+                    onChange={(e) => setCustomerFormData({ ...customerFormData, outstanding: e.target.value })}
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Address</label>
+                <textarea
+                  value={customerFormData.address}
+                  onChange={(e) => setCustomerFormData({ ...customerFormData, address: e.target.value })}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-4 focus:ring-slate-100"
+                  rows={3}
+                />
+              </div>
+
+              <div className="flex flex-col-reverse gap-2 border-t border-slate-200/80 pt-4 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCustomerRegisterModal(false);
+                    resetCustomerForm();
+                  }}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingCustomer}
+                  className="rounded-xl border border-transparent bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-200/70 transition hover:from-emerald-700 hover:to-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {savingCustomer ? 'Saving...' : 'Create Customer'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {noticeModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-4">

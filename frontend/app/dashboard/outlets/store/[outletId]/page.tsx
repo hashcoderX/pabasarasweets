@@ -98,7 +98,7 @@ export default function OutletStorePage() {
   return (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-16">
             <div>
               <h1 className="text-lg font-semibold text-gray-900">Outlet Store</h1>
@@ -114,7 +114,7 @@ export default function OutletStorePage() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         {message && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{message}</div>
         )}

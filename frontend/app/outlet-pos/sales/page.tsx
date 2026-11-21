@@ -60,18 +60,27 @@ function OutletPosSalesContent() {
 
   const router = useRouter();
   const params = useSearchParams();
+  const isEmbedded = params.get('embedded') === '1';
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const formInputClass =
     'w-full rounded-xl border border-rose-100 bg-white/95 px-3.5 py-2.5 text-sm text-gray-900 shadow-sm placeholder:text-gray-400 transition-all duration-200 focus:border-rose-400 focus:ring-4 focus:ring-rose-100 focus:outline-none';
 
-  const getBackPath = () => {
+  const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
-    return `/outlet-pos${outletCode ? `?outlet_code=${encodeURIComponent(outletCode)}` : ''}`;
+    const query = new URLSearchParams();
+    if (outletCode) query.set('outlet_code', outletCode);
+    if (isEmbedded) query.set('embedded', '1');
+    const queryString = query.toString();
+    return `${path}${queryString ? `?${queryString}` : ''}`;
+  };
+
+  const getBackPath = () => {
+    return getPathWithCode('/outlet-pos');
   };
 
   const redirectToLoginWithNext = () => {
     localStorage.removeItem('token');
-    router.push(`/?next=${encodeURIComponent(`/outlet-pos/sales${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`)}`);
+    router.push(`/?next=${encodeURIComponent(getPathWithCode('/outlet-pos/sales'))}`);
   };
 
   useEffect(() => {
@@ -79,7 +88,7 @@ function OutletPosSalesContent() {
     const invalidStoredToken = !storedToken || storedToken === 'undefined' || storedToken === 'null';
 
     if (invalidStoredToken) {
-      router.push(`/?next=${encodeURIComponent(`/outlet-pos/sales${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`)}`);
+      router.push(`/?next=${encodeURIComponent(getPathWithCode('/outlet-pos/sales'))}`);
       return;
     }
 
@@ -181,20 +190,23 @@ function OutletPosSalesContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center">
+      <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center`}>
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden">
+    <div className={`${isEmbedded ? '' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden`}>
+      {!isEmbedded ? (
       <div className="absolute inset-0 opacity-30">
         <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
       </div>
+      ) : null}
 
+      {!isEmbedded ? (
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -210,13 +222,13 @@ function OutletPosSalesContent() {
                 Dashboard
               </Link>
               <Link
-                href={`/outlet-pos/create-sale${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                href={getPathWithCode('/outlet-pos/create-sale')}
                 className="px-3 py-1.5 text-sm rounded-md border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
               >
                 Create Sale
               </Link>
               <Link
-                href={`/outlet-pos/stock${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                href={getPathWithCode('/outlet-pos/stock')}
                 className="px-3 py-1.5 text-sm rounded-md border border-cyan-200 bg-cyan-50 text-cyan-700 hover:bg-cyan-100"
               >
                 Stock
@@ -225,8 +237,9 @@ function OutletPosSalesContent() {
           </div>
         </div>
       </nav>
+      ) : null}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className={`relative z-10 ${isEmbedded ? 'w-full p-5 sm:p-5 lg:p-5' : 'max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8'} space-y-6`}>
         <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
           <div className="flex items-center justify-between gap-4">
             <div>

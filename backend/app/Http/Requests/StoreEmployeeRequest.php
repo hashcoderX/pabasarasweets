@@ -24,6 +24,7 @@ class StoreEmployeeRequest extends FormRequest
         return [
             'first_name' => 'required|string|max:255',
             'last_name' => 'required|string|max:255',
+            'employee_nic' => 'nullable|string|max:50|unique:employees,employee_nic',
             'email' => 'required|email|unique:employees|unique:users',
             'password' => 'required|string|min:8',
             'role' => 'nullable|string|max:100',
@@ -32,6 +33,8 @@ class StoreEmployeeRequest extends FormRequest
             'photo_path' => 'nullable|string',
             'date_of_birth' => 'nullable|date|before:today',
             'hire_date' => 'required|date',
+            'employee_type' => 'nullable|in:full_time,part_time,contract,temporary,daily_wage',
+            'payment_request_type' => 'nullable|in:monthly_payroll,weekly_payroll,daily_payroll,daily_wage_request,salary_advance_request',
             'basic_salary' => 'required|numeric|min:0',
             'commission' => 'nullable|numeric|min:0|max:100',
             'commission_base' => 'nullable|in:company_profit,own_business',

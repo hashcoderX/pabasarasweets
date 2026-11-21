@@ -5,16 +5,242 @@ namespace App\Http\Controllers;
 use App\Models\DistributionInvoice;
 use App\Models\DistributionPayment;
 use App\Models\DistributionCustomer;
+use App\Models\Company;
+use App\Models\CompanyBankAccount;
 use App\Models\Employee;
 use App\Models\Load;
+use App\Models\MainCashTransaction;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\ValidationException;
 
 class DistributionPaymentController extends Controller
 {
+    private function isAdminUser($user): bool
+    {
+        if (!$user || !$user->employee_id) {
+            return true;
+        }
+
+        $user->loadMissing('roles');
+        $roles = $user->roles
+            ->pluck('name')
+            ->push((string) ($user->role ?? ''))
+            ->map(fn ($name) => strtolower(trim((string) $name)))
+            ->filter();
+
+        return $roles->contains(function ($roleName) {
+            return str_contains($roleName, 'super admin')
+                || str_contains($roleName, 'superadmin')
+                || str_contains($roleName, 'administrator')
+                || $roleName === 'admin';
+        });
+    }
+
+    private function failValidation(string $field, string $message): void
+    {
+        throw ValidationException::withMessages([
+            $field => [$message],
+        ]);
+    }
+
+    private function parseBankAccountNumber(?string $bankLabel): ?string
+    {
+        $label = trim((string) $bankLabel);
+        if ($label === '') {
+            return null;
+        }
+
+        if (preg_match('/A\/C:\s*([^)]+)/i', $label, $matches)) {
+            return trim((string) ($matches[1] ?? '')) ?: null;
+        }
+
+        return null;
+    }
+
+    private function parseBankName(?string $bankLabel): ?string
+    {
+        $label = trim((string) $bankLabel);
+        if ($label === '') {
+            return null;
+        }
+
+        if (preg_match('/^(.+?)(?:\s*-\s*.+)?(?:\s*\(A\/C:.*\))?$/i', $label, $matches)) {
+            return trim((string) ($matches[1] ?? '')) ?: null;
+        }
+
+        return $label;
+    }
+
+    private function findCompanyBankAccountForTransfer(?string $bankLabel): ?CompanyBankAccount
+    {
+        $accountNo = $this->parseBankAccountNumber($bankLabel);
+        if ($accountNo) {
+            return CompanyBankAccount::query()
+                ->whereRaw('LOWER(TRIM(account_no)) = ?', [strtolower(trim($accountNo))])
+                ->orderBy('id')
+                ->first();
+        }
+
+        $bankName = $this->parseBankName($bankLabel);
+        if ($bankName) {
+            return CompanyBankAccount::query()
+                ->whereRaw('LOWER(TRIM(bank_name)) = ?', [strtolower(trim($bankName))])
+                ->orderBy('id')
+                ->first();
+        }
+
+        return null;
+    }
+
+    private function resolveMainCompanyId(?CompanyBankAccount $bankAccount): ?int
+    {
+        if ($bankAccount && !empty($bankAccount->company_id)) {
+            return (int) $bankAccount->company_id;
+        }
+
+        $company = Company::query()->orderBy('id')->first();
+        return $company ? (int) $company->id : null;
+    }
+
+    private function hasBankTransferPosting(DistributionPayment $payment): bool
+    {
+        return MainCashTransaction::query()
+            ->where('reference', 'DEP-DISTPAY-' . $payment->id)
+            ->exists();
+    }
+
+    private function revertCustomerAndInvoiceAmounts(DistributionPayment $payment): void
+    {
+        $customer = DistributionCustomer::find($payment->customer_id);
+        if ($customer) {
+            $currentOutstanding = (float) ($customer->outstanding ?? 0);
+            $customer->outstanding = max(0, $currentOutstanding + (float) $payment->amount);
+            $customer->save();
+        }
+
+        if (!empty($payment->distribution_invoice_id)) {
+            $invoice = DistributionInvoice::find($payment->distribution_invoice_id);
+            if ($invoice) {
+                $invoice->paid_amount = max(0, (float) $invoice->paid_amount - (float) $payment->amount);
+
+                if ((float) $invoice->paid_amount >= (float) $invoice->total) {
+                    $invoice->status = 'paid';
+                } elseif ((float) $invoice->paid_amount > 0) {
+                    $invoice->status = 'partial';
+                } else {
+                    $invoice->status = 'pending';
+                }
+
+                $invoice->save();
+            }
+        }
+    }
+
+    private function applyBankTransferPosting(DistributionPayment $payment, Request $request): void
+    {
+        if (($payment->payment_method ?? '') !== 'bank_transfer') {
+            return;
+        }
+
+        if ($this->hasBankTransferPosting($payment)) {
+            return;
+        }
+
+        $companyBankAccount = $this->findCompanyBankAccountForTransfer($payment->bank_name);
+        $companyId = $this->resolveMainCompanyId($companyBankAccount);
+
+        if (!$companyId) {
+            $this->failValidation('bank_name', 'No company profile found to post bank transfer payment.');
+        }
+
+        if (!$companyBankAccount) {
+            $this->failValidation('bank_name', 'Select a valid company bank account for bank transfer payment.');
+        }
+
+        $lockedAccount = CompanyBankAccount::query()
+            ->whereKey($companyBankAccount->id)
+            ->lockForUpdate()
+            ->first();
+
+        if (!$lockedAccount) {
+            $this->failValidation('bank_name', 'Selected company bank account is not available.');
+        }
+
+        $lockedAccount->update([
+            'current_balance' => round((float) ($lockedAccount->current_balance ?? 0) + (float) $payment->amount, 2),
+        ]);
+
+        $company = Company::query()->whereKey($companyId)->lockForUpdate()->first();
+        if ($company) {
+            $companyBankBalance = round((float) $company->bankAccounts()->sum('current_balance'), 2);
+            $company->update(['current_bank_balance' => $companyBankBalance]);
+        }
+
+        $customer = DistributionCustomer::query()->find($payment->customer_id);
+        $customerName = trim((string) ($customer?->shop_name ?? 'Customer'));
+        $bankLabel = trim((string) ($payment->bank_name ?: $lockedAccount->bank_name ?: 'Bank'));
+
+        MainCashTransaction::create([
+            'date' => $payment->payment_date,
+            'type' => 'in',
+            'amount' => $payment->amount,
+            'reference' => 'DEP-DISTPAY-' . $payment->id,
+            'note' => 'Distribution payment received via bank transfer. Dr Bank - ' . $bankLabel . ', Cr Accounts Receivable - ' . $customerName . '.',
+            'created_by' => $request->user()?->id,
+        ]);
+    }
+
+    private function reverseBankTransferPosting(DistributionPayment $payment): void
+    {
+        if (($payment->payment_method ?? '') !== 'bank_transfer') {
+            return;
+        }
+
+        if (!$this->hasBankTransferPosting($payment)) {
+            return;
+        }
+
+        $companyBankAccount = $this->findCompanyBankAccountForTransfer($payment->bank_name);
+        if (!$companyBankAccount) {
+            $this->failValidation('payment_method', 'Cannot reverse bank transfer posting because the linked company bank account was not found.');
+        }
+
+        $lockedAccount = CompanyBankAccount::query()
+            ->whereKey($companyBankAccount->id)
+            ->lockForUpdate()
+            ->first();
+
+        if (!$lockedAccount) {
+            $this->failValidation('payment_method', 'Cannot reverse bank transfer posting because the linked company bank account is unavailable.');
+        }
+
+        $available = (float) ($lockedAccount->current_balance ?? 0);
+        $amount = (float) $payment->amount;
+        if ($available < $amount) {
+            $this->failValidation('payment_method', 'Cannot reverse bank transfer posting because bank account balance is lower than the payment amount.');
+        }
+
+        $lockedAccount->update([
+            'current_balance' => round($available - $amount, 2),
+        ]);
+
+        if (!empty($lockedAccount->company_id)) {
+            $company = Company::query()->whereKey($lockedAccount->company_id)->lockForUpdate()->first();
+            if ($company) {
+                $companyBankBalance = round((float) $company->bankAccounts()->sum('current_balance'), 2);
+                $company->update(['current_bank_balance' => $companyBankBalance]);
+            }
+        }
+
+        MainCashTransaction::query()
+            ->where('reference', 'DEP-DISTPAY-' . $payment->id)
+            ->delete();
+    }
+
     private function resolveAccessibleEmployeeIds(int $employeeId): array
     {
         $accessible = [$employeeId];
@@ -101,6 +327,115 @@ class DistributionPaymentController extends Controller
         ]);
     }
 
+    public function pendingBankTransfers(Request $request): JsonResponse
+    {
+        $query = DistributionPayment::query()
+            ->with([
+                'customer:id,shop_name,customer_code',
+                'invoice:id,invoice_number',
+            ])
+            ->where('payment_method', 'bank_transfer')
+            ->where('status', 'pending')
+            ->orderByDesc('payment_date')
+            ->orderByDesc('id');
+
+        $rows = $query->paginate($request->integer('per_page', 200));
+
+        return response()->json([
+            'success' => true,
+            'data' => $rows,
+            'message' => 'Pending distribution bank transfers retrieved successfully',
+        ]);
+    }
+
+    public function acceptPendingBankTransfer(Request $request, string $id): JsonResponse
+    {
+        if (!$this->isAdminUser($request->user())) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only admin users can accept pending bank transfers.',
+            ], 403);
+        }
+
+        $payment = DistributionPayment::find($id);
+        if (!$payment) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Distribution payment not found',
+            ], 404);
+        }
+
+        if ((string) $payment->payment_method !== 'bank_transfer') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only bank transfer payments are eligible for this action.',
+            ], 422);
+        }
+
+        if ((string) $payment->status !== 'pending') {
+            return response()->json([
+                'success' => false,
+                'message' => 'This payment is already processed.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($payment, $request) {
+            $lockedPayment = DistributionPayment::query()->whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            $this->applyBankTransferPosting($lockedPayment, $request);
+            $lockedPayment->status = 'received';
+            $lockedPayment->save();
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Pending bank transfer accepted and posted to main bank account.',
+        ]);
+    }
+
+    public function rejectPendingBankTransfer(Request $request, string $id): JsonResponse
+    {
+        if (!$this->isAdminUser($request->user())) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only admin users can reject pending bank transfers.',
+            ], 403);
+        }
+
+        $payment = DistributionPayment::find($id);
+        if (!$payment) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Distribution payment not found',
+            ], 404);
+        }
+
+        if ((string) $payment->payment_method !== 'bank_transfer') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only bank transfer payments are eligible for this action.',
+            ], 422);
+        }
+
+        if ((string) $payment->status !== 'pending') {
+            return response()->json([
+                'success' => false,
+                'message' => 'This payment is already processed.',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($payment) {
+            $lockedPayment = DistributionPayment::query()->whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            $this->revertCustomerAndInvoiceAmounts($lockedPayment);
+            $lockedPayment->status = 'returned';
+            $lockedPayment->save();
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Pending bank transfer rejected successfully.',
+        ]);
+    }
+
     public function store(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
@@ -127,71 +462,7 @@ class DistributionPaymentController extends Controller
         }
 
         $payload = $validator->validated();
-
-        $payment = DB::transaction(function () use ($payload, $request) {
-            $paymentsHasLoadId = Schema::hasColumn('distribution_payments', 'load_id');
-            $loadId = null;
-
-            if (!empty($payload['distribution_invoice_id'])) {
-                $invoice = DistributionInvoice::find($payload['distribution_invoice_id']);
-                if ($invoice) {
-                    $loadId = $invoice->load_id;
-                }
-            }
-
-            if (!$loadId && !empty($payload['load_id'])) {
-                $loadId = $payload['load_id'];
-            }
-
-            $paymentData = [
-                'payment_number' => $payload['payment_number'],
-                'distribution_invoice_id' => $payload['distribution_invoice_id'] ?? null,
-                'customer_id' => $payload['customer_id'],
-                'payment_date' => $payload['payment_date'],
-                'cheque_date' => $payload['payment_method'] === 'check'
-                    ? ($payload['cheque_date'] ?? null)
-                    : null,
-                'amount' => $payload['amount'],
-                'payment_method' => $payload['payment_method'],
-                'reference_no' => $payload['reference_no'] ?? null,
-                'bank_name' => $payload['bank_name'] ?? null,
-                'status' => $payload['status'] ?? 'received',
-                'notes' => $payload['notes'] ?? null,
-                'received_by' => $request->user()?->id,
-            ];
-
-            if ($paymentsHasLoadId) {
-                $paymentData['load_id'] = $loadId;
-            }
-
-            $payment = DistributionPayment::create($paymentData);
-
-            if (!empty($payload['distribution_invoice_id'])) {
-                $invoice = DistributionInvoice::find($payload['distribution_invoice_id']);
-                if ($invoice) {
-                    $invoice->paid_amount = (float) $invoice->paid_amount + (float) $payload['amount'];
-
-                    if ((float) $invoice->paid_amount >= (float) $invoice->total) {
-                        $invoice->status = 'paid';
-                    } elseif ((float) $invoice->paid_amount > 0) {
-                        $invoice->status = 'partial';
-                    } else {
-                        $invoice->status = 'pending';
-                    }
-
-                    $invoice->save();
-                }
-            }
-
-            $customer = DistributionCustomer::find($payload['customer_id']);
-            if ($customer) {
-                $currentOutstanding = (float) ($customer->outstanding ?? 0);
-                $customer->outstanding = max(0, $currentOutstanding - (float) $payload['amount']);
-                $customer->save();
-            }
-
-            return $payment;
-        });
+        $payment = DB::transaction(fn () => $this->createPayment($payload, $request));
 
         return response()->json([
             'success' => true,
@@ -275,6 +546,11 @@ class DistributionPaymentController extends Controller
 
         $loadId ??= $payload['load_id'] ?? null;
 
+        $incomingStatus = (string) ($payload['status'] ?? 'received');
+        $effectiveStatus = ($payload['payment_method'] ?? '') === 'bank_transfer'
+            ? 'pending'
+            : $incomingStatus;
+
         $paymentData = [
             'payment_number' => $payload['payment_number'],
             'distribution_invoice_id' => $payload['distribution_invoice_id'] ?? null,
@@ -285,7 +561,7 @@ class DistributionPaymentController extends Controller
             'payment_method' => $payload['payment_method'],
             'reference_no' => $payload['reference_no'] ?? null,
             'bank_name' => $payload['bank_name'] ?? null,
-            'status' => $payload['status'] ?? 'received',
+            'status' => $effectiveStatus,
             'notes' => $payload['notes'] ?? null,
             'received_by' => $request->user()?->id,
         ];
@@ -308,6 +584,10 @@ class DistributionPaymentController extends Controller
         if ($customer) {
             $customer->outstanding = max(0, (float) ($customer->outstanding ?? 0) - (float) $payload['amount']);
             $customer->save();
+        }
+
+        if ($payment->payment_method === 'bank_transfer' && $payment->status !== 'pending') {
+            $this->applyBankTransferPosting($payment, $request);
         }
 
         return $payment;
@@ -342,12 +622,26 @@ class DistributionPaymentController extends Controller
             ], 422);
         }
 
-        $updateData = $validator->validated();
-        $updateData['cheque_date'] = ($updateData['payment_method'] ?? $payment->payment_method) === 'check'
-            ? ($updateData['cheque_date'] ?? $payment->cheque_date)
-            : null;
+        DB::transaction(function () use ($payment, $validator, $request) {
+            $beforeMethod = (string) $payment->payment_method;
+            $updateData = $validator->validated();
+            $nextMethod = (string) ($updateData['payment_method'] ?? $payment->payment_method);
+            $updateData['cheque_date'] = $nextMethod === 'check'
+                ? ($updateData['cheque_date'] ?? $payment->cheque_date)
+                : null;
 
-        $payment->update($updateData);
+            if ($beforeMethod === 'bank_transfer') {
+                $this->reverseBankTransferPosting($payment);
+            }
+
+            $payment->update($updateData);
+            $payment->refresh();
+
+            $nextStatus = strtolower((string) ($payment->status ?? ''));
+            if ($nextMethod === 'bank_transfer' && $nextStatus !== 'pending') {
+                $this->applyBankTransferPosting($payment, $request);
+            }
+        });
 
         return response()->json([
             'success' => true,
@@ -371,29 +665,11 @@ class DistributionPaymentController extends Controller
         }
 
         DB::transaction(function () use ($payment) {
-            $customer = DistributionCustomer::find($payment->customer_id);
-            if ($customer) {
-                $currentOutstanding = (float) ($customer->outstanding ?? 0);
-                $customer->outstanding = max(0, $currentOutstanding + (float) $payment->amount);
-                $customer->save();
+            if ((string) $payment->payment_method === 'bank_transfer') {
+                $this->reverseBankTransferPosting($payment);
             }
 
-            if (!empty($payment->distribution_invoice_id)) {
-                $invoice = DistributionInvoice::find($payment->distribution_invoice_id);
-                if ($invoice) {
-                    $invoice->paid_amount = max(0, (float) $invoice->paid_amount - (float) $payment->amount);
-
-                    if ((float) $invoice->paid_amount >= (float) $invoice->total) {
-                        $invoice->status = 'paid';
-                    } elseif ((float) $invoice->paid_amount > 0) {
-                        $invoice->status = 'partial';
-                    } else {
-                        $invoice->status = 'pending';
-                    }
-
-                    $invoice->save();
-                }
-            }
+            $this->revertCustomerAndInvoiceAmounts($payment);
 
             $payment->delete();
         });

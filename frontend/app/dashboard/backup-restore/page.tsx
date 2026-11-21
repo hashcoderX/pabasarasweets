@@ -197,7 +197,7 @@ export default function BackupRestoreSettingsPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-md shadow-sm border-b border-white/60">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between py-3">
             <div>
               <h1 className="text-lg font-semibold text-gray-900">Backup &amp; Restore</h1>
@@ -213,7 +213,7 @@ export default function BackupRestoreSettingsPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         <section className="rounded-2xl border border-white/70 bg-white/80 backdrop-blur-lg shadow-xl p-5 md:p-6">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div>

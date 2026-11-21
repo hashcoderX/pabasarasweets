@@ -54,8 +54,18 @@ class CandidateController extends Controller
             'email' => 'required|email|unique:candidates',
             'phone' => 'required|string|max:20',
             'address' => 'nullable|string',
+            'city' => 'nullable|string|max:120',
             'date_of_birth' => 'nullable|date|before:today',
             'position_applied' => 'required|string|max:255',
+            'source' => 'nullable|string|max:100',
+            'linkedin_url' => 'nullable|url|max:255',
+            'portfolio_url' => 'nullable|url|max:255',
+            'years_of_experience' => 'nullable|numeric|min:0|max:60',
+            'current_company' => 'nullable|string|max:255',
+            'current_designation' => 'nullable|string|max:255',
+            'current_salary' => 'nullable|numeric|min:0',
+            'notice_period_days' => 'nullable|integer|min:0|max:365',
+            'skills' => 'nullable|string|max:1000',
             'cv_file' => 'nullable|file|mimes:pdf,doc,docx|max:5120', // 5MB max
             'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:5120',
             'expected_salary' => 'nullable|numeric|min:0',
@@ -88,8 +98,18 @@ class CandidateController extends Controller
             'email' => $validated['email'],
             'phone' => $validated['phone'],
             'address' => $validated['address'] ?? null,
+            'city' => $validated['city'] ?? null,
             'date_of_birth' => $validated['date_of_birth'] ?? null,
             'position_applied' => $validated['position_applied'],
+            'source' => $validated['source'] ?? null,
+            'linkedin_url' => $validated['linkedin_url'] ?? null,
+            'portfolio_url' => $validated['portfolio_url'] ?? null,
+            'years_of_experience' => $validated['years_of_experience'] ?? null,
+            'current_company' => $validated['current_company'] ?? null,
+            'current_designation' => $validated['current_designation'] ?? null,
+            'current_salary' => $validated['current_salary'] ?? null,
+            'notice_period_days' => $validated['notice_period_days'] ?? null,
+            'skills' => $validated['skills'] ?? null,
             'cv_path' => $cvPath,
             'photo_path' => $photoPath,
             'expected_salary' => $validated['expected_salary'] ?? null,
@@ -120,8 +140,18 @@ class CandidateController extends Controller
             'email' => 'sometimes|required|email|unique:candidates,email,' . $candidate->id,
             'phone' => 'sometimes|required|string|max:20',
             'address' => 'nullable|string',
+            'city' => 'nullable|string|max:120',
             'date_of_birth' => 'nullable|date|before:today',
             'position_applied' => 'sometimes|required|string|max:255',
+            'source' => 'nullable|string|max:100',
+            'linkedin_url' => 'nullable|url|max:255',
+            'portfolio_url' => 'nullable|url|max:255',
+            'years_of_experience' => 'nullable|numeric|min:0|max:60',
+            'current_company' => 'nullable|string|max:255',
+            'current_designation' => 'nullable|string|max:255',
+            'current_salary' => 'nullable|numeric|min:0',
+            'notice_period_days' => 'nullable|integer|min:0|max:365',
+            'skills' => 'nullable|string|max:1000',
             'cv_file' => 'nullable|file|mimes:pdf,doc,docx|max:5120',
             'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:5120',
             'status' => 'in:applied,shortlisted,interviewed,selected,rejected,hired',
@@ -332,7 +362,12 @@ class CandidateController extends Controller
             return response()->json(['message' => 'CV file not found'], 404);
         }
 
-        return Storage::disk('public')->download($candidate->cv_path);
+        $disk = Storage::disk('public');
+        if (!$disk->exists($candidate->cv_path)) {
+            return response()->json(['message' => 'CV file not found'], 404);
+        }
+
+        return response()->download($disk->path($candidate->cv_path));
     }
 
     /**
@@ -344,6 +379,11 @@ class CandidateController extends Controller
             return response()->json(['message' => 'Appointment letter not found'], 404);
         }
 
-        return Storage::disk('public')->download($candidate->appointment_letter_path);
+        $disk = Storage::disk('public');
+        if (!$disk->exists($candidate->appointment_letter_path)) {
+            return response()->json(['message' => 'Appointment letter not found'], 404);
+        }
+
+        return response()->download($disk->path($candidate->appointment_letter_path));
     }
 }

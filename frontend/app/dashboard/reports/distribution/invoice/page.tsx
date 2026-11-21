@@ -39,6 +39,27 @@ type PaginatedResponse<T> = {
   next_page_url?: string | null;
 };
 
+type PermissionLike = {
+  name?: string;
+};
+
+type RoleLike = {
+  name?: string;
+  permissions?: PermissionLike[];
+};
+
+type UserProfile = {
+  employee_id?: number | null;
+  employee?: { id?: number | null } | null;
+  role?: string | null;
+  roles?: Array<string | RoleLike>;
+};
+
+type UserProfileCache = {
+  savedAt: number;
+  profile: UserProfile;
+};
+
 export default function DistributionInvoiceReportPage() {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -63,6 +84,44 @@ export default function DistributionInvoiceReportPage() {
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const PROFILE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+  const getProfileCacheKey = (authToken: string) => {
+    const tokenSuffix = String(authToken || '').slice(-16) || 'anonymous';
+    return `distribution-invoice-report-profile-v1-${tokenSuffix}`;
+  };
+
+  const readProfileCache = (authToken: string): UserProfile | null => {
+    try {
+      const raw = localStorage.getItem(getProfileCacheKey(authToken));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as UserProfileCache;
+      if (!parsed || typeof parsed.savedAt !== 'number' || !parsed.profile) return null;
+      if (Date.now() - parsed.savedAt > PROFILE_CACHE_TTL_MS) return null;
+      return parsed.profile;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeProfileCache = (authToken: string, profile: UserProfile) => {
+    try {
+      const payload: UserProfileCache = {
+        savedAt: Date.now(),
+        profile,
+      };
+      localStorage.setItem(getProfileCacheKey(authToken), JSON.stringify(payload));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  };
+
+  const isTimeoutError = (error: unknown) => {
+    if (!error || typeof error !== 'object') return false;
+    const maybeCode = (error as { code?: string }).code;
+    const maybeMessage = String((error as { message?: string }).message || '').toLowerCase();
+    return maybeCode === 'ECONNABORTED' || maybeMessage.includes('timeout');
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -79,26 +138,56 @@ export default function DistributionInvoiceReportPage() {
 
     const verifyAccess = async () => {
       try {
-        const userRes = await axios.get('/api/user', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
+        let userData: UserProfile | null = null;
 
-        const userData = userRes.data || {};
+        try {
+          const userRes = await axios.get('/api/user', {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 15000,
+          });
+          userData = (userRes.data || {}) as UserProfile;
+          writeProfileCache(token, userData);
+        } catch (firstError) {
+          if (!isTimeoutError(firstError)) throw firstError;
+
+          try {
+            const retryRes = await axios.get('/api/user', {
+              headers: { Authorization: `Bearer ${token}` },
+              timeout: 30000,
+            });
+            userData = (retryRes.data || {}) as UserProfile;
+            writeProfileCache(token, userData);
+          } catch (retryError) {
+            if (!isTimeoutError(retryError)) throw retryError;
+
+            const cachedProfile = readProfileCache(token);
+            if (!cachedProfile) throw retryError;
+            userData = cachedProfile;
+            setErrorMessage('Server is slow. Using cached access profile and loading data.');
+          }
+        }
+
+        if (!userData) {
+          throw new Error('Unable to resolve user profile for access check.');
+        }
+
         const employeeId = Number(userData?.employee_id || userData?.employee?.id || 0);
 
         const roleNames = [
           String(userData?.role || ''),
           ...(Array.isArray(userData?.roles)
-            ? userData.roles.map((role: any) => String(role?.name || role || ''))
+            ? userData.roles.map((role) => String(typeof role === 'string' ? role : role?.name || ''))
             : []),
         ]
           .map((role) => role.trim().toLowerCase())
           .filter(Boolean);
 
         const permissionNames = Array.isArray(userData?.roles)
-          ? userData.roles.flatMap((role: any) =>
-              Array.isArray(role?.permissions)
-                ? role.permissions.map((permission: any) => String(permission?.name || '').trim().toLowerCase())
+          ? userData.roles.flatMap((role) =>
+              typeof role === 'string'
+                ? []
+                : Array.isArray(role?.permissions)
+                ? role.permissions.map((permission) => String(permission?.name || '').trim().toLowerCase())
                 : []
             )
           : [];
@@ -130,8 +219,13 @@ export default function DistributionInvoiceReportPage() {
           customerFilter: 'all',
         });
       } catch (error) {
-        console.error('Error checking invoice report access:', error);
-        router.push('/dashboard');
+        if (isTimeoutError(error)) {
+          console.error('Invoice report access check timed out:', error);
+          setErrorMessage('Unable to verify access right now due to server timeout. Please try again.');
+        } else {
+          console.error('Error checking invoice report access:', error);
+          router.push('/dashboard');
+        }
       } finally {
         setAccessReady(true);
       }
@@ -364,7 +458,7 @@ export default function DistributionInvoiceReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-600 transition-colors duration-300">
@@ -382,16 +476,16 @@ export default function DistributionInvoiceReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Invoice <span className="bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">Report</span>
           </h1>
-          <p className="text-gray-600">Invoice totals, paid value and customer-wise invoice trend overview.</p>
+          <p className="text-base text-gray-600">Invoice totals, paid value and customer-wise invoice trend overview.</p>
         </div>
 
         {errorMessage && (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-base text-red-700">
             {errorMessage}
           </div>
         )}
@@ -399,7 +493,7 @@ export default function DistributionInvoiceReportPage() {
         <section className="rounded-2xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-xl p-4 md:p-5 mb-6">
           <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
             <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Search</label>
               <input
                 type="text"
                 value={search}
@@ -409,7 +503,7 @@ export default function DistributionInvoiceReportPage() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as 'all' | InvoiceStatus)}
@@ -422,7 +516,7 @@ export default function DistributionInvoiceReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Customer</label>
               <select
                 value={customerFilter}
                 onChange={(e) => setCustomerFilter(e.target.value)}
@@ -435,7 +529,7 @@ export default function DistributionInvoiceReportPage() {
               </select>
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">From Date</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">From Date</label>
               <input
                 type="date"
                 value={fromDate}
@@ -444,7 +538,7 @@ export default function DistributionInvoiceReportPage() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">To Date</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">To Date</label>
               <input
                 type="date"
                 value={toDate}
@@ -471,7 +565,7 @@ export default function DistributionInvoiceReportPage() {
               </button>
             </div>
             <div className="md:col-span-6 flex justify-end items-center gap-2">
-              <label className="text-xs font-medium text-gray-700">Rows per page</label>
+              <label className="text-sm font-medium text-gray-700">Rows per page</label>
               <select
                 value={rowsPerPage}
                 onChange={(e) => setRowsPerPage(Number(e.target.value))}
@@ -487,7 +581,7 @@ export default function DistributionInvoiceReportPage() {
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 backdrop-blur-lg shadow-xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-green-50 to-teal-50 flex flex-wrap gap-3 text-sm text-black">
+          <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-green-50 to-teal-50 flex flex-wrap gap-3 text-base text-black">
             <span>Total Invoices: <strong>{summary.totalInvoices}</strong></span>
             <span>Invoice Total: <strong>{formatMoney(summary.invoiceTotal)}</strong></span>
             <span>Paid: <strong>{formatMoney(summary.paidTotal)}</strong></span>
@@ -501,44 +595,44 @@ export default function DistributionInvoiceReportPage() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Invoice #</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Customer</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Invoice Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Due Date</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Items</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Sub Total</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Discount</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Paid</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Outstanding</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 uppercase">Invoice #</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 uppercase">Customer</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 uppercase">Invoice Date</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 uppercase">Due Date</th>
+                  <th className="px-4 py-3 text-left text-sm font-medium text-gray-600 uppercase">Status</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Items</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Sub Total</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Discount</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Total</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Paid</th>
+                  <th className="px-4 py-3 text-right text-sm font-medium text-gray-600 uppercase">Outstanding</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-100">
                 {filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="px-4 py-10 text-center text-sm text-gray-500">No invoice records found.</td>
+                    <td colSpan={11} className="px-4 py-10 text-center text-base text-gray-500">No invoice records found.</td>
                   </tr>
                 ) : (
                   paginatedRows.map((row, idx) => (
                     <tr key={row.id} className={((pageStart - 1 + idx) % 2) === 0 ? 'bg-white' : 'bg-gray-50/40'}>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.invoice_number || '-'}</td>
-                      <td className="px-4 py-3 text-sm text-gray-900 font-medium">
+                      <td className="px-4 py-3 text-[15px] text-gray-700">{row.invoice_number || '-'}</td>
+                      <td className="px-4 py-3 text-[15px] text-gray-900 font-medium">
                         {(row.customer?.customer_code || '-') + ' - ' + (row.customer?.shop_name || '-')}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.invoice_date)}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.due_date)}</td>
-                      <td className="px-4 py-3 text-sm">
-                        <span className={`inline-flex px-2 py-1 rounded-full text-xs font-semibold ${statusBadgeClass(row.status)}`}>
+                      <td className="px-4 py-3 text-[15px] text-gray-700">{toDateLabel(row.invoice_date)}</td>
+                      <td className="px-4 py-3 text-[15px] text-gray-700">{toDateLabel(row.due_date)}</td>
+                      <td className="px-4 py-3 text-[15px]">
+                        <span className={`inline-flex px-2 py-1 rounded-full text-sm font-semibold ${statusBadgeClass(row.status)}`}>
                           {row.status ? row.status.toUpperCase() : '-'}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{Number(row.items_count ?? (row.items || []).length)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.subtotal)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.discount)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">{formatMoney(row.total)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatMoney(row.paid_amount)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">{formatMoney(getOutstanding(row))}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-700">{Number(row.items_count ?? (row.items || []).length)}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-700">{formatMoney(row.subtotal)}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-700">{formatMoney(row.discount)}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-900 font-semibold">{formatMoney(row.total)}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-700">{formatMoney(row.paid_amount)}</td>
+                      <td className="px-4 py-3 text-[15px] text-right text-gray-900 font-semibold">{formatMoney(getOutstanding(row))}</td>
                     </tr>
                   ))
                 )}
@@ -547,7 +641,7 @@ export default function DistributionInvoiceReportPage() {
           </div>
 
           <div className="px-4 py-3 border-t border-gray-100 bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div className="text-sm text-gray-600">
+            <div className="text-base text-gray-600">
               Showing <strong>{pageStart}</strong> to <strong>{pageEnd}</strong> of <strong>{filteredRows.length}</strong> invoices
             </div>
             <div className="flex items-center gap-2">
@@ -555,18 +649,18 @@ export default function DistributionInvoiceReportPage() {
                 type="button"
                 onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
                 disabled={safeCurrentPage <= 1}
-                className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-base text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
               >
                 Previous
               </button>
-              <span className="text-sm text-gray-700">
+              <span className="text-base text-gray-700">
                 Page <strong>{safeCurrentPage}</strong> of <strong>{totalPages}</strong>
               </span>
               <button
                 type="button"
                 onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
                 disabled={safeCurrentPage >= totalPages}
-                className="px-3 py-1.5 rounded-md border border-gray-300 text-sm text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
+                className="px-3 py-1.5 rounded-md border border-gray-300 text-base text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-gray-50"
               >
                 Next
               </button>

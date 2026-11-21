@@ -27,11 +27,20 @@ function OutletStockContent() {
 
   const router = useRouter();
   const params = useSearchParams();
+  const isEmbedded = params.get('embedded') === '1';
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
+  const getPathWithCode = (path: string) => {
+    const outletCode = params.get('outlet_code') || '';
+    const query = new URLSearchParams();
+    if (outletCode) query.set('outlet_code', outletCode);
+    if (isEmbedded) query.set('embedded', '1');
+    const queryString = query.toString();
+    return `${path}${queryString ? `?${queryString}` : ''}`;
+  };
+
   const getNextPath = () => {
-    const code = params.get('outlet_code') || '';
-    return `/outlet-pos/stock${code ? `?outlet_code=${encodeURIComponent(code)}` : ''}`;
+    return getPathWithCode('/outlet-pos/stock');
   };
 
   const authHeaders = (authToken: string) => ({ Authorization: `Bearer ${authToken}` });
@@ -117,20 +126,23 @@ function OutletStockContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center">
+      <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center`}>
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden">
+    <div className={`${isEmbedded ? '' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden`}>
+      {!isEmbedded ? (
       <div className="absolute inset-0 opacity-30">
         <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
+      ) : null}
 
+      {!isEmbedded ? (
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
@@ -141,31 +153,31 @@ function OutletStockContent() {
               </div>
               <div className="hidden md:flex items-center gap-2">
                 <Link
-                  href={`/outlet-pos${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos')}
                   className="px-3 py-1.5 text-sm rounded-md border border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100"
                 >
                   Dashboard
                 </Link>
                 <Link
-                  href={`/outlet-pos/create-sale${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/create-sale')}
                   className="px-3 py-1.5 text-sm rounded-md border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
                 >
                   Create Sale
                 </Link>
                 <Link
-                  href={`/outlet-pos/sales${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/sales')}
                   className="px-3 py-1.5 text-sm rounded-md border border-pink-200 bg-pink-50 text-pink-700 hover:bg-pink-100"
                 >
                   Sales
                 </Link>
                 <Link
-                  href={`/outlet-pos/cash-drawer${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/cash-drawer')}
                   className="px-3 py-1.5 text-sm rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                 >
                   Cash Drawer
                 </Link>
                 <Link
-                  href={`/outlet-pos/loyalty-customers${params.get('outlet_code') ? `?outlet_code=${encodeURIComponent(params.get('outlet_code') || '')}` : ''}`}
+                  href={getPathWithCode('/outlet-pos/loyalty-customers')}
                   className="px-3 py-1.5 text-sm rounded-md border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                 >
                   Loyalty
@@ -181,8 +193,9 @@ function OutletStockContent() {
           </div>
         </div>
       </nav>
+      ) : null}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className={`relative z-10 ${isEmbedded ? 'w-full p-5 sm:p-5 lg:p-5' : 'max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8'} space-y-6`}>
         {message && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{message}</div>
         )}

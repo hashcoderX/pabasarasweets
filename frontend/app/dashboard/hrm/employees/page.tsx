@@ -21,6 +21,7 @@ interface Employee {
   employee_code: string;
   first_name: string;
   last_name: string;
+  employee_nic?: string;
   email: string;
   phone: string;
   address: string;
@@ -29,6 +30,8 @@ interface Employee {
   basic_salary: number;
   commission?: number;
   commission_base?: 'company_profit' | 'own_business';
+  employee_type?: EmployeeType;
+  payment_request_type?: PaymentRequestType;
   overtime_payment_per_hour?: number;
   deduction_late_hour?: number;
   epf_employee_contribution?: number;
@@ -60,6 +63,14 @@ interface Employee {
   department: { id: number; name: string };
   designation: { id: number; name: string };
   branch: { id: number; name: string };
+  wallet?: {
+    id: number;
+    wallet_number: string;
+    wallet_name?: string;
+    balance: number;
+    currency?: string;
+    status: string;
+  } | null;
 }
 
 interface EmployeeDocument {
@@ -140,6 +151,14 @@ interface EmployeeLeaveBalance {
   approval: 'auto' | 'manager' | 'hr' | 'management';
 }
 
+type EmployeeType = 'full_time' | 'part_time' | 'contract' | 'temporary' | 'daily_wage';
+type PaymentRequestType =
+  | 'monthly_payroll'
+  | 'weekly_payroll'
+  | 'daily_payroll'
+  | 'daily_wage_request'
+  | 'salary_advance_request';
+
 const DEFAULT_LEAVE_TYPES: LeaveType[] = [
   { id: -1, name: 'Annual Leave', code: 'annual', description: 'Annual leave', max_days_per_year: 14, requires_documentation: false, is_active: true },
   { id: -2, name: 'Sick Leave', code: 'sick', description: 'Sick leave', max_days_per_year: 14, requires_documentation: true, is_active: true },
@@ -152,6 +171,30 @@ const DEFAULT_LEAVE_TYPES: LeaveType[] = [
   { id: -9, name: 'Compensatory Leave', code: 'compensatory', description: 'Compensatory leave', max_days_per_year: 5, requires_documentation: false, is_active: true },
   { id: -10, name: 'Medical / Hospitalization Leave', code: 'medical_hospitalization', description: 'Medical / hospitalization leave', max_days_per_year: 30, requires_documentation: true, is_active: true },
 ];
+
+const EMPLOYEE_TYPE_LABELS: Record<EmployeeType, string> = {
+  full_time: 'Full Time (Permanent)',
+  part_time: 'Part Time',
+  contract: 'Contract',
+  temporary: 'Temporary',
+  daily_wage: 'Daily Wage / Casual',
+};
+
+const PAYMENT_REQUEST_TYPE_LABELS: Record<PaymentRequestType, string> = {
+  monthly_payroll: 'Monthly Payroll',
+  weekly_payroll: 'Weekly Payroll',
+  daily_payroll: 'Daily Payroll',
+  daily_wage_request: 'Daily Wage Request',
+  salary_advance_request: 'Salary Advance Request',
+};
+
+const PAYMENT_REQUEST_OPTIONS_BY_EMPLOYEE_TYPE: Record<EmployeeType, PaymentRequestType[]> = {
+  full_time: ['monthly_payroll', 'salary_advance_request'],
+  part_time: ['weekly_payroll', 'monthly_payroll', 'salary_advance_request'],
+  contract: ['monthly_payroll', 'weekly_payroll', 'salary_advance_request'],
+  temporary: ['daily_wage_request', 'daily_payroll', 'weekly_payroll'],
+  daily_wage: ['daily_wage_request', 'daily_payroll'],
+};
 
 export default function Employees() {
   const [token, setToken] = useState('');
@@ -181,6 +224,7 @@ export default function Employees() {
   // Form fields
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [employeeNic, setEmployeeNic] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -190,6 +234,8 @@ export default function Employees() {
   const [photoPath, setPhotoPath] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
   const [hireDate, setHireDate] = useState('');
+  const [employeeType, setEmployeeType] = useState<EmployeeType>('full_time');
+  const [paymentRequestType, setPaymentRequestType] = useState<PaymentRequestType>('monthly_payroll');
   const [basicSalary, setBasicSalary] = useState('');
   const [commission, setCommission] = useState('');
   const [commissionBase, setCommissionBase] = useState<'company_profit' | 'own_business' | ''>('');
@@ -272,6 +318,7 @@ export default function Employees() {
         employee.employee_code?.toLowerCase().includes(keyword) ||
         employee.first_name?.toLowerCase().includes(keyword) ||
         employee.last_name?.toLowerCase().includes(keyword) ||
+        String(employee.employee_nic || '').toLowerCase().includes(keyword) ||
         employee.email?.toLowerCase().includes(keyword) ||
         employee.department?.name?.toLowerCase().includes(keyword) ||
         employee.designation?.name?.toLowerCase().includes(keyword) ||
@@ -291,6 +338,14 @@ export default function Employees() {
   const startIndex = (currentPage - 1) * pageSize;
   const endIndex = Math.min(startIndex + pageSize, filteredEmployees.length);
   const paginatedEmployees = filteredEmployees.slice(startIndex, startIndex + pageSize);
+  const employeesWithWalletCount = employees.filter((employee) => !!employee.wallet?.id).length;
+  const totalWalletBalance = employees.reduce((sum, employee) => {
+    if (!employee.wallet?.id) return sum;
+    return sum + Number(employee.wallet.balance || 0);
+  }, 0);
+  const walletCurrency = (
+    employees.find((employee) => employee.wallet?.currency)?.wallet?.currency || 'LKR'
+  ).toUpperCase();
 
   const reportingPersonOptions = useMemo(() => {
     const currentEditingId = editingEmployee?.id;
@@ -470,6 +525,10 @@ export default function Employees() {
   const hiddenEmployeeWidgets = useMemo(
     () => employeeWidgetItems.filter((item) => widgetVisibility[item.id] === false),
     [employeeWidgetItems, widgetVisibility]
+  );
+  const paymentRequestTypeOptions = useMemo(
+    () => PAYMENT_REQUEST_OPTIONS_BY_EMPLOYEE_TYPE[employeeType],
+    [employeeType]
   );
 
   const fetchWidgetVisibility = async (authToken?: string) => {
@@ -712,8 +771,16 @@ export default function Employees() {
 
       const normalizedEmployees: Employee[] = employeeData.map((employee: any) => ({
         ...employee,
+        employee_nic: employee.employee_nic ?? employee.nic_passport ?? '',
         phone: employee.phone ?? employee.mobile ?? '',
         hire_date: employee.hire_date ?? employee.join_date ?? '',
+        employee_type: (employee.employee_type ?? 'full_time') as EmployeeType,
+        payment_request_type: (
+          employee.payment_request_type ??
+          (employee.employee_type === 'daily_wage' || employee.employee_type === 'temporary'
+            ? 'daily_wage_request'
+            : 'monthly_payroll')
+        ) as PaymentRequestType,
       }));
 
       setEmployees(normalizedEmployees);
@@ -821,6 +888,7 @@ export default function Employees() {
   const resetForm = () => {
     setFirstName('');
     setLastName('');
+    setEmployeeNic('');
     setEmail('');
     setPassword('');
     setShowPassword(false);
@@ -830,6 +898,8 @@ export default function Employees() {
     setPhotoPath('');
     setDateOfBirth('');
     setHireDate('');
+    setEmployeeType('full_time');
+    setPaymentRequestType('monthly_payroll');
     setBasicSalary('');
     setCommission('');
     setCommissionBase('');
@@ -864,6 +934,7 @@ export default function Employees() {
     const employeeData = {
       first_name: firstName,
       last_name: lastName,
+      employee_nic: employeeNic.trim() !== '' ? employeeNic.trim() : null,
       email,
       password,
       phone,
@@ -871,6 +942,8 @@ export default function Employees() {
       photo_path: photoPath || undefined,
       date_of_birth: dateOfBirth,
       hire_date: hireDate,
+      employee_type: employeeType,
+      payment_request_type: paymentRequestType,
       basic_salary: parseFloat(basicSalary),
       commission: commission ? parseFloat(commission) : undefined,
       commission_base: commissionBase || undefined,
@@ -919,9 +992,16 @@ export default function Employees() {
   };
 
   const handleEdit = (employee: Employee) => {
+    const resolvedEmployeeType = (employee.employee_type || 'full_time') as EmployeeType;
+    const allowedPaymentTypes = PAYMENT_REQUEST_OPTIONS_BY_EMPLOYEE_TYPE[resolvedEmployeeType];
+    const resolvedPaymentRequestType = (allowedPaymentTypes.includes(employee.payment_request_type as PaymentRequestType)
+      ? employee.payment_request_type
+      : allowedPaymentTypes[0]) as PaymentRequestType;
+
     setEditingEmployee(employee);
     setFirstName(employee.first_name);
     setLastName(employee.last_name);
+    setEmployeeNic(employee.employee_nic || '');
     setEmail(employee.email);
     setPhone(employee.phone);
     setRole(employee.user?.role || 'employee');
@@ -929,6 +1009,8 @@ export default function Employees() {
     setPhotoPath((employee as any)?.photo_path || '');
     setDateOfBirth(employee.date_of_birth);
     setHireDate(employee.hire_date);
+    setEmployeeType(resolvedEmployeeType);
+    setPaymentRequestType(resolvedPaymentRequestType);
     setBasicSalary(employee.basic_salary.toString());
     setCommission(employee.commission ? employee.commission.toString() : '');
     setCommissionBase(employee.commission_base || '');
@@ -1062,6 +1144,41 @@ export default function Employees() {
     );
   };
 
+  const confirmCreateWallet = (employee: Employee) => {
+    if (employee.wallet?.id) {
+      showNotice(
+        'Wallet Already Exists',
+        `${employee.first_name} ${employee.last_name} already has a wallet (${employee.wallet.wallet_number}).`,
+        'info'
+      );
+      return;
+    }
+
+    openConfirm(
+      'Create Employee Wallet',
+      `Create wallet for ${employee.first_name} ${employee.last_name}?`,
+      async () => {
+        try {
+          await axios.post(
+            `/api/hr/employees/${employee.id}/wallet`,
+            {},
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
+          await fetchEmployees(token);
+          showNotice('Success', `Wallet created successfully for ${employee.first_name} ${employee.last_name}.`, 'success');
+          closeConfirm();
+        } catch (error: unknown) {
+          const backendMessage =
+            (error as { response?: { data?: { message?: string } } })?.response?.data?.message
+            || 'Failed to create employee wallet.';
+          showNotice('Error', backendMessage, 'error');
+        }
+      }
+    );
+  };
+
   const openProfile = async (employee: Employee) => {
     try {
       setProfileLoading(true);
@@ -1069,7 +1186,12 @@ export default function Employees() {
       const response = await axios.get(`/api/hr/employees/${employee.id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      setProfileEmployee(response.data as EmployeeFull);
+      setProfileEmployee({
+        ...(response.data as EmployeeFull),
+        employee_nic: response.data?.employee_nic ?? response.data?.nic_passport ?? '',
+        phone: response.data?.phone ?? response.data?.mobile ?? '',
+        hire_date: response.data?.hire_date ?? response.data?.join_date ?? '',
+      });
       setActiveEmployee(employee);
     } catch (error) {
       console.error('Error loading employee profile:', error);
@@ -1432,7 +1554,7 @@ export default function Employees() {
 
       {/* Modern Navigation */}
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               {isWidgetVisible('hrm-employees-nav-back-button') && (
@@ -1471,7 +1593,7 @@ export default function Employees() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {/* Hero Section */}
         {isWidgetVisible('hrm-employees-hero-card') && (
           <div className="mb-8 rounded-2xl border border-gray-200 bg-white/90 shadow-sm p-6 relative">
@@ -1513,6 +1635,16 @@ export default function Employees() {
                       <div className="text-xl sm:text-2xl font-bold text-purple-600">{departments.length}</div>
                       <div className="text-sm text-gray-500">Departments</div>
                     </div>
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-emerald-600">{employeesWithWalletCount}</div>
+                      <div className="text-sm text-gray-500">Wallets Created</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xl sm:text-2xl font-bold text-cyan-600">
+                        {walletCurrency} {totalWalletBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </div>
+                      <div className="text-sm text-gray-500">Wallet Total Value</div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1535,62 +1667,6 @@ export default function Employees() {
             </div>
           </div>
         )}
-
-        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-blue-900">
-                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
-              </p>
-              <p className="text-xs text-blue-700">
-                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {!widgetControlsLocked && (
-                <button
-                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Fix Widget
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={restoreAllHiddenWidgetsStaged}
-                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
-                >
-                  Stage Restore All
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={rollbackPendingWidgetChanges}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Rollback
-                </button>
-              )}
-              <button
-                onClick={restoreHiddenWidgetsAfterFix}
-                disabled={!hiddenWidgetCount}
-                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Restore Widgets
-              </button>
-              {widgetControlsLocked && (
-                <button
-                  onClick={openUnlockWidgetsAfterFix}
-                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
-                >
-                  Unlock Widgets
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
 
         {/* Employee List */}
         {isWidgetVisible('hrm-employees-list-card') && (
@@ -1704,6 +1780,9 @@ export default function Employees() {
                     Name
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+                    NIC
+                  </th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
                     Email
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
@@ -1734,6 +1813,9 @@ export default function Employees() {
                       {employee.first_name} {employee.last_name}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {employee.employee_nic || '-'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                       {employee.email}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
@@ -1754,7 +1836,7 @@ export default function Employees() {
                         {employee.status}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium relative z-20">
+                    <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium relative ${openMenuFor === employee.id ? 'z-[400]' : 'z-20'}`}>
                       {isWidgetVisible('hrm-employees-row-action-buttons') && (
                       <div className="relative" ref={openMenuFor === employee.id ? menuRef : undefined}>
                         <button
@@ -1778,7 +1860,7 @@ export default function Employees() {
                             id={`row-menu-${employee.id}`}
                             role="menu"
                             tabIndex={-1}
-                            className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded-xl shadow-lg py-1 z-[300]"
+                            className="absolute right-0 mt-2 w-48 rounded-xl border border-gray-200 bg-white opacity-100 shadow-2xl ring-1 ring-gray-200 backdrop-blur-none py-1 z-[300]"
                           >
                             <button role="menuitem" onClick={() => { openProfile(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
                               <span className="w-4 h-4">👁️</span>
@@ -1807,6 +1889,19 @@ export default function Employees() {
                             <button role="menuitem" onClick={() => { openAllowances(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
                               <span className="w-4 h-4">💲</span>
                               <span>Allowances</span>
+                            </button>
+                            <button
+                              role="menuitem"
+                              onClick={() => { confirmCreateWallet(employee); setOpenMenuFor(null); }}
+                              disabled={!!employee.wallet?.id}
+                              className={`w-full flex items-center gap-2 px-3 py-2 text-left ${
+                                employee.wallet?.id
+                                  ? 'text-emerald-600 bg-emerald-50 cursor-not-allowed'
+                                  : 'text-gray-700 hover:bg-gray-50'
+                              }`}
+                            >
+                              <span className="w-4 h-4">👛</span>
+                              <span>{employee.wallet?.id ? 'Wallet Created' : 'Create Wallet'}</span>
                             </button>
                             <button role="menuitem" onClick={() => { openLeaveManagement(employee); setOpenMenuFor(null); }} className="w-full flex items-center gap-2 px-3 py-2 text-left text-gray-700 hover:bg-gray-50">
                               <span className="w-4 h-4">📅</span>
@@ -1838,7 +1933,7 @@ export default function Employees() {
                                 <svg className={`w-4 h-4 transform transition ${openAttendanceFor === employee.id ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor"><path d="M6 6l6 4-6 4V6z"/></svg>
                               </button>
                               {openAttendanceFor === employee.id && (
-                                <div role="menu" tabIndex={-1} className="absolute right-full top-0 mr-1 w-44 bg-white border border-gray-200 rounded-xl shadow-lg py-1 z-[310]">
+                                <div role="menu" tabIndex={-1} className="absolute right-full top-0 mr-1 w-44 rounded-xl border border-gray-200 bg-white opacity-100 shadow-2xl ring-1 ring-gray-200 backdrop-blur-none py-1 z-[310]">
                                   <button role="menuitem" onClick={() => { markAttendance(employee, 'present'); setOpenMenuFor(null); setOpenAttendanceFor(null); }} className="w-full px-3 py-2 text-left text-gray-700 hover:bg-gray-50">Mark Present</button>
                                   <button role="menuitem" onClick={() => { markAttendance(employee, 'absent'); setOpenMenuFor(null); setOpenAttendanceFor(null); }} className="w-full px-3 py-2 text-left text-gray-700 hover:bg-gray-50">Mark Absent</button>
                                 </div>
@@ -2121,6 +2216,19 @@ export default function Employees() {
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Employee NIC
+                  </label>
+                  <input
+                    type="text"
+                    value={employeeNic}
+                    onChange={(e) => setEmployeeNic(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
+                    placeholder="Enter NIC number"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Email *
                   </label>
                   <input
@@ -2255,6 +2363,52 @@ export default function Employees() {
                   />
                 </div>
 
+                <div className="md:col-span-2 rounded-xl border border-emerald-100 bg-emerald-50/70 px-4 py-3">
+                  <h4 className="text-sm font-semibold text-emerald-900">Employment & Payment Type</h4>
+                  <p className="text-xs text-emerald-700 mt-1">
+                    Set worker category and default payment request flow (optimized for temporary and daily-wage staff).
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Employment Type *
+                  </label>
+                  <select
+                    value={employeeType}
+                    onChange={(e) => {
+                      const nextEmployeeType = e.target.value as EmployeeType;
+                      const nextPaymentOptions = PAYMENT_REQUEST_OPTIONS_BY_EMPLOYEE_TYPE[nextEmployeeType];
+                      setEmployeeType(nextEmployeeType);
+                      if (!nextPaymentOptions.includes(paymentRequestType)) {
+                        setPaymentRequestType(nextPaymentOptions[0]);
+                      }
+                    }}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all duration-200 text-gray-900"
+                    required
+                  >
+                    {Object.entries(EMPLOYEE_TYPE_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Payment Request Type *
+                  </label>
+                  <select
+                    value={paymentRequestType}
+                    onChange={(e) => setPaymentRequestType(e.target.value as PaymentRequestType)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all duration-200 text-gray-900"
+                    required
+                  >
+                    {paymentRequestTypeOptions.map((option) => (
+                      <option key={option} value={option}>{PAYMENT_REQUEST_TYPE_LABELS[option]}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="md:col-span-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3">
                   <h4 className="text-sm font-semibold text-indigo-900">Other Details</h4>
                   <p className="text-xs text-indigo-700 mt-1">Compensation, statutory contributions, tax setup, and organizational assignment.</p>
@@ -2262,7 +2416,7 @@ export default function Employees() {
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Basic Salary *
+                    {employeeType === 'daily_wage' ? 'Daily Base Rate *' : 'Basic Salary *'}
                   </label>
                   <input
                     type="number"
@@ -2270,6 +2424,7 @@ export default function Employees() {
                     value={basicSalary}
                     onChange={(e) => setBasicSalary(e.target.value)}
                     className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
+                    placeholder={employeeType === 'daily_wage' ? 'e.g., 3500.00 (per day)' : 'e.g., 85000.00'}
                     required
                   />
                 </div>
@@ -2756,11 +2911,14 @@ export default function Employees() {
                   <h4 className="text-lg font-semibold text-gray-900 mb-4">Basic Information</h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div><strong>Email:</strong> {profileEmployee.email}</div>
+                    <div><strong>NIC:</strong> {profileEmployee.employee_nic || 'N/A'}</div>
                     <div><strong>Phone:</strong> {profileEmployee.phone || 'N/A'}</div>
                     <div><strong>Date of Birth:</strong> {profileEmployee.date_of_birth || 'N/A'}</div>
                     <div><strong>Hire Date:</strong> {profileEmployee.hire_date}</div>
                     <div><strong>Department:</strong> {profileEmployee.department.name}</div>
                     <div><strong>Designation:</strong> {profileEmployee.designation.name}</div>
+                    <div><strong>Employment Type:</strong> {EMPLOYEE_TYPE_LABELS[(profileEmployee.employee_type || 'full_time') as EmployeeType]}</div>
+                    <div><strong>Payment Request Type:</strong> {PAYMENT_REQUEST_TYPE_LABELS[(profileEmployee.payment_request_type || 'monthly_payroll') as PaymentRequestType]}</div>
                     <div>
                       <strong>Reported Person:</strong>{' '}
                       {profileEmployee.reporting_person

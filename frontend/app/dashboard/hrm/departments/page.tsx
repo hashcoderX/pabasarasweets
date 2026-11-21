@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
+import { DEPARTMENT_LIST_GROUPS, DEPARTMENT_LIST_OPTIONS } from './departmentList';
 
 interface Department {
   id: number;
@@ -29,8 +30,10 @@ export default function Departments() {
   const [showForm, setShowForm] = useState(false);
   const [editingDepartment, setEditingDepartment] = useState<Department | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showDefaultDepartmentModal, setShowDefaultDepartmentModal] = useState(false);
   const [departmentToDelete, setDepartmentToDelete] = useState<Department | null>(null);
   const [deletingDepartment, setDeletingDepartment] = useState(false);
+  const [savingDefaultDepartments, setSavingDefaultDepartments] = useState(false);
   const [showMessageModal, setShowMessageModal] = useState(false);
   const [messageModalTitle, setMessageModalTitle] = useState('');
   const [messageModalBody, setMessageModalBody] = useState('');
@@ -75,7 +78,6 @@ export default function Departments() {
     { id: 'hrm-departments-message-modal-heading', name: 'Message Modal Heading' },
   ];
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
-  const hiddenWidgetCount = departmentWidgetItems.filter((item) => widgetVisibility[item.id] === false).length;
 
   const filteredDepartments = useMemo(() => {
     const keyword = searchTerm.trim().toLowerCase();
@@ -177,20 +179,6 @@ export default function Departments() {
     setSuperAdminPassword('');
   };
 
-  const openSuperAdminConfirmation = (
-    changes: WidgetVisibilityChange[] = [],
-    mode: SuperAdminModalMode = 'apply'
-  ) => {
-    if (mode !== 'unlock' && !changes.length) return;
-    setSuperAdminModalMode(mode);
-    setPendingWidgetChanges(changes);
-    setRestoreWidgetListVisible(false);
-    setRestoreWidgetLoadingKey(null);
-    setSuperAdminEmail('');
-    setSuperAdminPassword('');
-    setShowSuperAdminConfirmModal(true);
-  };
-
   const applyWidgetVisibilityChanges = async () => {
     if (superAdminModalMode !== 'apply') return;
     if (!pendingWidgetChanges.length) return;
@@ -226,38 +214,6 @@ export default function Departments() {
     } finally {
       setSuperAdminConfirmLoading(false);
     }
-  };
-
-  const restoreAllHiddenWidgetsStaged = () => {
-    if (widgetControlsLocked) return;
-    const hiddenKeys = departmentWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
-    if (!hiddenKeys.length) return;
-    setWidgetVisibilitySnapshot((prev) => prev ?? widgetVisibility);
-    setWidgetVisibility((prev) => {
-      const next = { ...prev };
-      hiddenKeys.forEach((key) => {
-        next[key] = true;
-      });
-      return next;
-    });
-    setPendingWidgetChanges((prev) => {
-      const next = [...prev];
-      hiddenKeys.forEach((key) => {
-        const remaining = next.filter((entry) => entry.widget_key !== key);
-        remaining.push({ widget_key: key, is_visible: true });
-        next.splice(0, next.length, ...remaining);
-      });
-      return next;
-    });
-  };
-
-  const restoreHiddenWidgetsAfterFix = () => {
-    const hiddenKeys = departmentWidgetItems.map((item) => item.id).filter((key) => widgetVisibility[key] === false);
-    if (!hiddenKeys.length) {
-      showModalMessage('Nothing to Restore', 'All widgets are already visible.', 'success');
-      return;
-    }
-    openSuperAdminConfirmation(hiddenKeys.map((key) => ({ widget_key: key, is_visible: true })), 'restore');
   };
 
   const showRestoreWidgetList = () => {
@@ -296,8 +252,6 @@ export default function Departments() {
       setRestoreWidgetLoadingKey(null);
     }
   };
-
-  const openUnlockWidgetsAfterFix = () => openSuperAdminConfirmation([], 'unlock');
 
   const unlockWidgetControls = async () => {
     if (superAdminModalMode !== 'unlock') return;
@@ -438,6 +392,39 @@ export default function Departments() {
     }
   };
 
+  const handleSaveDefaultDepartments = async () => {
+    setSavingDefaultDepartments(true);
+    setApiError(null);
+
+    try {
+      const response = await axios.post(
+        '/api/hr/departments/save-default-list',
+        { department_names: DEPARTMENT_LIST_OPTIONS },
+        { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+      );
+
+      const createdCount = Number(response?.data?.data?.created_count || 0);
+      const existingCount = Number(response?.data?.data?.existing_count || 0);
+      await fetchDepartments();
+      setShowDefaultDepartmentModal(false);
+      showModalMessage(
+        'Default Departments Saved',
+        `Added ${createdCount} new department(s). ${existingCount} already existed.`,
+        'success'
+      );
+    } catch (error) {
+      const err: any = error;
+      console.error('Error saving default departments:', err?.response?.status, err?.response?.data || err?.message);
+      showModalMessage(
+        'Save Failed',
+        extractApiErrorMessage(err, 'Failed to save default department list. Please try again.'),
+        'error'
+      );
+    } finally {
+      setSavingDefaultDepartments(false);
+    }
+  };
+
   const handleEdit = (department: Department) => {
     setEditingDepartment(department);
     setName(department.name);
@@ -532,7 +519,7 @@ export default function Departments() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {apiError && (
           <div className="mb-6 rounded-xl border border-red-200 bg-red-50 text-red-700 px-4 py-3">
             {apiError}
@@ -574,7 +561,14 @@ export default function Departments() {
                 )}
               </div>
               {isWidgetVisible('hrm-departments-hero-add-button') && (
-                <div className="md:flex-shrink-0">
+                <div className="md:flex-shrink-0 flex flex-col gap-3">
+                  <button
+                    onClick={() => setShowDefaultDepartmentModal(true)}
+                    disabled={savingDefaultDepartments}
+                    className="w-full md:w-auto bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-white px-6 py-3 rounded-xl text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-60 disabled:cursor-not-allowed disabled:transform-none"
+                  >
+                    {savingDefaultDepartments ? 'Saving Default Departments...' : 'Save Default Departments'}
+                  </button>
                   <button
                     onClick={() => {
                       resetForm();
@@ -592,62 +586,6 @@ export default function Departments() {
             </div>
           </div>
         )}
-
-        <div className="mb-6 rounded-2xl border border-blue-100 bg-blue-50/90 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-blue-900">
-                Widget Controls {widgetControlsLocked ? '(Locked)' : '(Editable)'}
-              </p>
-              <p className="text-xs text-blue-700">
-                Hidden widgets: {hiddenWidgetCount} | Pending changes: {pendingWidgetChanges.length}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {!widgetControlsLocked && (
-                <button
-                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges, 'apply')}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Fix Widget
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={restoreAllHiddenWidgetsStaged}
-                  className="px-4 py-2 rounded-lg border border-blue-200 text-blue-700 hover:bg-blue-100"
-                >
-                  Stage Restore All
-                </button>
-              )}
-              {!widgetControlsLocked && (
-                <button
-                  onClick={rollbackPendingWidgetChanges}
-                  disabled={!pendingWidgetChanges.length}
-                  className="px-4 py-2 rounded-lg border border-gray-200 text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Rollback
-                </button>
-              )}
-              <button
-                onClick={restoreHiddenWidgetsAfterFix}
-                disabled={!hiddenWidgetCount}
-                className="px-4 py-2 rounded-lg border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Restore Widgets
-              </button>
-              {widgetControlsLocked && (
-                <button
-                  onClick={openUnlockWidgetsAfterFix}
-                  className="px-4 py-2 rounded-lg border border-orange-200 text-orange-700 hover:bg-orange-50"
-                >
-                  Unlock Widgets
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
 
         {showForm && isWidgetVisible('hrm-departments-form-pane') && (
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
@@ -681,11 +619,21 @@ export default function Departments() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">Department Name *</label>
                     <input
                       type="text"
+                      list="department-master-list"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
+                      placeholder="Select or type department name"
                       className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
                       required
                     />
+                    <datalist id="department-master-list">
+                      {DEPARTMENT_LIST_OPTIONS.map((departmentName) => (
+                        <option key={departmentName} value={departmentName} />
+                      ))}
+                    </datalist>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Use the department master list suggestions or type a custom department.
+                    </p>
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
@@ -962,6 +910,53 @@ export default function Departments() {
                     {superAdminConfirmLoading ? 'Unlocking...' : 'Unlock Widgets'}
                   </button>
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showDefaultDepartmentModal && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[65] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-hidden border border-emerald-200">
+              <div className="px-5 py-4 bg-gradient-to-r from-emerald-500 to-teal-500">
+                <h4 className="text-white font-semibold">Default Department List</h4>
+                <p className="text-emerald-50 text-xs mt-1">
+                  Review and confirm to save these default departments.
+                </p>
+              </div>
+              <div className="p-5 max-h-[60vh] overflow-y-auto space-y-4">
+                {DEPARTMENT_LIST_GROUPS.map((group) => (
+                  <div key={group.category} className="rounded-xl border border-gray-200">
+                    <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
+                      <p className="text-sm font-semibold text-gray-800">{group.category}</p>
+                    </div>
+                    <ul className="px-4 py-3 space-y-1">
+                      {group.items.map((departmentName) => (
+                        <li key={`${group.category}-${departmentName}`} className="text-sm text-gray-700">
+                          • {departmentName}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-4 bg-gray-50 border-t border-gray-100 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDefaultDepartmentModal(false)}
+                  disabled={savingDefaultDepartments}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveDefaultDepartments}
+                  disabled={savingDefaultDepartments}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {savingDefaultDepartments ? 'Saving...' : 'Confirm & Save'}
+                </button>
               </div>
             </div>
           </div>

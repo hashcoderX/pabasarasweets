@@ -584,7 +584,7 @@ export default function OutletAccountPage() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(45,212,191,0.15),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(56,189,248,0.12),_transparent_24%),linear-gradient(180deg,_#f7fbff_0%,_#f3f8ff_45%,_#edf5ff_100%)]">
       <nav className="border-b border-white/60 bg-white/80 shadow-sm backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div className="flex h-16 w-full items-center justify-between px-3 sm:px-4 lg:px-6">
           <div>
             <h1 className="text-lg font-semibold text-slate-900">Outlet Account</h1>
             <p className="text-xs text-slate-500">Separate transaction management for each outlet</p>
@@ -600,7 +600,7 @@ export default function OutletAccountPage() {
         </div>
       </nav>
 
-      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-8 sm:px-6 lg:px-8">
+      <main className="flex w-full flex-col gap-6 px-3 py-8 sm:px-4 lg:px-6">
         <section className="overflow-hidden rounded-[28px] border border-white/70 bg-white/80 p-6 shadow-[0_24px_80px_-40px_rgba(2,132,199,0.35)] backdrop-blur-xl">
           <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
             <div>

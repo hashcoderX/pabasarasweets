@@ -1120,7 +1120,7 @@ function DistributionPaymentsPageContent() {
   return (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 h-auto">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <div className="flex items-center gap-3">
@@ -1172,7 +1172,7 @@ function DistributionPaymentsPageContent() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
 
         {isWidgetVisible('distribution-payments-offline-status-card') && <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import axios from '@/lib/http';
@@ -69,6 +69,14 @@ type DeliveryBalanceRow = {
   outstandingAmount: number;
 };
 
+type DeliveryBalanceCache = {
+  cachedAt: number;
+  invoices: InvoiceRow[];
+  payments: PaymentRow[];
+  returns: ReturnRow[];
+  loads: LoadRow[];
+};
+
 export default function DistributionDeliveryBalanceReportPage() {
   const [token, setToken] = useState('');
   const [accessReady, setAccessReady] = useState(false);
@@ -82,9 +90,49 @@ export default function DistributionDeliveryBalanceReportPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(20);
+  const [loadProgress, setLoadProgress] = useState({ completed: 0, total: 4, stage: '' });
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+  const CACHE_TTL_MS = 30 * 60 * 1000;
+
+  const getCacheKey = useCallback((authToken: string) => {
+    const tokenSuffix = String(authToken || '').slice(-16) || 'anonymous';
+    return `distribution-delivery-balance-cache-v2-${tokenSuffix}`;
+  }, []);
+
+  const readCache = useCallback((authToken: string): DeliveryBalanceCache | null => {
+    try {
+      const raw = localStorage.getItem(getCacheKey(authToken));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as DeliveryBalanceCache;
+      if (!parsed || typeof parsed.cachedAt !== 'number') return null;
+      if (!Array.isArray(parsed.invoices) || !Array.isArray(parsed.payments) || !Array.isArray(parsed.returns) || !Array.isArray(parsed.loads)) {
+        return null;
+      }
+      if (Date.now() - parsed.cachedAt > CACHE_TTL_MS) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }, [CACHE_TTL_MS, getCacheKey]);
+
+  const writeCache = useCallback((authToken: string, payload: Omit<DeliveryBalanceCache, 'cachedAt'>) => {
+    try {
+      const cachePayload: DeliveryBalanceCache = {
+        cachedAt: Date.now(),
+        invoices: payload.invoices,
+        payments: payload.payments,
+        returns: payload.returns,
+        loads: payload.loads,
+      };
+      localStorage.setItem(getCacheKey(authToken), JSON.stringify(cachePayload));
+    } catch {
+      // Ignore localStorage write failures.
+    }
+  }, [getCacheKey]);
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -95,6 +143,118 @@ export default function DistributionDeliveryBalanceReportPage() {
 
     setToken(storedToken);
   }, [router]);
+
+  const fetchPaginated = useCallback(async <T,>(endpoint: string, authToken: string) => {
+    const rows: T[] = [];
+    const normalizedEndpoint = endpoint.replace(/^\/+/, '');
+    const queryJoiner = normalizedEndpoint.includes('?') ? '&' : '?';
+    let nextUrl: string | null = `${API_URL}/api/${normalizedEndpoint}${queryJoiner}per_page=200`;
+    let pageCount = 0;
+
+    while (nextUrl && pageCount < 50) {
+      const response = await axios.get(nextUrl, {
+        headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
+      });
+
+      const responseData = response.data as unknown;
+
+      if (Array.isArray(responseData)) {
+        rows.push(...(responseData as T[]));
+        nextUrl = null;
+      } else {
+        const root = (responseData && typeof responseData === 'object') ? (responseData as Record<string, unknown>) : null;
+        const directData = root?.data;
+
+        if (Array.isArray(directData)) {
+          rows.push(...(directData as T[]));
+          nextUrl = null;
+        } else if (directData && typeof directData === 'object') {
+          const nested = directData as Record<string, unknown>;
+          rows.push(...(Array.isArray(nested.data) ? (nested.data as T[]) : []));
+          nextUrl = typeof nested.next_page_url === 'string' ? nested.next_page_url : null;
+        } else {
+          rows.push(...(Array.isArray(root?.data) ? (root?.data as T[]) : []));
+          nextUrl = typeof root?.next_page_url === 'string' ? root.next_page_url : null;
+        }
+      }
+
+      pageCount += 1;
+    }
+
+    return rows;
+  }, [API_URL]);
+
+  const fetchRows = useCallback(async (authToken?: string, options?: { skipLoading?: boolean }) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+
+    const skipLoading = Boolean(options?.skipLoading);
+
+    try {
+      if (!skipLoading) setLoading(true);
+      setErrorMessage('');
+      setLoadProgress({ completed: 0, total: 4, stage: 'Loading deliveries...' });
+
+      const nextLoads = await fetchPaginated<LoadRow>('vehicle-loading/loads', tokenToUse);
+      setLoads(nextLoads);
+      setLoadProgress({ completed: 1, total: 4, stage: 'Loading invoices, collections, and returns...' });
+
+      const markProgress = (stage: string) => {
+        setLoadProgress((prev) => ({
+          completed: Math.min(prev.total, prev.completed + 1),
+          total: prev.total,
+          stage,
+        }));
+      };
+
+      const invoicesPromise = fetchPaginated<InvoiceRow>('distribution/invoices?exclude_cancelled=1', tokenToUse).then((rows) => {
+        setInvoices(rows);
+        markProgress('Loading collections and returns...');
+        return rows;
+      });
+
+      const paymentsPromise = fetchPaginated<PaymentRow>('distribution/payments', tokenToUse).then((rows) => {
+        setPayments(rows);
+        markProgress('Loading returns...');
+        return rows;
+      });
+
+      const returnsPromise = fetchPaginated<ReturnRow>('distribution/returns', tokenToUse).then((rows) => {
+        setReturns(rows);
+        markProgress('Finalizing data...');
+        return rows;
+      });
+
+      const [invoiceResult, paymentResult, returnResult] = await Promise.allSettled([
+        invoicesPromise,
+        paymentsPromise,
+        returnsPromise,
+      ]);
+
+      const allSuccessful =
+        invoiceResult.status === 'fulfilled' &&
+        paymentResult.status === 'fulfilled' &&
+        returnResult.status === 'fulfilled';
+
+      if (allSuccessful) {
+        writeCache(tokenToUse, {
+          invoices: invoiceResult.value,
+          payments: paymentResult.value,
+          returns: returnResult.value,
+          loads: nextLoads,
+        });
+        setLoadProgress({ completed: 4, total: 4, stage: 'Data up to date' });
+      } else {
+        setErrorMessage('Some data failed to refresh. Showing last available data.');
+        setLoadProgress({ completed: 4, total: 4, stage: 'Updated with partial data' });
+      }
+    } catch (error) {
+      console.error('Error fetching delivery balance report rows:', error);
+      setErrorMessage('Some data failed to refresh. Showing last available data.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token, fetchPaginated, writeCache]);
 
   useEffect(() => {
     if (!token) return;
@@ -144,7 +304,24 @@ export default function DistributionDeliveryBalanceReportPage() {
           return;
         }
 
-        await fetchRows(token);
+        const cached = readCache(token);
+        const hasCachedData = Boolean(
+          cached && (cached.loads.length > 0 || cached.invoices.length > 0 || cached.payments.length > 0 || cached.returns.length > 0)
+        );
+
+        if (cached && hasCachedData) {
+          setInvoices(cached.invoices);
+          setPayments(cached.payments);
+          setReturns(cached.returns);
+          setLoads(cached.loads);
+
+          setLoadProgress({ completed: 4, total: 4, stage: 'Loaded from local cache' });
+          setAccessReady(true);
+          return;
+        }
+
+        setAccessReady(true);
+        void fetchRows(token, { skipLoading: false });
       } catch (error) {
         console.error('Error checking delivery balance report access:', error);
         router.push('/dashboard');
@@ -154,63 +331,7 @@ export default function DistributionDeliveryBalanceReportPage() {
     };
 
     verifyAccess();
-  }, [token, router]);
-
-  const fetchPaginated = async <T,>(endpoint: string, authToken: string) => {
-    const rows: T[] = [];
-    const normalizedEndpoint = endpoint.replace(/^\/+/, '');
-    const queryJoiner = normalizedEndpoint.includes('?') ? '&' : '?';
-    let nextUrl: string | null = `${API_URL}/api/${normalizedEndpoint}${queryJoiner}per_page=200`;
-    let pageCount = 0;
-
-    while (nextUrl && pageCount < 50) {
-      const response: { data: { data?: PaginatedResponse<T> } } = await axios.get(nextUrl, {
-        headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' },
-      });
-
-      const payload = response.data?.data;
-      rows.push(...(Array.isArray(payload?.data) ? payload.data : []));
-      nextUrl = payload?.next_page_url || null;
-      pageCount += 1;
-    }
-
-    return rows;
-  };
-
-  const fetchRows = async (authToken?: string) => {
-    const tokenToUse = authToken || token;
-    if (!tokenToUse) return;
-
-    try {
-      setLoading(true);
-      setErrorMessage('');
-
-      const [invoiceRows, paymentRows, returnRows, loadRows] = await Promise.all([
-        fetchPaginated<InvoiceRow>('distribution/invoices?exclude_cancelled=1', tokenToUse),
-        fetchPaginated<PaymentRow>('distribution/payments', tokenToUse),
-        fetchPaginated<ReturnRow>('distribution/returns', tokenToUse),
-        axios
-          .get(`${API_URL}/api/vehicle-loading/loads`, {
-            headers: { Authorization: `Bearer ${tokenToUse}`, Accept: 'application/json' },
-          })
-          .then((res) => (Array.isArray(res.data) ? (res.data as LoadRow[]) : [])),
-      ]);
-
-      setInvoices(invoiceRows);
-      setPayments(paymentRows);
-      setReturns(returnRows);
-      setLoads(loadRows);
-    } catch (error) {
-      console.error('Error fetching delivery balance report rows:', error);
-      setInvoices([]);
-      setPayments([]);
-      setReturns([]);
-      setLoads([]);
-      setErrorMessage('Failed to load delivery balance report data.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [token, router, fetchRows, readCache]);
 
   const parseAmount = (value?: number) => Number(value || 0);
 
@@ -323,11 +444,19 @@ export default function DistributionDeliveryBalanceReportPage() {
     return list.sort((a, b) => (b.deliveryDate || b.loadDate || '').localeCompare(a.deliveryDate || a.loadDate || ''));
   }, [loads, invoices, payments, returns]);
 
+  const loadStatusById = useMemo(() => {
+    const map = new Map<number, string>();
+    loads.forEach((load) => {
+      map.set(Number(load.id), String(load.status || '').toLowerCase());
+    });
+    return map;
+  }, [loads]);
+
   const filteredRows = useMemo(() => {
     const term = search.trim().toLowerCase();
 
     return groupedRows.filter((row) => {
-      const loadState = (loads.find((item) => Number(item.id) === Number(row.loadId))?.status || '').toLowerCase();
+      const loadState = loadStatusById.get(Number(row.loadId)) || '';
       if (statusFilter !== 'all' && loadState !== statusFilter) return false;
 
       const reportDate = row.deliveryDate || row.loadDate;
@@ -347,14 +476,14 @@ export default function DistributionDeliveryBalanceReportPage() {
         row.loadNumber,
         row.routeName,
         row.vehicleNumber,
-        loads.find((item) => Number(item.id) === Number(row.loadId))?.status || '',
+        loadStatusById.get(Number(row.loadId)) || '',
       ]
         .join(' ')
         .toLowerCase();
 
       return text.includes(term);
     });
-  }, [groupedRows, search, statusFilter, fromDate, toDate, loads]);
+  }, [groupedRows, search, statusFilter, fromDate, toDate, loadStatusById]);
 
   const summary = useMemo(() => {
     const deliveryCount = filteredRows.length;
@@ -376,6 +505,28 @@ export default function DistributionDeliveryBalanceReportPage() {
       collectionRatio: netSalesAmount > 0 ? (collectionAmount / netSalesAmount) * 100 : 0,
     };
   }, [filteredRows]);
+
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredRows.length / rowsPerPage)), [filteredRows.length, rowsPerPage]);
+
+  const paginatedRows = useMemo(() => {
+    const startIndex = (currentPage - 1) * rowsPerPage;
+    return filteredRows.slice(startIndex, startIndex + rowsPerPage);
+  }, [filteredRows, currentPage, rowsPerPage]);
+
+  const loadProgressPercent = useMemo(() => {
+    if (loadProgress.total <= 0) return 0;
+    return Math.max(0, Math.min(100, (loadProgress.completed / loadProgress.total) * 100));
+  }, [loadProgress]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, statusFilter, fromDate, toDate, rowsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   const formatMoney = (value?: number) => {
     return Number(value || 0).toLocaleString(undefined, {
@@ -525,7 +676,7 @@ export default function DistributionDeliveryBalanceReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-700 transition-colors duration-300">
@@ -543,7 +694,7 @@ export default function DistributionDeliveryBalanceReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Delivery <span className="bg-gradient-to-r from-green-700 to-lime-700 bg-clip-text text-transparent">Balance Sheet</span>
@@ -604,7 +755,7 @@ export default function DistributionDeliveryBalanceReportPage() {
             <div className="md:col-span-6 flex justify-end">
               <button
                 type="button"
-                onClick={() => fetchRows()}
+                onClick={() => fetchRows(undefined, { skipLoading: false })}
                 disabled={loading}
                 className="px-4 py-2 bg-gradient-to-r from-green-700 to-lime-700 border border-transparent rounded-md text-sm font-semibold text-white hover:from-green-800 hover:to-lime-800 disabled:opacity-60"
               >
@@ -612,6 +763,24 @@ export default function DistributionDeliveryBalanceReportPage() {
               </button>
             </div>
           </div>
+
+          {loading && (
+            <div className="mt-3 rounded-md border border-lime-200 bg-lime-50 px-3 py-2 text-xs text-lime-800">
+              <div className="flex items-center justify-between gap-2">
+                <span>
+                  {loadProgress.stage || 'Refreshing data...'}
+                  {loadProgress.total > 0 ? ` (${Math.min(loadProgress.completed, loadProgress.total)}/${loadProgress.total})` : ''}
+                </span>
+                <span className="font-semibold text-lime-900">{loadProgressPercent.toFixed(0)}%</span>
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-lime-100">
+                <div
+                  className="h-2 rounded-full bg-gradient-to-r from-lime-500 to-green-600 transition-all duration-500"
+                  style={{ width: `${loadProgressPercent}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           <div className="mt-4 flex flex-wrap gap-2">
             <button onClick={viewPdf} className="px-4 py-2 rounded-md text-sm font-medium border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">
@@ -661,7 +830,7 @@ export default function DistributionDeliveryBalanceReportPage() {
                     <td colSpan={11} className="px-4 py-10 text-center text-sm text-gray-500">No delivery balances found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
+                  paginatedRows.map((row, idx) => (
                     <tr key={row.loadId} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-700">{row.loadNumber}</td>
                       <td className="px-4 py-3 text-sm text-gray-700">{toDateLabel(row.loadDate)}</td>
@@ -680,6 +849,53 @@ export default function DistributionDeliveryBalanceReportPage() {
               </tbody>
             </table>
           </div>
+
+          {filteredRows.length > 0 && (
+            <div className="flex flex-col gap-3 border-t border-gray-100 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-sm text-gray-600">
+                {(() => {
+                  const startRow = (currentPage - 1) * rowsPerPage + 1;
+                  const endRow = Math.min(filteredRows.length, currentPage * rowsPerPage);
+                  return `Showing ${startRow}-${endRow} of ${filteredRows.length}`;
+                })()}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="text-sm text-gray-600" htmlFor="delivery-balance-rows-per-page">Rows</label>
+                <select
+                  id="delivery-balance-rows-per-page"
+                  value={rowsPerPage}
+                  onChange={(e) => setRowsPerPage(Number(e.target.value) || 20)}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm text-black"
+                >
+                  <option value={10}>10</option>
+                  <option value={20}>20</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={currentPage <= 1}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+
+                <span className="text-sm text-gray-700">Page {currentPage} of {totalPages}</span>
+
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       </main>
     </div>

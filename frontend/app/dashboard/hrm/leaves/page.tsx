@@ -665,7 +665,7 @@ export default function Leaves() {
 
       {/* Modern Navigation */}
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 gap-3">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               {isWidgetVisible('hrm-leaves-nav-back-button') && (
@@ -701,7 +701,7 @@ export default function Leaves() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {/* Hero Section */}
         {isWidgetVisible('hrm-leaves-hero-card') && (
           <div className="text-center mb-12 rounded-2xl border border-gray-200 bg-white/90 shadow-sm p-6 relative">

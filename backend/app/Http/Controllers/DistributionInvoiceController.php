@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DistributionInvoice;
 use App\Models\DistributionInvoiceItem;
 use App\Models\DistributionPayment;
+use App\Models\CompanyBankAccount;
 use App\Models\Employee;
 use App\Models\InventoryItem;
 use App\Models\Load;
@@ -23,6 +24,39 @@ use Barryvdh\DomPDF\Facade\Pdf;
 
 class DistributionInvoiceController extends Controller
 {
+    private function extractDispatchOrderNumberFromNotes(?string $notes): ?string
+    {
+        $text = (string) ($notes ?? '');
+        if ($text === '') {
+            return null;
+        }
+
+        if (preg_match('/DO\s*Number:\s*([A-Z0-9-]+)/i', $text, $matches) === 1) {
+            return strtoupper(trim((string) ($matches[1] ?? '')));
+        }
+
+        return null;
+    }
+
+    private function generateDispatchOrderNumber(): string
+    {
+        $hasDispatchOrderNumberColumn = Schema::hasColumn('distribution_invoices', 'dispatch_order_number');
+
+        do {
+            $candidate = 'DO-' . now()->format('Ymd') . '-' . random_int(100, 999);
+
+            $exists = $hasDispatchOrderNumberColumn
+                ? DistributionInvoice::query()
+                    ->where('dispatch_order_number', $candidate)
+                    ->exists()
+                : DistributionInvoice::query()
+                    ->where('notes', 'like', '%DO Number: ' . $candidate . '%')
+                    ->exists();
+        } while ($exists);
+
+        return $candidate;
+    }
+
     private function resolvePaymentCloseStatus(): string
     {
         try {
@@ -114,7 +148,7 @@ class DistributionInvoiceController extends Controller
         } else {
             $query->with([
                 'items',
-                'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status',
+                'payments:id,distribution_invoice_id,payment_date,cheque_date,amount,payment_method,reference_no,bank_name,status,created_at',
             ]);
         }
 
@@ -188,6 +222,10 @@ class DistributionInvoiceController extends Controller
             $query->where('load_id', (int) $request->load_id);
         }
 
+        if ($request->boolean('dispatch_order_only') && Schema::hasColumn('distribution_invoices', 'is_dispatch_order')) {
+            $query->where('is_dispatch_order', true);
+        }
+
         $perPage = max(1, min(500, (int) $request->get('per_page', 15)));
 
         if ($reportMode) {
@@ -228,6 +266,7 @@ class DistributionInvoiceController extends Controller
             'invoice_date' => 'required|date',
             'due_date' => 'nullable|date|after_or_equal:invoice_date',
             'discount' => 'nullable|numeric|min:0',
+            'mark_as_dispatch_order' => 'nullable|boolean',
             'notes' => 'nullable|string',
             'ref_latitude' => 'nullable|numeric|between:-90,90',
             'ref_longitude' => 'nullable|numeric|between:-180,180',
@@ -276,12 +315,35 @@ class DistributionInvoiceController extends Controller
             }
 
             $subtotal = 0;
+            $lineItemDiscountTotal = 0;
             foreach ($payload['items'] as $item) {
-                $subtotal += (float) $item['quantity'] * (float) $item['unit_price'];
+                $quantity = (float) $item['quantity'];
+                $netUnitPrice = (float) $item['unit_price'];
+                $lineDiscountPerUnit = max(0, (float) ($item['discount'] ?? 0));
+                $grossUnitPrice = $netUnitPrice + $lineDiscountPerUnit;
+
+                $subtotal += $quantity * $grossUnitPrice;
+                $lineItemDiscountTotal += $quantity * $lineDiscountPerUnit;
             }
 
-            $discount = (float) ($payload['discount'] ?? 0);
+            $billLevelDiscount = (float) ($payload['discount'] ?? 0);
+            $discount = $billLevelDiscount + $lineItemDiscountTotal;
             $total = max(0, $subtotal - $discount);
+            $shouldMarkAsDispatchOrder = (bool) ($payload['mark_as_dispatch_order'] ?? false);
+            $hasDispatchOrderFlagColumn = Schema::hasColumn('distribution_invoices', 'is_dispatch_order');
+            $hasDispatchOrderNumberColumn = Schema::hasColumn('distribution_invoices', 'dispatch_order_number');
+            $dispatchOrderNumber = $shouldMarkAsDispatchOrder
+                ? $this->generateDispatchOrderNumber()
+                : null;
+
+            $notes = $payload['notes'] ?? null;
+            if ($shouldMarkAsDispatchOrder && $dispatchOrderNumber) {
+                $doLog = "[DO (PROFORMA INVOICE)]\n"
+                    . "DO Number: {$dispatchOrderNumber}\n"
+                    . 'Created at: ' . now()->toDateTimeString();
+                $notes = trim((string) $notes);
+                $notes = $notes !== '' ? ($notes . "\n\n" . $doLog) : $doLog;
+            }
 
             $invoiceData = [
                 'invoice_number' => $payload['invoice_number'],
@@ -293,7 +355,7 @@ class DistributionInvoiceController extends Controller
                 'total' => $total,
                 'paid_amount' => 0,
                 'status' => 'pending',
-                'notes' => $payload['notes'] ?? null,
+                'notes' => $notes,
                 'ref_latitude' => $payload['ref_latitude'] ?? null,
                 'ref_longitude' => $payload['ref_longitude'] ?? null,
                 'ref_gps_accuracy' => $payload['ref_gps_accuracy'] ?? null,
@@ -307,6 +369,14 @@ class DistributionInvoiceController extends Controller
 
             if ($invoiceHasLoadId) {
                 $invoiceData['load_id'] = $activeLoad?->id;
+            }
+
+            if ($hasDispatchOrderFlagColumn) {
+                $invoiceData['is_dispatch_order'] = $shouldMarkAsDispatchOrder;
+            }
+
+            if ($hasDispatchOrderNumberColumn && $dispatchOrderNumber) {
+                $invoiceData['dispatch_order_number'] = $dispatchOrderNumber;
             }
 
             $invoice = DistributionInvoice::create($invoiceData);
@@ -362,8 +432,17 @@ class DistributionInvoiceController extends Controller
         return response()->json([
             'success' => true,
             'data' => $invoice,
-            'message' => 'Distribution invoice created successfully',
+            'message' => (bool) ($payload['mark_as_dispatch_order'] ?? false)
+                ? 'DO (Proforma Invoice) created successfully'
+                : 'Distribution invoice created successfully',
         ], 201);
+    }
+
+    public function storeDispatchOrder(Request $request): JsonResponse
+    {
+        $request->merge(['mark_as_dispatch_order' => true]);
+
+        return $this->store($request);
     }
 
                 private function pushInvoiceLocationToTraccar(DistributionInvoice $invoice): void
@@ -475,16 +554,29 @@ class DistributionInvoiceController extends Controller
             return response()->json(['success' => false, 'message' => 'Distribution invoice not found'], 404);
         }
 
-        $company = Company::query()->first();
+        $company = Company::query()->orderBy('id')->first();
+        $brandingCompany = Company::query()
+            ->whereNotNull('logo_path')
+            ->where('logo_path', '<>', '')
+            ->orderBy('id')
+            ->first() ?: $company;
         $escape = static fn ($value): string => e((string) ($value ?? ''));
         $money = static fn ($value): string => number_format((float) ($value ?? 0), 2);
         $logo = '';
 
-        if ($company?->logo_path) {
-            $logoPath = storage_path('app/public/' . ltrim((string) $company->logo_path, '/'));
-            if (is_file($logoPath)) {
-                $mime = mime_content_type($logoPath) ?: 'image/png';
-                $logo = 'data:' . $mime . ';base64,' . base64_encode((string) file_get_contents($logoPath));
+        if ($brandingCompany?->logo_path) {
+            $relativeLogoPath = ltrim((string) $brandingCompany->logo_path, '/');
+            $logoCandidates = [
+                storage_path('app/public/' . $relativeLogoPath),
+                public_path('storage/' . $relativeLogoPath),
+                (string) $brandingCompany->logo_path,
+            ];
+            foreach ($logoCandidates as $logoPath) {
+                if (is_file($logoPath)) {
+                    $mime = mime_content_type($logoPath) ?: 'image/png';
+                    $logo = 'data:' . $mime . ';base64,' . base64_encode((string) file_get_contents($logoPath));
+                    break;
+                }
             }
         }
 
@@ -515,7 +607,47 @@ class DistributionInvoiceController extends Controller
         $paymentRows = '';
         foreach ($invoice->payments as $payment) {
             $paymentDate = $payment->payment_date ? date('Y-m-d', strtotime((string) $payment->payment_date)) : '';
-            $paymentRows .= '<tr><td>' . $escape(strtoupper((string) $payment->payment_method)) . '</td><td>' . $escape($paymentDate) . '</td><td>' . $escape($payment->reference_no) . '</td><td class="right">' . $money($payment->amount) . '</td></tr>';
+            $paymentReference = trim((string) ($payment->reference_no ?? ''));
+            if ((string) ($payment->payment_method ?? '') === 'check' && !empty($payment->cheque_date)) {
+                $paymentReference = trim($paymentReference . ' / ' . (string) $payment->cheque_date, ' /');
+            }
+            if (!empty($payment->bank_name)) {
+                $paymentReference = trim($paymentReference . ' / ' . (string) $payment->bank_name, ' /');
+            }
+            $paymentRows .= '<tr><td>' . $escape(strtoupper((string) $payment->payment_method)) . '</td><td>' . $escape($paymentDate) . '</td><td>' . $escape($paymentReference) . '</td><td class="right">' . $money($payment->amount) . '</td></tr>';
+        }
+
+        if ($paymentRows === '' && (float) ($invoice->paid_amount ?? 0) > 0) {
+            $fallbackPaymentType = strtolower((string) ($invoice->payment_type ?? 'cash'));
+            $fallbackMethod = match ($fallbackPaymentType) {
+                'bank' => 'BANK TRANSFER',
+                'cheque' => 'CHEQUE',
+                'card' => 'CARD',
+                'online' => 'ONLINE',
+                default => 'CASH',
+            };
+
+            $fallbackReference = '';
+            if ($fallbackPaymentType === 'cheque') {
+                $chequeNo = trim((string) ($invoice->cheque_number ?? ''));
+                $chequeDate = trim((string) ($invoice->cheque_date ?? ''));
+                $chequeBank = trim((string) ($invoice->cheque_bank_name ?? ''));
+                $fallbackReference = trim(implode(' / ', array_filter([$chequeNo, $chequeDate, $chequeBank])), ' /');
+            } elseif ($fallbackPaymentType === 'bank') {
+                $bankAccountId = (int) ($invoice->company_bank_account_id ?? 0);
+                if ($bankAccountId > 0) {
+                    $bankAccount = CompanyBankAccount::query()->find($bankAccountId, ['bank_name', 'account_no']);
+                    if ($bankAccount) {
+                        $fallbackReference = trim(implode(' / ', array_filter([
+                            (string) ($bankAccount->account_no ?? ''),
+                            (string) ($bankAccount->bank_name ?? ''),
+                        ])), ' /');
+                    }
+                }
+            }
+
+            $fallbackDate = $invoice->invoice_date ? date('Y-m-d', strtotime((string) $invoice->invoice_date)) : '';
+            $paymentRows = '<tr><td>' . $escape($fallbackMethod) . '</td><td>' . $escape($fallbackDate) . '</td><td>' . $escape($fallbackReference) . '</td><td class="right">' . $money($invoice->paid_amount) . '</td></tr>';
         }
 
         $returnSection = $returnLines || $returnTotal > 0 ? '<section><h3>Returns / Exchange</h3>' . implode('', array_map(fn ($line) => '<div>' . $escape($line) . '</div>', $returnLines)) . ($returnTotal > 0 ? '<div><strong>Total return value:</strong> ' . $money($returnTotal) . '</div>' : '') . ($returnMode ? '<div>' . $escape($returnMode) . '</div>' : '') . '</section>' : '';
@@ -533,7 +665,7 @@ class DistributionInvoiceController extends Controller
             .summary { width: 50%; margin-left: auto; margin-top: 8px; } .summary td { border: 0; padding: 3px; } .total td { border-top: 2px solid #079669; font-weight: bold; font-size: 12px; }
             .footer { text-align: center; color: #687585; margin-top: 18px; border-top: 1px solid #dce7e4; padding-top: 8px; }
         </style></head><body>
-            <div class="header">' . ($logo ? '<img class="logo" src="' . $logo . '">' : '') . '<h1>' . $escape($company?->name ?: 'Company') . '</h1>' . ($company?->address ? '<h2>' . $escape($company->address) . '</h2>' : '') . ($company?->phone ? '<h2>Tel: ' . $escape($company->phone) . '</h2>' : '') . ($company?->email ? '<h2>' . $escape($company->email) . '</h2>' : '') . '</div>
+            <div class="header">' . ($logo ? '<img class="logo" src="' . $logo . '">' : '') . '<h1>' . $escape($brandingCompany?->name ?: $company?->name ?: 'Company') . '</h1>' . (($brandingCompany?->address ?: $company?->address) ? '<h2>' . $escape($brandingCompany?->address ?: $company?->address) . '</h2>' : '') . (($brandingCompany?->phone ?: $company?->phone) ? '<h2>Tel: ' . $escape($brandingCompany?->phone ?: $company?->phone) . '</h2>' : '') . (($brandingCompany?->email ?: $company?->email) ? '<h2>' . $escape($brandingCompany?->email ?: $company?->email) . '</h2>' : '') . '</div>
             <table class="meta"><tr><td><strong>Invoice:</strong> ' . $escape($invoice->invoice_number) . '<br><strong>Date:</strong> ' . $escape($invoiceDate) . '</td><td class="right"><strong>Customer:</strong><br>' . $escape($invoice->customer?->shop_name) . '<br>' . $escape($invoice->customer?->customer_code) . ($invoice->customer?->address ? '<br>' . $escape($invoice->customer->address) : '') . '</td></tr></table>
             <section><h3>Billing Item Details</h3><table><thead><tr><th>Item</th><th class="right">Qty</th><th class="right">Unit Price</th><th class="right">Amount</th></tr></thead><tbody>' . $itemRows . '</tbody></table></section>
             ' . $returnSection . '
@@ -571,6 +703,7 @@ class DistributionInvoiceController extends Controller
             'billing_longitude' => 'nullable|numeric|between:-180,180',
             'billing_gps_accuracy' => 'nullable|numeric|min:0',
             'billing_gps_captured_at' => 'nullable|date',
+            'mark_as_dispatch_order' => 'nullable|boolean',
             'items' => 'required|array|min:1',
             'items.*.inventory_item_id' => 'nullable|exists:inventory_items,id',
             'items.*.item_code' => 'required|string|max:80',
@@ -593,14 +726,53 @@ class DistributionInvoiceController extends Controller
 
         $invoice = DB::transaction(function () use ($invoice, $payload) {
             $subtotal = 0;
+            $lineItemDiscountTotal = 0;
             foreach ($payload['items'] as $item) {
-                $subtotal += (float) $item['quantity'] * (float) $item['unit_price'];
+                $quantity = (float) $item['quantity'];
+                $netUnitPrice = (float) $item['unit_price'];
+                $lineDiscountPerUnit = max(0, (float) ($item['discount'] ?? 0));
+                $grossUnitPrice = $netUnitPrice + $lineDiscountPerUnit;
+
+                $subtotal += $quantity * $grossUnitPrice;
+                $lineItemDiscountTotal += $quantity * $lineDiscountPerUnit;
             }
 
-            $discount = (float) ($payload['discount'] ?? 0);
+            $billLevelDiscount = (float) ($payload['discount'] ?? 0);
+            $discount = $billLevelDiscount + $lineItemDiscountTotal;
             $total = max(0, $subtotal - $discount);
+            $originalTotal = (float) ($invoice->total ?? 0);
+            $shouldMarkAsDispatchOrder = (bool) ($payload['mark_as_dispatch_order'] ?? false);
+            $hasDispatchOrderFlagColumn = Schema::hasColumn('distribution_invoices', 'is_dispatch_order');
+            $hasDispatchOrderNumberColumn = Schema::hasColumn('distribution_invoices', 'dispatch_order_number');
 
-            $invoice->update([
+            $dispatchOrderNumber = null;
+            if ($shouldMarkAsDispatchOrder || !empty($invoice->dispatch_order_number)) {
+                $dispatchOrderNumber = (string) ($invoice->dispatch_order_number ?: '');
+
+                if ($dispatchOrderNumber === '') {
+                    $dispatchOrderNumber = (string) ($this->extractDispatchOrderNumberFromNotes($invoice->notes) ?: '');
+                }
+
+                if ($dispatchOrderNumber === '' && $shouldMarkAsDispatchOrder) {
+                    $dispatchOrderNumber = $this->generateDispatchOrderNumber();
+                }
+            }
+
+            $notes = $payload['notes'] ?? null;
+            if ($shouldMarkAsDispatchOrder && $dispatchOrderNumber) {
+                $adjustmentLog = "[DO (PROFORMA INVOICE)]\n"
+                    . "DO Number: {$dispatchOrderNumber}\n"
+                    . 'Original invoice total: ' . number_format($originalTotal, 2, '.', '') . "\n"
+                    . 'Adjusted invoice total: ' . number_format($total, 2, '.', '') . "\n"
+                    . 'Marked at: ' . now()->toDateTimeString();
+
+                if (!str_contains((string) $notes, "DO Number: {$dispatchOrderNumber}")) {
+                    $notes = trim((string) $notes);
+                    $notes = $notes !== '' ? ($notes . "\n\n" . $adjustmentLog) : $adjustmentLog;
+                }
+            }
+
+            $updateData = [
                 'customer_id' => $payload['customer_id'],
                 'invoice_date' => $payload['invoice_date'],
                 'due_date' => $payload['due_date'] ?? null,
@@ -608,7 +780,7 @@ class DistributionInvoiceController extends Controller
                 'discount' => $discount,
                 'total' => $total,
                 'status' => $payload['status'] ?? $invoice->status,
-                'notes' => $payload['notes'] ?? null,
+                'notes' => $notes,
                 'ref_latitude' => $payload['ref_latitude'] ?? null,
                 'ref_longitude' => $payload['ref_longitude'] ?? null,
                 'ref_gps_accuracy' => $payload['ref_gps_accuracy'] ?? null,
@@ -617,7 +789,19 @@ class DistributionInvoiceController extends Controller
                 'billing_longitude' => $payload['billing_longitude'] ?? null,
                 'billing_gps_accuracy' => $payload['billing_gps_accuracy'] ?? null,
                 'billing_gps_captured_at' => $payload['billing_gps_captured_at'] ?? null,
-            ]);
+            ];
+
+            if ($hasDispatchOrderFlagColumn) {
+                $updateData['is_dispatch_order'] = $shouldMarkAsDispatchOrder
+                    ? true
+                    : (bool) ($invoice->is_dispatch_order ?? false);
+            }
+
+            if ($hasDispatchOrderNumberColumn && $dispatchOrderNumber) {
+                $updateData['dispatch_order_number'] = $dispatchOrderNumber;
+            }
+
+            $invoice->update($updateData);
 
             // Replace invoice items without touching load or inventory stock
             DistributionInvoiceItem::where('distribution_invoice_id', $invoice->id)->delete();
@@ -644,7 +828,9 @@ class DistributionInvoiceController extends Controller
         return response()->json([
             'success' => true,
             'data' => $invoice,
-            'message' => 'Distribution invoice updated successfully',
+            'message' => (bool) ($payload['mark_as_dispatch_order'] ?? false)
+                ? 'DO (Proforma Invoice) updated successfully'
+                : 'Distribution invoice updated successfully',
         ]);
     }
 

@@ -481,7 +481,7 @@ export default function ProductionExecutionPage() {
       </div>
 
       {isWidgetVisible('production-execution-nav-bar') && <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-16">
             <div>
               <h1 className="text-lg font-bold bg-gradient-to-r from-amber-600 to-orange-600 bg-clip-text text-transparent">Production Execution</h1>
@@ -496,7 +496,7 @@ export default function ProductionExecutionPage() {
         {!widgetControlsLocked && <div className="max-w-7xl mx-auto px-4 pb-4 sm:px-6 lg:px-8"><button type="button" onClick={() => stageWidgetVisibilityChange('production-execution-nav-bar', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
       </nav>}
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
         {isWidgetVisible('production-execution-flow-card') && <section className="rounded-xl border border-amber-100 bg-amber-50/80 px-4 py-3 text-sm text-amber-800 shadow-sm">
           <p className="font-semibold">Execution flow</p>
           <p className="mt-1">1) Pick queued plan and start batch, 2) Update produced and wastage, 3) Monitor active batches, 4) Filter and export history.</p>

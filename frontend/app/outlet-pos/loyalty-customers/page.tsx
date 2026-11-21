@@ -37,11 +37,16 @@ function OutletLoyaltyCustomersContent() {
 
   const router = useRouter();
   const params = useSearchParams();
+  const isEmbedded = params.get('embedded') === '1';
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
 
   const getPathWithCode = (path: string) => {
     const outletCode = params.get('outlet_code') || '';
-    return `${path}${outletCode ? `?outlet_code=${encodeURIComponent(outletCode)}` : ''}`;
+    const query = new URLSearchParams();
+    if (outletCode) query.set('outlet_code', outletCode);
+    if (isEmbedded) query.set('embedded', '1');
+    const queryString = query.toString();
+    return `${path}${queryString ? `?${queryString}` : ''}`;
   };
 
   const redirectToLoginWithNext = () => {
@@ -187,20 +192,20 @@ function OutletLoyaltyCustomersContent() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 flex items-center justify-center">
+      <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 flex items-center justify-center`}>
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 relative overflow-hidden">
+    <div className={`${isEmbedded ? '' : 'min-h-screen'} bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 relative overflow-hidden`}>
       <div className="absolute inset-0 opacity-30 pointer-events-none">
         <div className="absolute top-20 left-20 w-72 h-72 bg-amber-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
         <div className="absolute top-40 right-20 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
       </div>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className={`relative z-10 ${isEmbedded ? 'w-full p-5 sm:p-5 lg:p-5' : 'max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8'} space-y-6`}>
         <section className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
           <div className="flex items-center justify-between gap-4">
             <div>

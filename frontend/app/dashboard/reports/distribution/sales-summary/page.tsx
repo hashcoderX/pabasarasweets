@@ -141,6 +141,12 @@ const routeLabel = (route?: { name?: string; origin?: string; destination?: stri
   return route.name || [route.origin, route.destination].filter(Boolean).join(' -> ') || '-';
 };
 
+const isCountablePaymentStatus = (status?: string) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return true;
+  return !['bounced', 'pending', 'failed', 'rejected', 'void', 'cancelled'].includes(normalized);
+};
+
 const summarizePayload = <T,>(payload: unknown): { data: T[]; next_page_url: string | null } => {
   if (Array.isArray(payload)) {
     return { data: payload as T[], next_page_url: null };
@@ -523,7 +529,7 @@ export default function DistributionSalesSummaryReportPage() {
   const paymentsByInvoice = useMemo(() => {
     const map = new Map<number, number>();
     payments.forEach((payment) => {
-      if (String(payment.status || '').toLowerCase() === 'bounced') return;
+      if (!isCountablePaymentStatus(payment.status)) return;
       const invoiceId = Number(payment.distribution_invoice_id || 0);
       if (!invoiceId) return;
       map.set(invoiceId, (map.get(invoiceId) || 0) + Number(payment.amount || 0));
@@ -532,22 +538,25 @@ export default function DistributionSalesSummaryReportPage() {
   }, [payments]);
 
   const loadOptions = useMemo(() => {
-    const optionMap = new Map<string, string>();
+    const optionMap = new Map<string, { label: string; sortKey: number }>();
 
     loads.forEach((load) => {
       const label = [load.load_number || `Load #${load.id}`, routeLabel(load.route)].filter(Boolean).join(' | ');
-      optionMap.set(String(load.id), label);
+      const loadTime = parseDateValue(load.load_date || '')?.getTime() || 0;
+      const sortKey = loadTime > 0 ? loadTime : Number(load.id || 0);
+      optionMap.set(String(load.id), { label, sortKey });
     });
 
     invoices.forEach((invoice) => {
       const loadId = Number(invoice.load_id || 0);
       if (!loadId || optionMap.has(String(loadId))) return;
-      optionMap.set(String(loadId), `Load #${loadId}`);
+      optionMap.set(String(loadId), { label: `Load #${loadId}`, sortKey: loadId });
     });
 
     return Array.from(optionMap.entries())
-      .map(([id, label]) => ({ id, label }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+      .map(([id, value]) => ({ id, label: value.label, sortKey: value.sortKey }))
+      .sort((a, b) => b.sortKey - a.sortKey)
+      .map(({ id, label }) => ({ id, label }));
   }, [loads, invoices]);
 
   const salesRefOptions = useMemo(() => {
@@ -612,7 +621,9 @@ export default function DistributionSalesSummaryReportPage() {
   }, [invoices, loadFilter, salesRefFilter, isSalesRefUser, currentEmployeeId, fromDate, toDate, searchTerm, loadById]);
 
   const summaryRows = useMemo(() => {
-    const grouped = new Map<string, SalesSummaryRow>();
+    type GroupAccumulator = SalesSummaryRow & { customerIds: Set<number> };
+
+    const grouped = new Map<string, GroupAccumulator>();
 
     filteredInvoices.forEach((invoice) => {
       const loadId = Number(invoice.load_id || 0) || null;
@@ -622,7 +633,8 @@ export default function DistributionSalesSummaryReportPage() {
       const routeName = routeLabel(load?.route);
 
       const grossSales = Number(invoice.total || 0);
-      const collected = paymentsByInvoice.get(Number(invoice.id)) ?? Number(invoice.paid_amount || 0);
+      const collectedRaw = paymentsByInvoice.get(Number(invoice.id)) ?? Number(invoice.paid_amount || 0);
+      const collected = Math.min(grossSales, Math.max(0, collectedRaw));
       const outstanding = Math.max(0, grossSales - collected);
 
       if (!grouped.has(key)) {
@@ -637,13 +649,15 @@ export default function DistributionSalesSummaryReportPage() {
           collected: 0,
           outstanding: 0,
           collectionRate: 0,
+          customerIds: new Set<number>(),
         });
       }
 
       const target = grouped.get(key);
       if (!target) return;
       target.invoiceCount += 1;
-      if (Number(invoice.customer_id || 0) > 0) target.customerCount += 1;
+      const customerId = Number(invoice.customer_id || 0);
+      if (customerId > 0) target.customerIds.add(customerId);
       target.grossSales += grossSales;
       target.collected += collected;
       target.outstanding += outstanding;
@@ -652,6 +666,7 @@ export default function DistributionSalesSummaryReportPage() {
     return Array.from(grouped.values())
       .map((row) => ({
         ...row,
+        customerCount: row.customerIds.size,
         collectionRate: row.grossSales > 0 ? (row.collected / row.grossSales) * 100 : 0,
       }))
       .sort((a, b) => {
@@ -659,6 +674,82 @@ export default function DistributionSalesSummaryReportPage() {
         return a.loadLabel.localeCompare(b.loadLabel);
       });
   }, [filteredInvoices, loadById, paymentsByInvoice]);
+
+  const qualityChecks = useMemo(() => {
+    const knownInvoiceIdSet = new Set(invoices.map((invoice) => Number(invoice.id || 0)).filter((id) => id > 0));
+    const filteredInvoiceIdSet = new Set(filteredInvoices.map((invoice) => Number(invoice.id || 0)).filter((id) => id > 0));
+
+    let missingLoadRefs = 0;
+    let missingRouteRefs = 0;
+    let overCollectedInvoices = 0;
+    let overCollectedAmount = 0;
+
+    filteredInvoices.forEach((invoice) => {
+      const invoiceId = Number(invoice.id || 0);
+      const loadId = Number(invoice.load_id || 0);
+      const linkedLoad = loadId ? loadById.get(loadId) : null;
+
+      if (loadId > 0 && !linkedLoad) {
+        missingLoadRefs += 1;
+      }
+
+      if (linkedLoad && routeLabel(linkedLoad.route) === '-') {
+        missingRouteRefs += 1;
+      }
+
+      const gross = Number(invoice.total || 0);
+      const collectedRaw = paymentsByInvoice.get(invoiceId) ?? Number(invoice.paid_amount || 0);
+      if (collectedRaw > gross) {
+        overCollectedInvoices += 1;
+        overCollectedAmount += collectedRaw - gross;
+      }
+    });
+
+    const orphanPayments = payments.reduce(
+      (acc, payment) => {
+        if (!isCountablePaymentStatus(payment.status)) return acc;
+        const invoiceId = Number(payment.distribution_invoice_id || 0);
+        if (!invoiceId || knownInvoiceIdSet.has(invoiceId)) return acc;
+        acc.count += 1;
+        acc.amount += Number(payment.amount || 0);
+        return acc;
+      },
+      { count: 0, amount: 0 }
+    );
+
+    const filteredPaymentCoverage = payments.reduce(
+      (acc, payment) => {
+        if (!isCountablePaymentStatus(payment.status)) return acc;
+        const invoiceId = Number(payment.distribution_invoice_id || 0);
+        if (!invoiceId || !filteredInvoiceIdSet.has(invoiceId)) return acc;
+        acc.count += 1;
+        return acc;
+      },
+      { count: 0 }
+    );
+
+    const grossSalesTotal = summaryRows.reduce((sum, row) => sum + row.grossSales, 0);
+    const collectedTotal = summaryRows.reduce((sum, row) => sum + row.collected, 0);
+    const outstandingTotal = summaryRows.reduce((sum, row) => sum + row.outstanding, 0);
+    const reconciledDelta = grossSalesTotal - collectedTotal - outstandingTotal;
+
+    return {
+      missingLoadRefs,
+      missingRouteRefs,
+      overCollectedInvoices,
+      overCollectedAmount,
+      orphanPaymentCount: orphanPayments.count,
+      orphanPaymentAmount: orphanPayments.amount,
+      filteredPaymentEntries: filteredPaymentCoverage.count,
+      reconciledDelta,
+      isHealthy:
+        missingLoadRefs === 0 &&
+        missingRouteRefs === 0 &&
+        overCollectedInvoices === 0 &&
+        orphanPayments.count === 0 &&
+        Math.abs(reconciledDelta) < 0.01,
+    };
+  }, [invoices, filteredInvoices, loadById, paymentsByInvoice, payments, summaryRows]);
 
   const totals = useMemo(() => {
     const invoiceCount = filteredInvoices.length;
@@ -829,7 +920,7 @@ export default function DistributionSalesSummaryReportPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-cyan-50 to-slate-100 text-slate-800">
       <nav className="bg-white/85 backdrop-blur border-b border-white/60 shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <div className="w-full px-3 sm:px-4 lg:px-6 h-16 flex items-center justify-between">
           <Link href="/dashboard/reports" className="text-sm font-semibold text-emerald-700 hover:text-emerald-800">
             ← Back to Reports
           </Link>
@@ -839,7 +930,7 @@ export default function DistributionSalesSummaryReportPage() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-7 px-4 sm:px-6 lg:px-8 space-y-6">
+      <main className="w-full py-7 px-3 sm:px-4 lg:px-6 space-y-6">
         <section className="rounded-3xl border border-white/60 bg-white/85 shadow-xl p-6">
           <h1 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight">Sales Summary Report</h1>
           <p className="mt-2 text-slate-600">
@@ -961,6 +1052,37 @@ export default function DistributionSalesSummaryReportPage() {
             <p className="mt-2 text-2xl font-black text-amber-900">{money(totals.outstanding)}</p>
             <p className="mt-1 text-xs text-amber-700">Collection Rate: {totals.collectionRate.toFixed(2)}%</p>
           </article>
+        </section>
+
+        <section className="rounded-2xl border border-white/70 bg-white/90 shadow overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 bg-slate-50">
+            <h2 className="font-semibold text-slate-900">Data Accuracy Checks (Standard)</h2>
+            <p className="text-xs text-slate-600 mt-0.5">Reconciliation and data-quality checks aligned with standard sales summary controls.</p>
+          </div>
+          <div className="px-5 py-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Reconciliation Delta</p>
+              <p className="mt-1 font-semibold text-slate-900">{money(qualityChecks.reconciledDelta)}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Over-Collected Invoices</p>
+              <p className="mt-1 font-semibold text-slate-900">{qualityChecks.overCollectedInvoices} ({money(qualityChecks.overCollectedAmount)})</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Missing Load/Route Refs</p>
+              <p className="mt-1 font-semibold text-slate-900">{qualityChecks.missingLoadRefs} / {qualityChecks.missingRouteRefs}</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Orphan Payments</p>
+              <p className="mt-1 font-semibold text-slate-900">{qualityChecks.orphanPaymentCount} ({money(qualityChecks.orphanPaymentAmount)})</p>
+            </div>
+          </div>
+          <div className="px-5 pb-4 text-xs text-slate-600 flex flex-wrap items-center gap-2">
+            <span className={`rounded-full px-2 py-1 font-semibold ${qualityChecks.isHealthy ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+              {qualityChecks.isHealthy ? 'Accuracy Status: OK' : 'Accuracy Status: Needs Review'}
+            </span>
+            <span>Filtered valid payment entries linked to filtered invoices: {qualityChecks.filteredPaymentEntries}</span>
+          </div>
         </section>
 
         <section className="rounded-2xl border border-white/70 bg-white/90 shadow overflow-hidden">

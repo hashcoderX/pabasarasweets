@@ -108,6 +108,7 @@ class CompanyController extends Controller
                 CompanyBankAccount::create([
                     'company_id' => $company->id,
                     'bank_name' => $account['bank_name'],
+                    'branch' => $account['branch'],
                     'account_no' => $account['account_no'],
                     'current_balance' => $account['current_balance'],
                 ]);
@@ -213,6 +214,7 @@ class CompanyController extends Controller
                 CompanyBankAccount::create([
                     'company_id' => $company->id,
                     'bank_name' => $account['bank_name'],
+                    'branch' => $account['branch'],
                     'account_no' => $account['account_no'],
                     'current_balance' => $account['current_balance'],
                 ]);
@@ -230,6 +232,62 @@ class CompanyController extends Controller
         });
 
         return response()->json($company->fresh()->load(['bankAccounts', 'chequeAccounts']));
+    }
+
+    public function storeBankAccount(Request $request, Company $company)
+    {
+        $validated = $request->validate([
+            'bank_name' => 'required|string|max:255',
+            'branch' => 'nullable|string|max:255',
+            'account_no' => 'required|string|max:100',
+            'current_balance' => 'nullable|numeric|min:0',
+        ]);
+
+        $accountNo = trim((string) $validated['account_no']);
+        $bankName = trim((string) $validated['bank_name']);
+        $branch = trim((string) ($validated['branch'] ?? ''));
+        $openingBalance = (float) ($validated['current_balance'] ?? 0);
+
+        $duplicateExists = CompanyBankAccount::query()
+            ->where('company_id', $company->id)
+            ->whereRaw('LOWER(account_no) = ?', [strtolower($accountNo)])
+            ->exists();
+
+        if ($duplicateExists) {
+            throw new HttpResponseException(response()->json([
+                'message' => 'A bank account with this account number already exists for the selected company.',
+            ], 422));
+        }
+
+        DB::transaction(function () use ($company, $bankName, $branch, $accountNo, $openingBalance) {
+            CompanyBankAccount::create([
+                'company_id' => $company->id,
+                'bank_name' => $bankName,
+                'branch' => $branch !== '' ? $branch : null,
+                'account_no' => $accountNo,
+                'current_balance' => max(0, $openingBalance),
+            ]);
+
+            $totalBankBalance = (float) CompanyBankAccount::query()
+                ->where('company_id', $company->id)
+                ->sum('current_balance');
+
+            $firstBankAccount = CompanyBankAccount::query()
+                ->where('company_id', $company->id)
+                ->orderBy('id')
+                ->first();
+
+            $company->update([
+                'current_bank_balance' => max(0, $totalBankBalance),
+                'bank_name' => $firstBankAccount?->bank_name,
+                'bank_account_no' => $firstBankAccount?->account_no,
+            ]);
+        });
+
+        return response()->json(
+            $company->fresh()->load(['bankAccounts', 'chequeAccounts']),
+            201
+        );
     }
 
     private function normalizeAccounts(mixed $raw): array
@@ -250,6 +308,7 @@ class CompanyController extends Controller
             $row = is_array($row) ? $row : [];
 
             $bankName = trim((string) ($row['bank_name'] ?? ''));
+            $branch = trim((string) ($row['branch'] ?? ''));
             $accountNo = trim((string) ($row['account_no'] ?? ''));
             $currentBalance = (float) ($row['current_balance'] ?? 0);
 
@@ -259,6 +318,7 @@ class CompanyController extends Controller
 
             $validator = Validator::make($row, [
                 'bank_name' => 'required|string|max:255',
+                'branch' => 'nullable|string|max:255',
                 'account_no' => 'required|string|max:100',
                 'current_balance' => 'nullable|numeric|min:0',
             ]);
@@ -274,6 +334,7 @@ class CompanyController extends Controller
 
             $validatedRows[] = [
                 'bank_name' => $bankName,
+                'branch' => $branch !== '' ? $branch : null,
                 'account_no' => $accountNo,
                 'current_balance' => max(0, $currentBalance),
             ];

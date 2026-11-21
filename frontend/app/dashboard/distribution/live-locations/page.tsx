@@ -427,7 +427,7 @@ export default function DistributionLiveLocationsPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-white to-emerald-50">
       <nav className="bg-white/85 backdrop-blur-lg shadow-sm border-b border-white/40">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+        <div className="w-full px-3 sm:px-4 lg:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             {isWidgetVisible('distribution-live-locations-nav-back-button') && <Link href="/dashboard/distribution" className="text-sm font-medium text-gray-700 hover:text-cyan-700">
               ← Back to Distribution
@@ -438,7 +438,7 @@ export default function DistributionLiveLocationsPage() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <main className="w-full px-3 sm:px-4 lg:px-6 py-8 space-y-6">
 
         {isWidgetVisible('distribution-live-locations-hero-card') && <section className="rounded-2xl border border-cyan-100 bg-white/90 shadow-xl p-5">
           <h1 className="text-2xl sm:text-3xl font-bold text-slate-900">Live Ref Location Tracker</h1>

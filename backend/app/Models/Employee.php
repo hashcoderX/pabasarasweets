@@ -19,6 +19,7 @@ class Employee extends Model
         'employee_code',
         'first_name',
         'last_name',
+        'employee_nic',
         'email',
         'mobile',
         'nic_passport',
@@ -45,6 +46,7 @@ class Employee extends Model
         'apit_tax_amount',
         'apit_tax_rate',
         'employee_type',
+        'payment_request_type',
         'status',
         'resigned_at',
         'resignation_reason',
@@ -151,6 +153,11 @@ class Employee extends Model
     public function user(): HasOne
     {
         return $this->hasOne(User::class);
+    }
+
+    public function wallet(): HasOne
+    {
+        return $this->hasOne(EmployeeWallet::class);
     }
 
     public function getFullNameAttribute(): string

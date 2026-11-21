@@ -141,7 +141,7 @@ export default function Branches() {
 
       {/* Navigation */}
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex justify-between h-16">
             <div className="flex items-center">
               <button
@@ -164,7 +164,7 @@ export default function Branches() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center justify-between">

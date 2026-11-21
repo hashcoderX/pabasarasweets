@@ -17,13 +17,6 @@ type HrmModuleCard = {
   accessKeywords: string[];
 };
 
-type HrmQuickActionCard = {
-  id: string;
-  icon: string;
-  title: string;
-  desc: string;
-};
-
 type WidgetVisibilityChange = {
   widget_key: string;
   is_visible: boolean;
@@ -251,6 +244,17 @@ export default function HRM() {
 
   const hrmModules: HrmModuleCard[] = [
     {
+      id: 'hrm-candidates',
+      name: 'Candidates',
+      icon: '🎯',
+      path: '/dashboard/hrm/candidates',
+      description: 'Manage candidate profiles and hiring pipeline',
+      color: 'from-rose-500 to-pink-500',
+      bgColor: 'from-rose-50 to-pink-50',
+      getStats: () => loading ? '...' : 'Candidate Pipeline',
+      accessKeywords: ['view_candidates', 'create_candidates', 'edit_candidates', 'delete_candidates']
+    },
+    {
       id: 'hrm-employees',
       name: 'Employees',
       icon: '👥',
@@ -329,23 +333,14 @@ export default function HRM() {
     },
   ];
 
-  const hrmQuickActions: HrmQuickActionCard[] = [
-    { id: 'hrm-quick-add-employee', icon: '➕', title: 'Add Employee', desc: 'New hire' },
-    { id: 'hrm-quick-view-reports', icon: '📊', title: 'View Reports', desc: 'Analytics' },
-    { id: 'hrm-quick-mark-attendance', icon: '📅', title: 'Mark Attendance', desc: 'Daily check-in' },
-    { id: 'hrm-quick-process-payroll', icon: '💰', title: 'Process Payroll', desc: 'Monthly run' },
-  ];
-
   const hrmExtraWidgets = [
     { id: 'hrm-hero-active-employees', name: 'HRM Hero Active Employees' },
     { id: 'hrm-hero-attendance-rate', name: 'HRM Hero Attendance Rate' },
     { id: 'hrm-hero-departments', name: 'HRM Hero Departments' },
     { id: 'hrm-modules-section', name: 'HRM Modules Section' },
-    { id: 'hrm-quick-actions-section', name: 'HRM Quick Actions Section' },
   ];
   const allHrmWidgetItems = [
     ...hrmModules.map((module) => ({ id: module.id, name: module.name })),
-    ...hrmQuickActions.map((action) => ({ id: action.id, name: action.title })),
     ...hrmExtraWidgets,
   ];
   const isWidgetVisible = (widgetKey: string) => widgetVisibility[widgetKey] !== false;
@@ -366,9 +361,7 @@ export default function HRM() {
     return hasAnyPermission(module.accessKeywords);
   });
 
-  const visibleQuickActions = hrmQuickActions.filter((action) => isWidgetVisible(action.id));
   const isModulesSectionVisible = isWidgetVisible('hrm-modules-section');
-  const isQuickActionsSectionVisible = isWidgetVisible('hrm-quick-actions-section');
   const isHeroActiveEmployeesVisible = isWidgetVisible('hrm-hero-active-employees');
   const isHeroAttendanceRateVisible = isWidgetVisible('hrm-hero-attendance-rate');
   const isHeroDepartmentsVisible = isWidgetVisible('hrm-hero-departments');
@@ -398,7 +391,7 @@ export default function HRM() {
     }
   };
 
-  const allHrmWidgetKeys = [...hrmModules.map((module) => module.id), ...hrmQuickActions.map((action) => action.id)];
+  const allHrmWidgetKeys = [...hrmModules.map((module) => module.id)];
   const hiddenWidgetCount = allHrmWidgetKeys.filter((key) => widgetVisibility[key] === false).length;
 
   const restoreAllHiddenWidgets = async () => {
@@ -635,11 +628,6 @@ export default function HRM() {
     }
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    router.push('/');
-  };
-
   if (!token || !accessReady) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-cyan-50 to-teal-50 flex items-center justify-center">
@@ -657,41 +645,7 @@ export default function HRM() {
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
 
-      {/* Modern Navigation */}
-      <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
-            <div className="flex items-center justify-between sm:justify-start">
-              <Link href="/dashboard" className="flex items-center space-x-2 text-gray-700 hover:text-blue-600 transition-colors duration-300">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-                <span className="font-medium">Back to Dashboard</span>
-              </Link>
-            </div>
-            <div className="flex items-center justify-between sm:justify-end space-x-3 sm:space-x-4">
-              <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                <span>HRM System Active</span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full flex items-center justify-center text-white text-sm font-bold">
-                  HR
-                </div>
-                <span className="font-medium text-gray-900 text-sm sm:text-base">Human Resources</span>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 text-white px-6 py-2 rounded-full text-sm font-medium transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         {/* Hero Section */}
         <div className="text-center mb-12">
           <div className="inline-block p-1 bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full mb-6">
@@ -890,66 +844,6 @@ export default function HRM() {
           <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
             No HRM features are assigned to your role yet. Please contact an administrator.
           </div>
-        )}
-
-        {/* Quick Actions Section */}
-        {isQuickActionsSectionVisible && (
-        <div className="relative mt-12 bg-white/70 backdrop-blur-sm rounded-2xl shadow-xl border border-white/20 overflow-hidden">
-          {!widgetControlsLocked && (
-            <button
-              type="button"
-              onClick={() => stageWidgetVisibilityChange('hrm-quick-actions-section', false)}
-              className="absolute right-3 top-3 z-30 inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-xs font-bold text-slate-600 shadow hover:bg-slate-100"
-              title="Disable this widget"
-              aria-label="Disable Quick Actions Section"
-            >
-              ×
-            </button>
-          )}
-          <div className="bg-gradient-to-r from-blue-500 to-cyan-500 p-6">
-            <div className="flex items-center space-x-3">
-              <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center text-2xl">
-                ⚡
-              </div>
-              <div>
-                <h3 className="text-xl font-bold text-white">Quick Actions</h3>
-                <p className="text-white/80">Frequently used HR operations</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="p-6">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {visibleQuickActions.map((action, index) => (
-                <div
-                  key={index}
-                  className="group relative bg-white/50 hover:bg-white/80 rounded-xl p-4 border border-white/30 hover:border-white/50 transition-all duration-300 cursor-pointer transform hover:scale-105 text-center"
-                >
-                  {!widgetControlsLocked && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        stageWidgetVisibilityChange(action.id, false);
-                      }}
-                      className="absolute right-2 top-2 z-20 inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-300 bg-white/90 text-[11px] font-bold text-slate-600 shadow hover:bg-slate-100"
-                      title="Disable this widget"
-                      aria-label={`Disable ${action.title}`}
-                    >
-                      ×
-                    </button>
-                  )}
-                  <div className="text-2xl mb-2">{action.icon}</div>
-                  <h4 className="font-semibold text-gray-900 group-hover:text-gray-800 transition-colors duration-300 text-sm">
-                    {action.title}
-                  </h4>
-                  <p className="text-xs text-gray-600 group-hover:text-gray-700 transition-colors duration-300">
-                    {action.desc}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
         )}
 
         {showSuperAdminConfirmModal && (

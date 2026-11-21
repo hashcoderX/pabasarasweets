@@ -49,6 +49,16 @@ type DiscountSummaryRow = {
   discountPercent: number;
   totalSoldQty: number;
   invoiceCount: number;
+  totalDiscountAmount: number;
+};
+
+type DiscountMatrixRow = {
+  itemCode: string;
+  itemName: string;
+  qtyByRange: Record<string, number>;
+  amountByRange: Record<string, number>;
+  totalSoldQty: number;
+  totalDiscountAmount: number;
 };
 
 const round2 = (value: number) => Math.round(value * 100) / 100;
@@ -65,6 +75,7 @@ export default function DistributionDiscountReportPage() {
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [discountViewMode, setDiscountViewMode] = useState<'percent' | 'amount'>('percent');
 
   const router = useRouter();
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -247,12 +258,15 @@ export default function DistributionDiscountReportPage() {
 
         const itemCode = String(item.item_code || '-').trim() || '-';
         const itemName = String(item.item_name || 'Unknown Item').trim() || 'Unknown Item';
+        const unitDiscount = Math.max(0, Number(item.discount || 0));
+        const totalDiscountAmount = round2(unitDiscount * qty);
         const discountPercent = getItemDiscountPercent(item);
         const key = `${itemCode}__${itemName}__${discountPercent.toFixed(2)}`;
 
         const existing = map.get(key);
         if (existing) {
           existing.totalSoldQty += qty;
+          existing.totalDiscountAmount = round2(existing.totalDiscountAmount + totalDiscountAmount);
           existing.invoiceIds.add(invoice.id);
           return;
         }
@@ -263,6 +277,7 @@ export default function DistributionDiscountReportPage() {
           discountPercent,
           totalSoldQty: qty,
           invoiceCount: 0,
+          totalDiscountAmount,
           invoiceIds: new Set([invoice.id]),
         });
       });
@@ -275,6 +290,7 @@ export default function DistributionDiscountReportPage() {
         discountPercent: row.discountPercent,
         totalSoldQty: round2(row.totalSoldQty),
         invoiceCount: row.invoiceIds.size,
+        totalDiscountAmount: round2(row.totalDiscountAmount),
       }))
       .sort((a, b) => {
         if (b.totalSoldQty !== a.totalSoldQty) return b.totalSoldQty - a.totalSoldQty;
@@ -289,32 +305,78 @@ export default function DistributionDiscountReportPage() {
       .sort((a, b) => a - b);
   }, [aggregateRows]);
 
-  const filteredRows = useMemo(() => {
-    const term = search.trim().toLowerCase();
+  const discountRangeKeys = useMemo(
+    () => discountOptions.map((value) => Number(value).toFixed(2)),
+    [discountOptions]
+  );
 
-    return aggregateRows.filter((row) => {
-      if (discountFilter !== 'all' && row.discountPercent.toFixed(2) !== Number(discountFilter).toFixed(2)) {
-        return false;
+  const matrixRows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    const selectedDiscountFilter = discountFilter === 'all' ? null : Number(discountFilter);
+    const grouped = new Map<string, DiscountMatrixRow>();
+
+    aggregateRows.forEach((row) => {
+      if (selectedDiscountFilter !== null && Number(row.discountPercent.toFixed(2)) !== Number(selectedDiscountFilter.toFixed(2))) {
+        return;
       }
 
-      if (!term) return true;
+      const itemKey = `${row.itemCode}__${row.itemName}`;
+      if (!grouped.has(itemKey)) {
+        const qtyByRange = discountRangeKeys.reduce<Record<string, number>>((acc, key) => {
+          acc[key] = 0;
+          return acc;
+        }, {});
 
-      const haystack = `${row.itemCode} ${row.itemName} ${row.discountPercent}`.toLowerCase();
-      return haystack.includes(term);
+        const amountByRange = discountRangeKeys.reduce<Record<string, number>>((acc, key) => {
+          acc[key] = 0;
+          return acc;
+        }, {});
+
+        grouped.set(itemKey, {
+          itemCode: row.itemCode,
+          itemName: row.itemName,
+          qtyByRange,
+          amountByRange,
+          totalSoldQty: 0,
+          totalDiscountAmount: 0,
+        });
+      }
+
+      const target = grouped.get(itemKey);
+      if (!target) return;
+
+      const rangeKey = row.discountPercent.toFixed(2);
+      target.qtyByRange[rangeKey] = round2((target.qtyByRange[rangeKey] || 0) + row.totalSoldQty);
+      target.amountByRange[rangeKey] = round2((target.amountByRange[rangeKey] || 0) + row.totalDiscountAmount);
+      target.totalSoldQty = round2(target.totalSoldQty + row.totalSoldQty);
+      target.totalDiscountAmount = round2(target.totalDiscountAmount + row.totalDiscountAmount);
     });
-  }, [aggregateRows, search, discountFilter]);
+
+    return Array.from(grouped.values())
+      .filter((row) => {
+        if (!term) return true;
+        const haystack = `${row.itemCode} ${row.itemName}`.toLowerCase();
+        return haystack.includes(term);
+      })
+      .sort((a, b) => {
+        if (b.totalSoldQty !== a.totalSoldQty) return b.totalSoldQty - a.totalSoldQty;
+        return a.itemName.localeCompare(b.itemName);
+      });
+  }, [aggregateRows, search, discountFilter, discountRangeKeys]);
 
   const summary = useMemo(() => {
-    const uniqueItems = new Set(filteredRows.map((row) => `${row.itemCode}__${row.itemName}`)).size;
-    const totalRows = filteredRows.length;
-    const totalSoldQty = round2(filteredRows.reduce((sum, row) => sum + row.totalSoldQty, 0));
+    const uniqueItems = matrixRows.length;
+    const totalRows = matrixRows.length;
+    const totalSoldQty = round2(matrixRows.reduce((sum, row) => sum + row.totalSoldQty, 0));
+    const totalDiscountAmount = round2(matrixRows.reduce((sum, row) => sum + row.totalDiscountAmount, 0));
 
     return {
       uniqueItems,
       totalRows,
       totalSoldQty,
+      totalDiscountAmount,
     };
-  }, [filteredRows]);
+  }, [matrixRows]);
 
   const formatPercent = (value: number) => {
     const n = round2(value);
@@ -326,20 +388,51 @@ export default function DistributionDiscountReportPage() {
     return Number.isInteger(n) ? n.toFixed(0) : n.toFixed(2);
   };
 
-  const rowToExport = (row: DiscountSummaryRow) => {
+  const formatMoney = (value: number) => {
+    return Number(value || 0).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  };
+
+  const rangeAmountTotals = useMemo(() => {
+    return discountRangeKeys.reduce<Record<string, number>>((acc, rangeKey) => {
+      acc[rangeKey] = round2(
+        matrixRows.reduce((sum, row) => sum + Number(row.amountByRange[rangeKey] || 0), 0)
+      );
+      return acc;
+    }, {});
+  }, [matrixRows, discountRangeKeys]);
+
+  const visibleRangeHeaders = useMemo(() => {
+    if (discountViewMode === 'amount') {
+      return discountRangeKeys.map((rangeKey) => formatMoney(rangeAmountTotals[rangeKey] || 0));
+    }
+    return discountRangeKeys.map((rangeKey) => formatPercent(Number(rangeKey)));
+  }, [discountViewMode, discountRangeKeys, rangeAmountTotals]);
+
+  const rowToExport = (row: DiscountMatrixRow) => {
     return [
       row.itemCode,
       row.itemName,
-      formatPercent(row.discountPercent),
-      formatQty(row.totalSoldQty),
-      String(row.invoiceCount),
+      ...discountRangeKeys.map((rangeKey) =>
+        discountViewMode === 'amount'
+          ? formatMoney(row.amountByRange[rangeKey] || 0)
+          : formatQty(row.qtyByRange[rangeKey] || 0)
+      ),
+      discountViewMode === 'amount' ? formatMoney(row.totalDiscountAmount) : formatQty(row.totalSoldQty),
     ];
   };
 
   const exportCsv = () => {
-    const headers = ['Item Code', 'Item Name', 'Discount %', 'Total Sold Qty', 'Invoice Count'];
+    const headers = [
+      'Item Code',
+      'Item Name',
+      ...discountRangeKeys.map((key, idx) => `${formatPercent(Number(key))} (${visibleRangeHeaders[idx]})`),
+      discountViewMode === 'amount' ? 'Total Discount Amount' : 'Total Sold Qty',
+    ];
 
-    const csvContent = [headers, ...filteredRows.map(rowToExport)]
+    const csvContent = [headers, ...matrixRows.map(rowToExport)]
       .map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
       .join('\n');
 
@@ -366,8 +459,13 @@ export default function DistributionDiscountReportPage() {
 
     autoTable(doc, {
       startY: 90,
-      head: [['Item Code', 'Item', 'Discount %', 'Total Sold Qty', 'Invoice Count']],
-      body: filteredRows.map((row) => rowToExport(row)),
+      head: [[
+        'Item Code',
+        'Item',
+        ...discountRangeKeys.map((key, idx) => `${formatPercent(Number(key))} (${visibleRangeHeaders[idx]})`),
+        discountViewMode === 'amount' ? 'Total Discount Amount' : 'Total Sold Qty',
+      ]],
+      body: matrixRows.map((row) => rowToExport(row)),
       theme: 'grid',
       styles: { fontSize: 8, cellPadding: 4 },
       headStyles: { fillColor: [5, 150, 105] },
@@ -402,7 +500,7 @@ export default function DistributionDiscountReportPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard/reports" className="flex items-center space-x-2 text-gray-700 hover:text-green-600 transition-colors duration-300">
@@ -420,7 +518,7 @@ export default function DistributionDiscountReportPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-8">
           <h1 className="text-3xl md:text-4xl font-bold text-gray-900 mb-2">
             Distribution <span className="bg-gradient-to-r from-green-600 to-teal-600 bg-clip-text text-transparent">Discount Report</span>
@@ -538,33 +636,89 @@ export default function DistributionDiscountReportPage() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">#</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Item Code</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Item</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Discount %</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Total Sold Qty</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">Invoice Count</th>
+                  <th rowSpan={2} className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Item Name</th>
+                  <th rowSpan={2} className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Item Code</th>
+                  <th colSpan={Math.max(discountRangeKeys.length, 1)} className="px-4 py-3 text-center text-xs font-semibold text-gray-700 uppercase">
+                    <div className="flex items-center justify-center gap-2">
+                      <span>Discount Range</span>
+                      <div className="inline-flex rounded-full border border-teal-200 bg-white p-0.5 text-[11px] normal-case tracking-normal">
+                        <button
+                          type="button"
+                          onClick={() => setDiscountViewMode('percent')}
+                          className={`rounded-full px-2 py-0.5 font-semibold transition ${discountViewMode === 'percent' ? 'bg-teal-600 text-white' : 'text-teal-700 hover:bg-teal-50'}`}
+                        >
+                          %
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setDiscountViewMode('amount')}
+                          className={`rounded-full px-2 py-0.5 font-semibold transition ${discountViewMode === 'amount' ? 'bg-teal-600 text-white' : 'text-teal-700 hover:bg-teal-50'}`}
+                        >
+                          Amount
+                        </button>
+                      </div>
+                    </div>
+                  </th>
+                  <th rowSpan={2} className="px-4 py-3 text-right text-xs font-medium text-gray-600 uppercase">
+                    {discountViewMode === 'amount' ? 'Total Discount Amount' : 'Total Sold Qty'}
+                  </th>
+                </tr>
+                <tr>
+                  {discountRangeKeys.length === 0 ? (
+                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-600 uppercase">-</th>
+                  ) : (
+                    discountRangeKeys.map((rangeKey, idx) => (
+                      <th key={rangeKey} className="px-4 py-2 text-right text-xs font-medium text-gray-600 uppercase">
+                        <div>{formatPercent(Number(rangeKey))}</div>
+                        <div className="text-[10px] normal-case tracking-normal text-teal-700">{visibleRangeHeaders[idx]}</div>
+                      </th>
+                    ))
+                  )}
                 </tr>
               </thead>
 
               <tbody className="bg-white divide-y divide-gray-100">
-                {filteredRows.length === 0 ? (
+                {matrixRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-gray-500">No discount-based item sales found.</td>
+                    <td colSpan={Math.max(discountRangeKeys.length, 1) + 3} className="px-4 py-10 text-center text-sm text-gray-500">No discount-based item sales found.</td>
                   </tr>
                 ) : (
-                  filteredRows.map((row, idx) => (
-                    <tr key={`${row.itemCode}-${row.itemName}-${row.discountPercent}-${idx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
-                      <td className="px-4 py-3 text-sm text-gray-700">{idx + 1}</td>
-                      <td className="px-4 py-3 text-sm text-gray-700">{row.itemCode}</td>
+                  matrixRows.map((row, idx) => (
+                    <tr key={`${row.itemCode}-${row.itemName}-${idx}`} className={idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}>
                       <td className="px-4 py-3 text-sm text-gray-900 font-medium">{row.itemName}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{formatPercent(row.discountPercent)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">{formatQty(row.totalSoldQty)}</td>
-                      <td className="px-4 py-3 text-sm text-right text-gray-700">{row.invoiceCount}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700">{row.itemCode}</td>
+                      {discountRangeKeys.map((rangeKey) => (
+                        <td key={`${row.itemCode}-${row.itemName}-${rangeKey}`} className="px-4 py-3 text-sm text-right text-gray-700">
+                          {discountViewMode === 'amount'
+                            ? formatMoney(row.amountByRange[rangeKey] || 0)
+                            : formatQty(row.qtyByRange[rangeKey] || 0)}
+                        </td>
+                      ))}
+                      <td className="px-4 py-3 text-sm text-right text-gray-900 font-semibold">
+                        {discountViewMode === 'amount' ? formatMoney(row.totalDiscountAmount) : formatQty(row.totalSoldQty)}
+                      </td>
                     </tr>
                   ))
                 )}
               </tbody>
+
+              {matrixRows.length > 0 && (
+                <tfoot className="bg-teal-50/70 border-t border-teal-100">
+                  <tr>
+                    <td colSpan={2} className="px-4 py-3 text-sm font-semibold text-teal-700 uppercase">Total</td>
+                    {discountRangeKeys.map((rangeKey) => (
+                      <td key={`total-${rangeKey}`} className="px-4 py-3 text-sm text-right font-semibold text-teal-700">
+                        {discountViewMode === 'amount'
+                          ? formatMoney(matrixRows.reduce((sum, row) => sum + Number(row.amountByRange[rangeKey] || 0), 0))
+                          : formatQty(matrixRows.reduce((sum, row) => sum + Number(row.qtyByRange[rangeKey] || 0), 0))}
+                      </td>
+                    ))}
+                    <td className="px-4 py-3 text-sm text-right font-bold text-teal-800">
+                      {discountViewMode === 'amount' ? formatMoney(summary.totalDiscountAmount) : formatQty(summary.totalSoldQty)}
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </section>

@@ -83,6 +83,79 @@ class DepartmentController extends Controller
         return response()->json($department, 201);
     }
 
+    public function storeDefaultList(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'department_names' => 'required|array|min:1',
+            'department_names.*' => 'required|string|max:255',
+            'tenant_id' => 'nullable|integer|exists:companies,id',
+            'branch_id' => 'nullable|integer|exists:companies,id',
+        ]);
+
+        $defaultCompany = Company::query()->orderBy('id')->first();
+        if (!$defaultCompany) {
+            return response()->json([
+                'message' => 'Cannot save default departments: no company exists. Please create a company first.',
+            ], 422);
+        }
+
+        $tenantId = (int)($validated['tenant_id'] ?? $defaultCompany->id);
+        $branchId = (int)($validated['branch_id'] ?? $tenantId);
+
+        $departmentNames = collect($validated['department_names'])
+            ->map(fn ($name) => trim((string) $name))
+            ->filter(fn ($name) => $name !== '')
+            ->unique(fn ($name) => mb_strtolower($name))
+            ->values();
+
+        if ($departmentNames->isEmpty()) {
+            return response()->json([
+                'message' => 'No valid department names provided.',
+            ], 422);
+        }
+
+        $createdCount = 0;
+        $existingCount = 0;
+
+        DB::transaction(function () use (
+            $departmentNames,
+            $tenantId,
+            $branchId,
+            &$createdCount,
+            &$existingCount
+        ) {
+            foreach ($departmentNames as $departmentName) {
+                $department = Department::firstOrCreate(
+                    [
+                        'tenant_id' => $tenantId,
+                        'name' => $departmentName,
+                    ],
+                    [
+                        'branch_id' => $branchId,
+                        'description' => null,
+                        'is_active' => true,
+                    ]
+                );
+
+                if ($department->wasRecentlyCreated) {
+                    $createdCount++;
+                } else {
+                    $existingCount++;
+                }
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Default department list processed successfully.',
+            'data' => [
+                'total_requested' => $departmentNames->count(),
+                'created_count' => $createdCount,
+                'existing_count' => $existingCount,
+            ],
+        ]);
+    }
+
     /**
      * Display the specified resource.
      */

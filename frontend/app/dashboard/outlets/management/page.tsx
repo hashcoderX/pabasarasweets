@@ -297,7 +297,7 @@ export default function OutletManagementPage() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(139,92,246,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.14),_transparent_24%),linear-gradient(180deg,_#f8f7ff_0%,_#f5f7fb_42%,_#eef2ff_100%)]">
       <nav className="border-b border-white/50 bg-white/70 shadow-sm backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 via-purple-500 to-indigo-500 text-lg text-white shadow-lg shadow-violet-300/50">
@@ -318,7 +318,7 @@ export default function OutletManagementPage() {
         </div>
       </nav>
 
-      <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <div className="w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="mb-8 overflow-hidden rounded-[32px] border border-white/60 bg-white/70 shadow-[0_24px_80px_-40px_rgba(76,29,149,0.45)] backdrop-blur-xl">
           <div className="grid gap-8 px-6 py-7 lg:grid-cols-[1.4fr_0.9fr] lg:px-8">
             <div className="space-y-5">
@@ -346,10 +346,10 @@ export default function OutletManagementPage() {
                   Outlets Home
                 </button>
                 <button
-                  onClick={() => router.push('/dashboard/outlets/sales')}
+                  onClick={() => router.push('/dashboard/orders')}
                   className="rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700 transition hover:bg-indigo-100"
                 >
-                  Outlet Sales Tracking
+                  Order (DO) List
                 </button>
                 <button
                   onClick={openCreate}

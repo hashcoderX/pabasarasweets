@@ -386,6 +386,8 @@ class LoadController extends Controller
                         'sold_qty' => 0.0,
                         'sold_value' => 0.0,
                         'return_qty' => 0.0,
+                        'exchange_return_qty' => 0.0,
+                        'damaged_return_qty' => 0.0,
                         'return_value' => 0.0,
                         'net_qty' => 0.0,
                         'net_value' => 0.0,
@@ -407,35 +409,107 @@ class LoadController extends Controller
             }
         }
 
-        // Returns should match the same load-linked invoices.
-        $returns = $invoiceIds->isEmpty()
-            ? collect([])
-            : \App\Models\DistributionReturn::whereIn('distribution_invoice_id', $invoiceIds->all())
-                ->with([
-                    'customer:id,shop_name,customer_code',
-                    'invoice:id,invoice_number',
-                    'returnedItem:id,name,code,unit',
-                    'exchangeItem:id,name,code,unit',
-                ])
-                ->get([
-                    'id',
-                    'return_number',
-                    'distribution_invoice_id',
-                    'customer_id',
-                    'returned_inventory_item_id',
-                    'exchange_inventory_item_id',
-                    'return_date',
-                    'total_quantity',
-                    'total_amount',
-                    'settlement_type',
-                    'settlement_amount',
-                    'exchange_quantity',
-                    'reason',
-                    'status',
-                    'notes',
-                ]);
+        // Returns should include both invoice-linked records and direct load-linked records.
+        $returnsHasLoadId = Schema::hasColumn('distribution_returns', 'load_id');
+        $returnsQuery = \App\Models\DistributionReturn::query()
+            ->with([
+                'customer:id,shop_name,customer_code',
+                'invoice:id,invoice_number',
+                'returnedItem:id,name,code,unit',
+                'exchangeItem:id,name,code,unit',
+            ]);
+
+        $returnsQuery->where(function ($q) use ($invoiceIds, $load, $returnsHasLoadId) {
+            if (!$invoiceIds->isEmpty()) {
+                $q->whereIn('distribution_invoice_id', $invoiceIds->all());
+            }
+
+            if ($returnsHasLoadId) {
+                if (!$invoiceIds->isEmpty()) {
+                    $q->orWhere('load_id', $load->id);
+                } else {
+                    $q->where('load_id', $load->id);
+                }
+            }
+        });
+
+        $returnColumns = [
+            'id',
+            'return_number',
+            'distribution_invoice_id',
+            'customer_id',
+            'returned_inventory_item_id',
+            'exchange_inventory_item_id',
+            'return_date',
+            'total_quantity',
+            'total_amount',
+            'settlement_type',
+            'settlement_amount',
+            'exchange_quantity',
+            'reason',
+            'status',
+            'notes',
+        ];
+
+        if ($returnsHasLoadId) {
+            $returnColumns[] = 'load_id';
+        }
+
+        $returns = $returnsQuery->get($returnColumns);
 
         foreach ($returns as $return) {
+            $settlementType = strtolower((string) ($return->settlement_type ?? ''));
+            $isExchangeSettlement = $settlementType === 'item_exchange';
+            $isDamagedReason = strtolower((string) ($return->reason ?? '')) === 'damaged_items';
+
+            $lineEntries = $this->resolveReturnLineEntriesFromNotes((string) ($return->notes ?? ''));
+            if (!empty($lineEntries)) {
+                foreach ($lineEntries as $entry) {
+                    $code = trim((string) ($entry['item_code'] ?? ''));
+                    if ($code === '') {
+                        continue;
+                    }
+
+                    if (!isset($itemSales[$code])) {
+                        $itemSales[$code] = [
+                            'item_code' => $code,
+                            'item_name' => trim((string) ($entry['item_name'] ?? '')) !== '' ? trim((string) ($entry['item_name'] ?? '')) : $code,
+                            'unit' => $return->returnedItem?->unit ?? null,
+                            'sold_qty' => 0.0,
+                            'sold_value' => 0.0,
+                            'return_qty' => 0.0,
+                            'exchange_return_qty' => 0.0,
+                            'damaged_return_qty' => 0.0,
+                            'return_value' => 0.0,
+                            'net_qty' => 0.0,
+                            'net_value' => 0.0,
+                            'cost_value' => 0.0,
+                            'profit' => 0.0,
+                        ];
+                    }
+
+                    $entryQty = max(0, (float) ($entry['quantity'] ?? 0));
+                    $entryAmount = max(0, (float) ($entry['amount'] ?? 0));
+                    if ($entryAmount <= 0) {
+                        $entryAmount = $entryQty * max(0, (float) ($entry['unit_price'] ?? 0));
+                    }
+
+                    $isExchange = $isExchangeSettlement || !empty($entry['is_exchange']);
+                    $isDamaged = $isDamagedReason || !empty($entry['is_damaged']);
+
+                    $itemSales[$code]['return_qty'] += $entryQty;
+                    $itemSales[$code]['return_value'] += $entryAmount;
+                    if ($isExchange) {
+                        $itemSales[$code]['exchange_return_qty'] += $entryQty;
+                    }
+                    if ($isDamaged) {
+                        $itemSales[$code]['damaged_return_qty'] += $entryQty;
+                    }
+                }
+
+                continue;
+            }
+
             $code = $return->returnedItem?->code;
             if (!$code) {
                 continue;
@@ -449,6 +523,8 @@ class LoadController extends Controller
                     'sold_qty' => 0.0,
                     'sold_value' => 0.0,
                     'return_qty' => 0.0,
+                    'exchange_return_qty' => 0.0,
+                    'damaged_return_qty' => 0.0,
                     'return_value' => 0.0,
                     'net_qty' => 0.0,
                     'net_value' => 0.0,
@@ -457,8 +533,15 @@ class LoadController extends Controller
                 ];
             }
 
-            $itemSales[$code]['return_qty'] += (float) $return->total_quantity;
+            $fallbackQty = (float) $return->total_quantity;
+            $itemSales[$code]['return_qty'] += $fallbackQty;
             $itemSales[$code]['return_value'] += (float) $return->total_amount;
+            if ($isExchangeSettlement) {
+                $itemSales[$code]['exchange_return_qty'] += $fallbackQty;
+            }
+            if ($isDamagedReason) {
+                $itemSales[$code]['damaged_return_qty'] += $fallbackQty;
+            }
         }
 
         // Map to collection for further calculations.
@@ -519,10 +602,44 @@ class LoadController extends Controller
         ]);
     }
 
+    private function resolveReturnLineEntriesFromNotes(string $notes): array
+    {
+        if (trim($notes) === '') {
+            return [];
+        }
+
+        $entries = [];
+        $lines = preg_split('/\r\n|\r|\n/', $notes) ?: [];
+        foreach ($lines as $line) {
+            $trimmed = trim((string) $line);
+            if (!str_starts_with($trimmed, '- ')) {
+                continue;
+            }
+
+            if (!preg_match('/^-\s*([0-9]+(?:\.[0-9]+)?)\s*x\s*(.*?)\s*\(([^)]+)\)\s*@\s*([0-9]+(?:\.[0-9]+)?)(?:\s*=>\s*amount\s*([0-9]+(?:\.[0-9]+)?))?(.*)$/i', $trimmed, $matches)) {
+                continue;
+            }
+
+            $tail = strtoupper((string) ($matches[6] ?? ''));
+            $entries[] = [
+                'quantity' => (float) ($matches[1] ?? 0),
+                'item_name' => trim((string) ($matches[2] ?? '')),
+                'item_code' => trim((string) ($matches[3] ?? '')),
+                'unit_price' => (float) ($matches[4] ?? 0),
+                'amount' => (float) ($matches[5] ?? 0),
+                'is_damaged' => str_contains($tail, '[DAMAGED]'),
+                'is_exchange' => str_contains($tail, '[EXCHANGE]'),
+            ];
+        }
+
+        return $entries;
+    }
+
     public function complete(Request $request, Load $load): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'add_balance_to_main_stock' => 'required|boolean',
+            'add_collected_cash_to_main_account' => 'nullable|boolean',
         ]);
 
         if ($validator->fails()) {
@@ -534,6 +651,7 @@ class LoadController extends Controller
         }
 
         $addBalanceToMainStock = (bool) $request->boolean('add_balance_to_main_stock');
+        $addCollectedCashToMainAccount = (bool) $request->boolean('add_collected_cash_to_main_account');
 
         if (in_array($load->status, ['delivered', 'cancelled'], true)) {
             return response()->json([
@@ -543,7 +661,7 @@ class LoadController extends Controller
         }
 
         try {
-            DB::transaction(function () use ($load, $addBalanceToMainStock) {
+            DB::transaction(function () use ($request, $load, $addBalanceToMainStock, $addCollectedCashToMainAccount) {
                 $lockedLoad = Load::where('id', $load->id)->lockForUpdate()->firstOrFail();
                 $items = $lockedLoad->loadItems()->lockForUpdate()->get();
 
@@ -628,6 +746,39 @@ class LoadController extends Controller
                 }
 
                 $lockedLoad->update($updatePayload);
+
+                $cashCollectedForLoad = (float) DistributionPayment::query()
+                    ->where('load_id', $lockedLoad->id)
+                    ->whereRaw("LOWER(TRIM(COALESCE(payment_method, ''))) = 'cash'")
+                    ->where(function ($query) {
+                        $query->whereNull('status')
+                            ->orWhereRaw("LOWER(TRIM(status)) != 'closed'");
+                    })
+                    ->sum('amount');
+
+                if ($addCollectedCashToMainAccount && $cashCollectedForLoad > 0) {
+                    if (!Schema::hasTable('delivery_completion_cash_transfers')) {
+                        throw ValidationException::withMessages([
+                            'add_collected_cash_to_main_account' => ['Delivery completion cash transfer table is not available. Please run database migrations.'],
+                        ]);
+                    }
+
+                    DB::table('delivery_completion_cash_transfers')->insert([
+                        'load_id' => $lockedLoad->id,
+                        'load_number' => (string) $lockedLoad->load_number,
+                        'delivery_date' => $deliveryDate->toDateString(),
+                        'amount' => $cashCollectedForLoad,
+                        'status' => 'pending',
+                        'requested_at' => now(),
+                        'requested_by' => $request->user()?->id,
+                        'note' => sprintf(
+                            'Pending transfer from Delivery Cash to Main Cash. Load %s completed.',
+                            $lockedLoad->load_number
+                        ),
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
             });
         } catch (ValidationException $e) {
             return response()->json([
@@ -640,8 +791,12 @@ class LoadController extends Controller
         return response()->json([
             'success' => true,
             'message' => $addBalanceToMainStock
-                ? 'Load completed and remaining vehicle quantities moved to main stock.'
-                : 'Load completed without stock return. Remaining balance is marked in vehicle.',
+                ? ($addCollectedCashToMainAccount
+                    ? 'Load completed, remaining vehicle quantities moved to main stock, and collected cash sent for main account acceptance.'
+                    : 'Load completed and remaining vehicle quantities moved to main stock.')
+                : ($addCollectedCashToMainAccount
+                    ? 'Load completed, and collected cash sent for main account acceptance. Remaining balance is marked in vehicle.'
+                    : 'Load completed without stock return. Remaining balance is marked in vehicle.'),
             'load' => $load->fresh(['vehicle', 'driver', 'salesRef', 'route']),
         ]);
     }

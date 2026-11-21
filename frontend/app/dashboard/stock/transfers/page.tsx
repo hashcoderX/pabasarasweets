@@ -264,7 +264,7 @@ export default function StockTransfersPage() {
       const [itemsRes, outletsRes, transfersRes] = await Promise.all([
         axios.get('/api/stock/inventory', {
           headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 1000 }
+          params: { per_page: 1000, type: 'finished_good', status: 'active' }
         }),
         axios.get('/api/outlets', {
           headers: { Authorization: `Bearer ${token}` },
@@ -277,8 +277,9 @@ export default function StockTransfersPage() {
       ]);
 
       const inventoryItems = itemsRes.data?.success ? (itemsRes.data?.data?.data || itemsRes.data?.data || []) : [];
-      const activeItems = inventoryItems.filter((item: Record<string, unknown>) => String(item.status || '') === 'active');
-      const mappedItems: InventoryItem[] = activeItems.map((item: Record<string, unknown>) => ({
+      const mappedItems: InventoryItem[] = inventoryItems
+        .filter((item: Record<string, unknown>) => Number(item.current_stock) > 0)
+        .map((item: Record<string, unknown>) => ({
         id: item.id,
         name: item.name,
         code: item.code,
@@ -611,7 +612,7 @@ export default function StockTransfersPage() {
         <div className="absolute -bottom-8 left-1/3 w-80 h-80 bg-yellow-200 rounded-full mix-blend-multiply filter blur-2xl animate-pulse"></div>
       </div>
 
-      <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+      <div className="relative z-10 w-full px-3 sm:px-4 lg:px-6 py-8 space-y-6">
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>

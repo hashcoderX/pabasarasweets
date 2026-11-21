@@ -17,9 +17,23 @@ type PendingOfflineReturnPayload = {
   return_number: string;
   customer_id: number;
   distribution_invoice_id: number | null;
+  load_id?: number | null;
   return_date: string;
   total_quantity: number;
   total_amount: number;
+  settlement_type: 'bill_deduction' | 'item_exchange';
+  settlement_amount: number;
+  exchange_inventory_item_id: number | null;
+  exchange_quantity: number;
+  return_lines: Array<{
+    inventory_item_id: number;
+    item_code: string;
+    item_name: string;
+    quantity: number;
+    unit_price: number;
+    amount: number;
+    is_damaged: boolean;
+  }>;
   reason: string;
   status: string;
   notes: string;
@@ -40,6 +54,17 @@ type InventoryOption = {
   item_category?: string;
   stock_type?: string;
   inventory_type?: string;
+  current_stock?: number;
+};
+
+type LoadItemInfo = {
+  id: number;
+  load_id: number;
+  product_code: string;
+  name?: string;
+  qty: number;
+  loaded_qty?: number;
+  sell_price?: number;
 };
 
 type ReturnLineItem = {
@@ -48,12 +73,26 @@ type ReturnLineItem = {
   item_search: string;
   quantity: string;
   amount: string;
+  return_type: 'damage' | 'exchange';
 };
 type SuperAdminModalMode = 'apply' | 'restore' | 'unlock';
 type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
+const RETURNS_PAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+type ReturnsPageCache = {
+  savedAt: number;
+  returns: any[];
+  customers: any[];
+  invoices: any[];
+  inventory: InventoryOption[];
+  allocatedRouteIds: string[] | null;
+};
+
 export default function DistributionReturnsPage() {
   const [token, setToken] = useState('');
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [returns, setReturns] = useState<any[]>([]);
@@ -65,6 +104,8 @@ export default function DistributionReturnsPage() {
   const [showCustomerPicker, setShowCustomerPicker] = useState(false);
   const [highlightedCustomerIndex, setHighlightedCustomerIndex] = useState(-1);
   const [inventory, setInventory] = useState<InventoryOption[]>([]);
+  const [linkedLoadItems, setLinkedLoadItems] = useState<LoadItemInfo[]>([]);
+  const [linkedLoadItemsLoading, setLinkedLoadItemsLoading] = useState(false);
   const [viewReturn, setViewReturn] = useState<any | null>(null);
   const [viewInvoice, setViewInvoice] = useState<any | null>(null);
   const [pendingOfflineReturns, setPendingOfflineReturns] = useState<OfflineQueueEntry<PendingOfflineReturnPayload>[]>([]);
@@ -72,13 +113,18 @@ export default function DistributionReturnsPage() {
   const [isOnline, setIsOnline] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [returnLineItems, setReturnLineItems] = useState<ReturnLineItem[]>([
-    { lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' },
+    { lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '', return_type: 'damage' },
   ]);
   const [activeItemPickerLineId, setActiveItemPickerLineId] = useState<string | null>(null);
   const [highlightedItemIndex, setHighlightedItemIndex] = useState(-1);
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
   const [showSuperAdminConfirmModal, setShowSuperAdminConfirmModal] = useState(false);
+  const [deletingReturnId, setDeletingReturnId] = useState<number | null>(null);
+  const [deleteConfirmReturn, setDeleteConfirmReturn] = useState<any | null>(null);
+  const [selectedReturnIds, setSelectedReturnIds] = useState<number[]>([]);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [superAdminModalMode, setSuperAdminModalMode] = useState<SuperAdminModalMode>('apply');
   const [pendingWidgetChanges, setPendingWidgetChanges] = useState<WidgetVisibilityChange[]>([]);
   const [widgetVisibilitySnapshot, setWidgetVisibilitySnapshot] = useState<Record<string, boolean> | null>(null);
@@ -94,6 +140,7 @@ export default function DistributionReturnsPage() {
   const [returnsFilterCustomerId, setReturnsFilterCustomerId] = useState('all');
   const [returnsFilterDateFrom, setReturnsFilterDateFrom] = useState('');
   const [returnsFilterDateTo, setReturnsFilterDateTo] = useState('');
+  const [fallbackActiveLoadId, setFallbackActiveLoadId] = useState<number | null>(null);
 
   const [form, setForm] = useState({
     return_number: '',
@@ -110,6 +157,7 @@ export default function DistributionReturnsPage() {
   const customerPickerRef = useRef<HTMLDivElement | null>(null);
 
   const router = useRouter();
+  const getReturnsPageCacheKey = (authToken: string) => `distribution_returns_page_cache_${authToken.slice(-16)}`;
 
   const normalizeRouteIds = (routeIdsRaw: unknown): string[] => {
     if (!Array.isArray(routeIdsRaw)) return [];
@@ -129,7 +177,7 @@ export default function DistributionReturnsPage() {
       notes: '',
       inventory_item_id: '',
     });
-    setReturnLineItems([{ lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' }]);
+    setReturnLineItems([{ lineId: `line-${Date.now()}`, inventory_item_id: '', item_search: '', quantity: '', amount: '', return_type: 'damage' }]);
     setActiveItemPickerLineId(null);
     setHighlightedItemIndex(-1);
     setCustomerPickerSearch('');
@@ -313,6 +361,8 @@ export default function DistributionReturnsPage() {
 
     const cachedRouteIdsRaw = window.localStorage.getItem('distribution_assigned_route_ids');
     const cachedRouteId = window.localStorage.getItem('distribution_assigned_route_id');
+    const cachedActiveLoad = Number(window.localStorage.getItem('distribution_active_load_id') || 0);
+    setFallbackActiveLoadId(cachedActiveLoad > 0 ? cachedActiveLoad : null);
 
     if (cachedRouteIdsRaw) {
       try {
@@ -332,12 +382,54 @@ export default function DistributionReturnsPage() {
     }
   }, []);
 
-  useEffect(() => {
-    if (token) {
-      fetchData();
-      fetchWidgetVisibility(token);
+  const hydrateReturnsPageFromCache = useCallback(() => {
+    if (typeof window === 'undefined' || !token) return false;
+
+    try {
+      const raw = window.localStorage.getItem(getReturnsPageCacheKey(token));
+      if (!raw) return false;
+
+      const parsed = JSON.parse(raw) as ReturnsPageCache | null;
+      if (!parsed || !Array.isArray(parsed.returns) || !Array.isArray(parsed.customers) || !Array.isArray(parsed.invoices) || !Array.isArray(parsed.inventory)) {
+        return false;
+      }
+
+      const age = Date.now() - Number(parsed.savedAt || 0);
+      if (age > RETURNS_PAGE_CACHE_TTL_MS) return false;
+
+      setReturns(parsed.returns);
+      setCustomers(parsed.customers);
+      setInvoices(parsed.invoices);
+      setInventory((parsed.inventory as InventoryOption[]).filter((item) => !isRawMaterialInventory(item)));
+      setServerAllocatedRouteIds(parsed.allocatedRouteIds);
+      setForm((prev) => ({ ...prev, return_number: `RET-${Date.now()}` }));
+      setLoading(false);
+      return true;
+    } catch {
+      return false;
     }
   }, [token]);
+
+  const saveReturnsPageToCache = useCallback((payload: Omit<ReturnsPageCache, 'savedAt'>) => {
+    if (typeof window === 'undefined' || !token) return;
+    try {
+      const toSave: ReturnsPageCache = {
+        savedAt: Date.now(),
+        ...payload,
+      };
+      window.localStorage.setItem(getReturnsPageCacheKey(token), JSON.stringify(toSave));
+    } catch {
+      // Cache write failure should never block live data flow.
+    }
+  }, [token]);
+
+  useEffect(() => {
+    if (token) {
+      const hydrated = hydrateReturnsPageFromCache();
+      void fetchData(hydrated);
+      fetchWidgetVisibility(token);
+    }
+  }, [token, hydrateReturnsPageFromCache]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -362,14 +454,15 @@ export default function DistributionReturnsPage() {
     writeOfflineQueue(DISTRIBUTION_OFFLINE_KEYS.returns, pendingOfflineReturns);
   }, [pendingOfflineReturns]);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
-      const profileRes = await axios.get('/api/me', {
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => null);
-
-      const [returnsRes, customersRes, invoicesRes, inventoryRes] = await Promise.all([
+      if (!silent) {
+        setLoading(true);
+      }
+      const [profileRes, returnsRes, customersRes, invoicesRes, inventoryRes] = await Promise.all([
+        axios.get('/api/me', {
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => null),
         axios.get('/api/distribution/returns', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 100 } }),
         axios.get('/api/distribution/customers', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
         axios.get('/api/distribution/invoices', { headers: { Authorization: `Bearer ${token}` }, params: { per_page: 1000 } }),
@@ -377,26 +470,63 @@ export default function DistributionReturnsPage() {
       ]);
 
       const profileRoot = profileRes?.data?.data ?? profileRes?.data ?? {};
+      const employeeId = Number((profileRoot as { employee_id?: unknown; employee?: { id?: unknown } })?.employee_id || (profileRoot as { employee?: { id?: unknown } })?.employee?.id || 0);
+      const roleNames = [
+        String((profileRoot as { role?: unknown })?.role || ''),
+        ...(Array.isArray((profileRoot as { roles?: unknown[] })?.roles)
+          ? ((profileRoot as { roles?: unknown[] }).roles || []).map((role) => {
+              if (typeof role === 'object' && role !== null && 'name' in role) {
+                return String((role as { name?: unknown }).name || '');
+              }
+              return String(role || '');
+            })
+          : []),
+      ]
+        .map((role) => role.trim().toLowerCase())
+        .filter(Boolean);
+      const adminUser = !employeeId || roleNames.includes('super admin') || roleNames.includes('admin');
+      const salesRefUser = !adminUser && (roleNames.includes('sales ref') || roleNames.includes('sales representative') || roleNames.includes('sales_ref'));
+      setIsAdminUser(adminUser);
+      setIsSalesRefUser(salesRefUser);
+
       const allocatedRouteIds = normalizeRouteIds((profileRoot as { allocated_route_ids?: unknown[] })?.allocated_route_ids);
       setServerAllocatedRouteIds(allocatedRouteIds.length > 0 ? allocatedRouteIds : null);
 
-      setReturns(returnsRes.data?.data?.data || []);
-      setCustomers(customersRes.data?.data?.data || []);
-      setInvoices(invoicesRes.data?.data?.data || []);
+      const nextReturns = returnsRes.data?.data?.data || [];
+      const nextCustomers = customersRes.data?.data?.data || [];
+      const nextInvoices = invoicesRes.data?.data?.data || [];
       const inventoryRows = Array.isArray(inventoryRes.data?.data?.data)
         ? inventoryRes.data.data.data
         : Array.isArray(inventoryRes.data?.data)
           ? inventoryRes.data.data
           : [];
-      setInventory((inventoryRows as InventoryOption[]).filter((item) => !isRawMaterialInventory(item)));
+      const nextInventory = (inventoryRows as InventoryOption[]).filter((item) => !isRawMaterialInventory(item));
+
+      setReturns(nextReturns);
+      setCustomers(nextCustomers);
+      setInvoices(nextInvoices);
+      setInventory(nextInventory);
+
+      saveReturnsPageToCache({
+        returns: nextReturns,
+        customers: nextCustomers,
+        invoices: nextInvoices,
+        inventory: nextInventory,
+        allocatedRouteIds: allocatedRouteIds.length > 0 ? allocatedRouteIds : null,
+      });
+
       setForm((prev) => ({ ...prev, return_number: `RET-${Date.now()}` }));
     } catch (error) {
       console.error('Error loading returns data:', error);
-      setReturns([]);
+      if (!silent) {
+        setReturns([]);
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
-  }, [token]);
+  }, [token, saveReturnsPageToCache]);
 
   const effectiveAllocatedRouteIds = useMemo(
     () => serverAllocatedRouteIds ?? assignedRouteIds,
@@ -404,10 +534,11 @@ export default function DistributionReturnsPage() {
   );
 
   const scopedCustomers = useMemo(() => {
-    if (effectiveAllocatedRouteIds.length === 0) return customers;
+    if (isAdminUser) return customers;
+    if (effectiveAllocatedRouteIds.length === 0) return [];
     const routeIdSet = new Set(effectiveAllocatedRouteIds);
     return customers.filter((customer) => routeIdSet.has(String(customer?.route_id || '')));
-  }, [customers, effectiveAllocatedRouteIds]);
+  }, [customers, effectiveAllocatedRouteIds, isAdminUser]);
 
   const selectedCustomer = useMemo(
     () => scopedCustomers.find((customer) => Number(customer?.id) === Number(form.customer_id)) || null,
@@ -435,14 +566,25 @@ export default function DistributionReturnsPage() {
     return map;
   }, [customers]);
 
+  const invoiceById = useMemo(() => {
+    const map = new Map<number, any>();
+    invoices.forEach((invoice) => {
+      map.set(Number(invoice?.id || 0), invoice);
+    });
+    return map;
+  }, [invoices]);
+
   const scopedInvoices = useMemo(() => {
-    if (effectiveAllocatedRouteIds.length === 0) return invoices;
+    if (isAdminUser) return invoices;
+    if (effectiveAllocatedRouteIds.length === 0) return [];
     const routeIdSet = new Set(effectiveAllocatedRouteIds);
     return invoices.filter((invoice) => {
       const routeFromInvoice = String(invoice?.customer?.route_id || customerRouteById.get(Number(invoice?.customer_id)) || '');
       return routeIdSet.has(routeFromInvoice);
     });
-  }, [invoices, effectiveAllocatedRouteIds, customerRouteById]);
+  }, [invoices, effectiveAllocatedRouteIds, customerRouteById, isAdminUser]);
+
+  const isSalesRefWithoutAllocatedRoute = !isAdminUser && effectiveAllocatedRouteIds.length === 0;
 
   const linkedInvoiceOptions = useMemo(() => {
     const selectedCustomerId = Number(form.customer_id || 0);
@@ -457,8 +599,59 @@ export default function DistributionReturnsPage() {
     });
   }, [scopedInvoices, form.customer_id]);
 
+  const selectedLinkedInvoice = useMemo(
+    () => scopedInvoices.find((invoice) => Number(invoice?.id || 0) === Number(form.distribution_invoice_id || 0)) || null,
+    [scopedInvoices, form.distribution_invoice_id]
+  );
+
+  const selectedLoadId = Number(selectedLinkedInvoice?.load_id || 0) || null;
+  const effectiveReturnLoadId = selectedLoadId ?? fallbackActiveLoadId;
+
+  useEffect(() => {
+    const fetchLinkedLoadItems = async () => {
+      if (!token || !effectiveReturnLoadId) {
+        setLinkedLoadItems([]);
+        return;
+      }
+
+      try {
+        setLinkedLoadItemsLoading(true);
+        const res = await axios.get('/api/vehicle-loading/load-items', {
+          headers: { Authorization: `Bearer ${token}` },
+          params: { load_id: effectiveReturnLoadId },
+        });
+        const rows = Array.isArray(res.data) ? res.data : (res.data?.data || []);
+        const mapped = rows.map((item: any) => ({
+          id: Number(item.id),
+          load_id: Number(item.load_id),
+          product_code: String(item.product_code || ''),
+          name: String(item.name || ''),
+          qty: Number(item.qty || 0),
+          loaded_qty: item.loaded_qty !== undefined && item.loaded_qty !== null ? Number(item.loaded_qty) : undefined,
+          sell_price: Number(item.sell_price || 0),
+        })) as LoadItemInfo[];
+        setLinkedLoadItems(mapped);
+      } catch {
+        setLinkedLoadItems([]);
+      } finally {
+        setLinkedLoadItemsLoading(false);
+      }
+    };
+
+    void fetchLinkedLoadItems();
+  }, [token, effectiveReturnLoadId]);
+
+  const linkedLoadItemByCode = useMemo(() => {
+    const map = new Map<string, LoadItemInfo>();
+    linkedLoadItems.forEach((item) => {
+      const code = String(item.product_code || '').trim().toLowerCase();
+      if (code) map.set(code, item);
+    });
+    return map;
+  }, [linkedLoadItems]);
+
   const returnItemOptions = useMemo(
-    () => inventory.filter((item) => !isRawMaterialInventory(item)),
+    () => inventory,
     [inventory]
   );
 
@@ -538,8 +731,19 @@ export default function DistributionReturnsPage() {
     const searchTerm = returnsFilterSearch.trim().toLowerCase();
     const fromDateTime = returnsFilterDateFrom ? new Date(`${returnsFilterDateFrom}T00:00:00`).getTime() : null;
     const toDateTime = returnsFilterDateTo ? new Date(`${returnsFilterDateTo}T23:59:59`).getTime() : null;
+    const activeLoadId = Number(fallbackActiveLoadId || 0);
+    const isRestrictedSalesRefView = isSalesRefUser && !isAdminUser;
 
     return returns.filter((row) => {
+      if (isRestrictedSalesRefView) {
+        if (activeLoadId <= 0) return false;
+        const rowLoadId = Number(row?.load_id || 0);
+        const linkedInvoice = row.invoice || invoiceById.get(Number(row.distribution_invoice_id || 0));
+        const invoiceLoadId = Number(linkedInvoice?.load_id || 0);
+        const belongsToActiveLoad = rowLoadId === activeLoadId || invoiceLoadId === activeLoadId;
+        if (!belongsToActiveLoad) return false;
+      }
+
       const status = String(row?.status || '').trim().toLowerCase();
       if (returnsFilterStatus !== 'all' && status !== returnsFilterStatus.toLowerCase()) return false;
 
@@ -551,7 +755,7 @@ export default function DistributionReturnsPage() {
       if ((fromDateTime !== null || toDateTime !== null) && Number.isNaN(rowDateTime)) return false;
 
       if (!searchTerm) return true;
-      const linkedInvoice = row.invoice || invoices.find((inv) => Number(inv.id) === Number(row.distribution_invoice_id));
+      const linkedInvoice = row.invoice || invoiceById.get(Number(row.distribution_invoice_id || 0));
       const haystack = [
         row?.return_number,
         row?.customer?.shop_name,
@@ -565,7 +769,7 @@ export default function DistributionReturnsPage() {
 
       return haystack.includes(searchTerm);
     });
-  }, [returns, invoices, returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo]);
+  }, [returns, invoiceById, returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo, fallbackActiveLoadId, isSalesRefUser, isAdminUser]);
 
   const returnsTotalPages = useMemo(
     () => Math.max(1, Math.ceil(filteredReturns.length / returnsPageSize)),
@@ -579,11 +783,7 @@ export default function DistributionReturnsPage() {
 
   useEffect(() => {
     setReturnsCurrentPage(1);
-  }, [returns.length]);
-
-  useEffect(() => {
-    setReturnsCurrentPage(1);
-  }, [returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo]);
+  }, [returns.length, returnsFilterSearch, returnsFilterStatus, returnsFilterCustomerId, returnsFilterDateFrom, returnsFilterDateTo]);
 
   const syncOfflineReturns = useCallback(async () => {
     if (!token || syncingOfflineReturns || pendingOfflineReturns.length === 0) return;
@@ -673,14 +873,31 @@ export default function DistributionReturnsPage() {
 
     const normalizedLineItems = validLineItems.map((line) => {
       const selectedItem = inventory.find((item) => Number(item.id) === Number(line.inventory_item_id));
+      const quantity = Number(line.quantity || 0);
+      const amount = Number(line.amount || 0);
+      const unitPrice = quantity > 0 ? amount / quantity : 0;
       return {
         inventory_item_id: Number(line.inventory_item_id),
         item_code: selectedItem ? getInventoryCode(selectedItem) : '',
         item_name: selectedItem?.name || '',
-        quantity: Number(line.quantity || 0),
-        amount: Number(line.amount || 0),
+        quantity,
+        amount,
+        unit_price: unitPrice,
+        is_damaged: line.return_type === 'damage',
       };
     });
+
+    const hasExchangeLines = normalizedLineItems.some((line) => !line.is_damaged);
+    const hasDamageLines = normalizedLineItems.some((line) => line.is_damaged);
+    const exchangeQuantity = normalizedLineItems
+      .filter((line) => !line.is_damaged)
+      .reduce((sum, line) => sum + Number(line.quantity || 0), 0);
+    const damageAmount = normalizedLineItems
+      .filter((line) => line.is_damaged)
+      .reduce((sum, line) => sum + Number(line.amount || 0), 0);
+    const settlementType: 'bill_deduction' | 'item_exchange' = hasExchangeLines && !hasDamageLines
+      ? 'item_exchange'
+      : 'bill_deduction';
 
     const multiItemSection = [
       '[RETURN ITEMS]',
@@ -691,17 +908,37 @@ export default function DistributionReturnsPage() {
       '[/RETURN ITEMS]',
     ].join('\n');
 
-    const mergedNotes = [form.notes?.trim(), multiItemSection].filter(Boolean).join('\n\n');
+    const itemReturnsSection = [
+      '[ITEM RETURNS]',
+      ...normalizedLineItems.map(
+        (line) => `- ${line.quantity.toFixed(2)} x ${line.item_name || line.item_code || '-'} (${line.item_code || '-'}) @ ${line.unit_price.toFixed(2)} => amount ${line.amount.toFixed(2)}${line.is_damaged ? ' [DAMAGED]' : ' [EXCHANGE]'}`
+      ),
+      '[/ITEM RETURNS]',
+    ].join('\n');
+
+    const returnTypeSection = [
+      '[RETURN TYPE]',
+      hasDamageLines && hasExchangeLines ? 'Mixed Return (Damage + Exchange)' : hasExchangeLines ? 'Exchange Return' : 'Damage Return',
+      '[/RETURN TYPE]',
+    ].join('\n');
+
+    const mergedNotes = [form.notes?.trim(), returnTypeSection, multiItemSection, itemReturnsSection].filter(Boolean).join('\n\n');
 
     const payload: PendingOfflineReturnPayload = {
       return_number: form.return_number,
       customer_id: Number(form.customer_id),
       distribution_invoice_id: form.distribution_invoice_id ? Number(form.distribution_invoice_id) : null,
+      load_id: effectiveReturnLoadId,
       returned_inventory_item_id: firstReturnedItemId,
       return_date: form.return_date,
       total_quantity: computedQuantity,
       total_amount: computedAmount,
-      reason: form.reason,
+      settlement_type: settlementType,
+      settlement_amount: hasDamageLines ? damageAmount : 0,
+      exchange_inventory_item_id: null,
+      exchange_quantity: exchangeQuantity,
+      return_lines: normalizedLineItems,
+      reason: form.reason.trim() || (hasDamageLines && hasExchangeLines ? 'mixed_return' : hasExchangeLines ? 'item_exchange' : 'damaged_items'),
       status: form.status,
       notes: mergedNotes,
     };
@@ -741,10 +978,75 @@ export default function DistributionReturnsPage() {
     }
   };
 
+  const deleteReturn = async () => {
+    const returnId = Number(deleteConfirmReturn?.id || 0);
+    if (!returnId || !token) return;
+
+    try {
+      setDeletingReturnId(returnId);
+      await axios.delete(`/api/distribution/returns/${returnId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      await fetchData();
+      setSelectedReturnIds((prev) => prev.filter((id) => id !== returnId));
+      setDeleteConfirmReturn(null);
+    } catch (error: any) {
+      alert(error?.response?.data?.message || 'Failed to delete return');
+    } finally {
+      setDeletingReturnId(null);
+    }
+  };
+
+  const toggleReturnSelection = (id: number) => {
+    setSelectedReturnIds((prev) =>
+      prev.includes(id) ? prev.filter((value) => value !== id) : [...prev, id]
+    );
+  };
+
+  const toggleSelectAllOnPage = () => {
+    const pageIds = pagedReturns.map((row) => Number(row.id)).filter((id) => id > 0);
+    if (pageIds.length === 0) return;
+
+    const allSelected = pageIds.every((id) => selectedReturnIds.includes(id));
+    setSelectedReturnIds((prev) => {
+      if (allSelected) {
+        return prev.filter((id) => !pageIds.includes(id));
+      }
+      const next = new Set(prev);
+      pageIds.forEach((id) => next.add(id));
+      return Array.from(next);
+    });
+  };
+
+  const deleteSelectedReturns = async () => {
+    if (!token || selectedReturnIds.length === 0) return;
+
+    try {
+      setBulkDeleting(true);
+      for (const id of selectedReturnIds) {
+        await axios.delete(`/api/distribution/returns/${id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+      setShowBulkDeleteConfirm(false);
+      setSelectedReturnIds([]);
+      await fetchData();
+    } catch (error: any) {
+      alert(error?.response?.data?.message || 'Failed to delete selected returns');
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  useEffect(() => {
+    const validIds = new Set(returns.map((row) => Number(row?.id || 0)).filter((id) => id > 0));
+    setSelectedReturnIds((prev) => prev.filter((id) => validIds.has(id)));
+  }, [returns]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-sm border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-3 h-auto">
             <div className="flex items-center justify-between sm:justify-start gap-3">
               <div className="flex items-center gap-3">
@@ -764,13 +1066,23 @@ export default function DistributionReturnsPage() {
               >
                 Back to Distribution
               </Link>}
-              {!widgetControlsLocked && isWidgetVisible('distribution-returns-nav-back-button') && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-nav-back-button', false)} className="ml-2 rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
             </div>
           </div>
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8 space-y-6">
+      {!loading && isSalesRefWithoutAllocatedRoute ? (
+        <main className="w-full py-8 px-3 sm:px-4 lg:px-6">
+          <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900">
+            <h2 className="text-base font-semibold">Returns Hidden For Security</h2>
+            <p className="mt-1">
+              No allocated route was found for this sales ref account, so returns access is blocked. Please contact admin to assign a route.
+            </p>
+          </section>
+        </main>
+      ) : (
+
+      <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
 
         {isWidgetVisible('distribution-returns-offline-status-card') && <section className={`rounded-xl border px-4 py-3 ${isOnline ? 'border-emerald-200 bg-emerald-50' : 'border-amber-200 bg-amber-50'}`}>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-sm">
@@ -780,7 +1092,7 @@ export default function DistributionReturnsPage() {
             <div className="flex items-center gap-2"><p className="text-xs font-semibold text-gray-700">
               Pending offline returns: {pendingOfflineReturns.length}
               {syncingOfflineReturns ? ' (syncing...)' : ''}
-            </p>{!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-offline-status-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}</div>
+            </p></div>
           </div>
         </section>}
 
@@ -800,7 +1112,6 @@ export default function DistributionReturnsPage() {
             >
               Add Return
             </button>
-            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-actions-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
           </div>
         </section>}
 
@@ -810,7 +1121,17 @@ export default function DistributionReturnsPage() {
               <h2 className="text-sm font-semibold text-gray-900">Return records</h2>
               <p className="text-xs text-gray-500">Browse all distribution returns.</p>
             </div>
-            {!widgetControlsLocked && <button type="button" onClick={() => stageWidgetVisibilityChange('distribution-returns-records-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button>}
+            <div className="flex items-center gap-2">
+              {selectedReturnIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowBulkDeleteConfirm(true)}
+                  className="rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100"
+                >
+                  Delete Selected ({selectedReturnIds.length})
+                </button>
+              )}
+            </div>
           </div>
           <div className="border-b border-gray-100 px-4 py-3 sm:px-6">
             <div className="grid grid-cols-1 gap-2 md:grid-cols-5">
@@ -877,6 +1198,14 @@ export default function DistributionReturnsPage() {
             <table className="min-w-full divide-y divide-gray-200">
               {isWidgetVisible('distribution-returns-records-table-headings') && <thead className="bg-gray-50">
                 <tr>
+                  <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">
+                    <input
+                      type="checkbox"
+                      checked={pagedReturns.length > 0 && pagedReturns.every((row) => selectedReturnIds.includes(Number(row.id)))}
+                      onChange={toggleSelectAllOnPage}
+                      className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                    />
+                  </th>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Return</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Customer</th>
                   <th className="px-4 py-2 text-left text-xs text-gray-500 uppercase">Invoice</th>
@@ -890,17 +1219,25 @@ export default function DistributionReturnsPage() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-gray-500">Loading...</td>
+                    <td colSpan={9} className="px-4 py-8 text-center text-gray-500">Loading...</td>
                   </tr>
                 ) : filteredReturns.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-8 text-center text-gray-500">No returns match the filters.</td>
+                    <td colSpan={9} className="px-4 py-8 text-center text-gray-500">No returns match the filters.</td>
                   </tr>
                 ) : (
                   pagedReturns.map((row) => {
                     const linkedInvoice = row.invoice || invoices.find((inv) => Number(inv.id) === Number(row.distribution_invoice_id));
                     return (
                       <tr key={row.id} className="hover:bg-gray-50">
+                        <td className="px-4 py-2 text-sm text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={selectedReturnIds.includes(Number(row.id))}
+                            onChange={() => toggleReturnSelection(Number(row.id))}
+                            className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+                          />
+                        </td>
                         <td className="px-4 py-2 text-sm text-gray-700">{row.return_number}</td>
                         <td className="px-4 py-2 text-sm text-gray-700">{row.customer?.shop_name || '-'}</td>
                         <td className="px-4 py-2 text-sm text-gray-700">
@@ -922,13 +1259,23 @@ export default function DistributionReturnsPage() {
                         <td className="px-4 py-2 text-sm text-gray-700">{row.status}</td>
                         <td className="px-4 py-2 text-sm text-gray-700 text-right">
                           {isWidgetVisible('distribution-returns-records-row-actions') && (
-                          <button
-                            type="button"
-                            onClick={() => setViewReturn(row)}
-                            className="px-3 py-1 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
-                          >
-                            View
-                          </button>
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setViewReturn(row)}
+                                className="px-3 py-1 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+                              >
+                                View
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleteConfirmReturn(row)}
+                                disabled={deletingReturnId === Number(row.id)}
+                                className="px-3 py-1 text-xs rounded-md border border-red-300 text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                {deletingReturnId === Number(row.id) ? 'Deleting...' : 'Delete'}
+                              </button>
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -972,37 +1319,60 @@ export default function DistributionReturnsPage() {
           )}
         </section>}
       </main>
+      )}
 
       {isWidgetVisible('distribution-returns-create-modal-pane') && showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
-          <div className="w-full max-w-5xl rounded-xl border border-gray-200 bg-white p-4 shadow-2xl max-h-[92vh] overflow-y-auto">
-            <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-0 sm:items-center sm:p-3">
+          <div className="h-[100dvh] w-full overflow-y-auto rounded-none border-0 bg-white shadow-xl sm:h-auto sm:max-h-[92vh] sm:max-w-5xl sm:rounded-2xl sm:border sm:border-slate-200">
+            <div className="sticky top-0 z-10 border-b border-slate-200 bg-white px-4 py-4 sm:px-5">
+              <div className="flex items-start justify-between gap-3">
               {isWidgetVisible('distribution-returns-create-modal-heading') && <div>
-                <h3 className="text-lg font-semibold text-gray-900">Add Return</h3>
-                <p className="text-xs text-gray-500">Link a return to a customer and optionally to an invoice and item.</p>
+                <h3 className="text-lg font-semibold text-slate-900">Add Return</h3>
+                <p className="text-xs text-slate-600">Link a return to a customer, choose return type, and add one or more items.</p>
               </div>}
               <button
                 type="button"
                 onClick={() => setShowCreateModal(false)}
-                className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
                 Close
               </button>
             </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] sm:text-[11px]">
+                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700">
+                  Type: {returnLineItems.some((line) => line.return_type === 'damage') && returnLineItems.some((line) => line.return_type === 'exchange')
+                    ? 'Mixed'
+                    : returnLineItems.some((line) => line.return_type === 'exchange')
+                      ? 'Exchange'
+                      : 'Damage'}
+                </span>
+                <span className="rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 font-semibold text-cyan-700">
+                  Items: {returnLineItems.length}
+                </span>
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold text-slate-700">
+                  Qty: {returnLineItems.reduce((sum, line) => sum + Number(line.quantity || 0), 0).toFixed(2)}
+                </span>
+              </div>
+            </div>
 
-            <form onSubmit={createReturn} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
+            <form onSubmit={createReturn} className="space-y-4 p-3 sm:p-5">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+                <div className="mb-3">
+                  <h4 className="text-sm font-semibold text-slate-900">Return Header</h4>
+                  <p className="text-xs text-slate-500">Basic return details and customer linkage.</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Return Number</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Return Number</label>
                   <input
                     value={form.return_number}
                     onChange={(e) => setForm({ ...form, return_number: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                     required
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Customer</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Customer</label>
                   <div ref={customerPickerRef} className="relative">
                     <input
                       type="text"
@@ -1054,7 +1424,7 @@ export default function DistributionReturnsPage() {
                         }
                       }}
                       placeholder="Type customer name or code"
-                      className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                      className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                       required
                     />
                     <input type="hidden" value={form.customer_id} required />
@@ -1095,55 +1465,66 @@ export default function DistributionReturnsPage() {
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Linked Invoice (optional)</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Linked Invoice (optional)</label>
                   <select
                     value={form.distribution_invoice_id}
                     onChange={(e) => setForm({ ...form, distribution_invoice_id: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                   >
                     <option value="">Select Invoice</option>
                     {linkedInvoiceOptions.map((invoice) => (
                       <option key={invoice.id} value={invoice.id}>{invoice.invoice_number}</option>
                     ))}
                   </select>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    {effectiveReturnLoadId
+                      ? linkedLoadItemsLoading
+                        ? 'Loading allocated load details...'
+                        : `${selectedLoadId ? 'Allocated' : 'Active'} Load #${effectiveReturnLoadId} loaded for availability preview. Item search includes all finished products.`
+                      : `Item search includes all finished products (${returnItemOptions.length}).`}
+                  </p>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Return Date</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Return Date</label>
                   <input
                     type="date"
                     value={form.return_date}
                     onChange={(e) => setForm({ ...form, return_date: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                     required
                   />
                 </div>
               </div>
+              </div>
 
-              <div className="rounded-lg border border-gray-200 p-3">
-                <div className="mb-2 flex items-center justify-between">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm sm:p-4">
+                <div className="mb-3 flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center">
                   <div>
-                    <h4 className="text-sm font-semibold text-gray-900">Return Items</h4>
-                    <p className="text-xs text-gray-500">Add one or more items to this return bill.</p>
+                    <h4 className="text-sm font-semibold text-slate-900">Return Items</h4>
+                    <p className="text-xs text-slate-500">Add one or more items to this return bill.</p>
                   </div>
                   <button
                     type="button"
                     onClick={() =>
                       setReturnLineItems((prev) => [
                         ...prev,
-                        { lineId: `line-${Date.now()}-${prev.length}`, inventory_item_id: '', item_search: '', quantity: '', amount: '' },
+                        { lineId: `line-${Date.now()}-${prev.length}`, inventory_item_id: '', item_search: '', quantity: '', amount: '', return_type: 'damage' },
                       ])
                     }
-                    className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-100"
+                    className="rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
                   >
                     + Add Item
                   </button>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   {returnLineItems.map((line, index) => (
-                    <div key={line.lineId} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end rounded-md border border-gray-200 p-2">
-                      <div className="md:col-span-6">
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Item</label>
+                    <div key={line.lineId} className="grid grid-cols-1 gap-2 rounded-xl border border-slate-200 bg-slate-50 p-2.5 md:grid-cols-12 md:items-end">
+                      <div className="md:col-span-5">
+                        <div className="mb-1 flex items-center gap-2">
+                          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-cyan-100 text-[10px] font-bold text-cyan-700">{index + 1}</span>
+                          <label className="block text-xs font-medium text-slate-700">Item</label>
+                        </div>
                         <div className="relative">
                           <input
                             type="text"
@@ -1212,7 +1593,7 @@ export default function DistributionReturnsPage() {
                                 setHighlightedItemIndex(-1);
                               }
                             }}
-                            className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                             placeholder="Select Item"
                             required={index === 0}
                           />
@@ -1245,7 +1626,16 @@ export default function DistributionReturnsPage() {
                                     }}
                                     className={`block w-full px-3 py-2 text-left text-sm ${isHighlighted ? 'bg-emerald-50 text-emerald-900' : 'text-gray-800 hover:bg-gray-50'}`}
                                   >
-                                    {getInventoryLabel(item)}
+                                    <div className="font-medium">{getInventoryLabel(item)}</div>
+                                    {(() => {
+                                      const loadEntry = linkedLoadItemByCode.get(getInventoryCode(item).toLowerCase());
+                                      if (!loadEntry) return null;
+                                      return (
+                                        <div className="mt-0.5 text-[11px] text-slate-500">
+                                          Load Available: {Number(loadEntry.qty || 0).toFixed(2)}
+                                        </div>
+                                      );
+                                    })()}
                                   </button>
                                 );
                               })}
@@ -1260,7 +1650,7 @@ export default function DistributionReturnsPage() {
                         </div>
                       </div>
                       <div className="md:col-span-2">
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Qty</label>
+                        <label className="mb-1 block text-xs font-medium text-slate-700">Qty</label>
                         <input
                           type="number"
                           min="0"
@@ -1271,13 +1661,13 @@ export default function DistributionReturnsPage() {
                               prev.map((row) => (row.lineId === line.lineId ? { ...row, quantity: e.target.value } : row))
                             )
                           }
-                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                           placeholder="0.00"
                           required={index === 0}
                         />
                       </div>
-                      <div className="md:col-span-3">
-                        <label className="block text-xs font-medium text-gray-700 mb-1">Amount</label>
+                      <div className="md:col-span-2">
+                        <label className="mb-1 block text-xs font-medium text-slate-700">Amount</label>
                         <input
                           type="number"
                           min="0"
@@ -1288,10 +1678,29 @@ export default function DistributionReturnsPage() {
                               prev.map((row) => (row.lineId === line.lineId ? { ...row, amount: e.target.value } : row))
                             )
                           }
-                          className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
                           placeholder="0.00"
                           required={index === 0}
                         />
+                      </div>
+                      <div className="md:col-span-2">
+                        <label className="mb-1 block text-xs font-medium text-slate-700">Return Type</label>
+                        <select
+                          value={line.return_type}
+                          onChange={(e) =>
+                            setReturnLineItems((prev) =>
+                              prev.map((row) =>
+                                row.lineId === line.lineId
+                                  ? { ...row, return_type: e.target.value as 'damage' | 'exchange' }
+                                  : row
+                              )
+                            )
+                          }
+                          className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-cyan-400 focus:outline-none focus:ring-4 focus:ring-cyan-100"
+                        >
+                          <option value="damage">Damage</option>
+                          <option value="exchange">Exchange</option>
+                        </select>
                       </div>
                       <div className="md:col-span-1">
                         <button
@@ -1302,7 +1711,7 @@ export default function DistributionReturnsPage() {
                             )
                           }
                           disabled={returnLineItems.length === 1}
-                          className="w-full rounded-md border border-red-200 bg-red-50 px-2 py-2 text-xs font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="w-full rounded-xl border border-rose-200 bg-rose-50 px-2 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           Remove
                         </button>
@@ -1312,33 +1721,33 @@ export default function DistributionReturnsPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3 sm:gap-4">
+              <div className="grid grid-cols-1 gap-3 sm:gap-4 md:grid-cols-4">
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Total Quantity</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Total Quantity</label>
                   <input
                     type="number"
                     step="0.01"
                     value={returnLineItems.reduce((sum, line) => sum + Number(line.quantity || 0), 0).toFixed(2)}
-                    className="w-full rounded-md border border-gray-300 bg-gray-50 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-emerald-200 bg-emerald-50 text-sm font-semibold text-emerald-800 px-3 py-2"
                     readOnly
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Total Amount</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Total Amount</label>
                   <input
                     type="number"
                     step="0.01"
                     value={returnLineItems.reduce((sum, line) => sum + Number(line.amount || 0), 0).toFixed(2)}
-                    className="w-full rounded-md border border-gray-300 bg-gray-50 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-cyan-200 bg-cyan-50 text-sm font-semibold text-cyan-800 px-3 py-2"
                     readOnly
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Status</label>
                   <select
                     value={form.status}
                     onChange={(e) => setForm({ ...form, status: e.target.value })}
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                   >
                     <option value="pending">Pending</option>
                     <option value="approved">Approved</option>
@@ -1347,37 +1756,37 @@ export default function DistributionReturnsPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 items-end">
+              <div className="grid grid-cols-1 items-end gap-3 sm:gap-4 md:grid-cols-3">
                 <div className="md:col-span-1">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Reason</label>
                   <input
                     value={form.reason}
                     onChange={(e) => setForm({ ...form, reason: e.target.value })}
                     placeholder="Reason for return"
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                   />
                 </div>
                 <div className="md:col-span-1">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Notes</label>
+                  <label className="mb-1 block text-xs font-medium text-slate-700">Notes</label>
                   <input
                     value={form.notes}
                     onChange={(e) => setForm({ ...form, notes: e.target.value })}
                     placeholder="Additional details"
-                    className="w-full rounded-md border border-gray-300 text-sm text-black px-2 py-2"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-100"
                   />
                 </div>
-                {isWidgetVisible('distribution-returns-create-modal-action-buttons') && <div className="md:col-span-1 flex justify-end gap-2">
+                {isWidgetVisible('distribution-returns-create-modal-action-buttons') && <div className="md:col-span-1 flex flex-col-reverse justify-end gap-2 sm:flex-row">
                   <button
                     type="button"
                     onClick={() => setShowCreateModal(false)}
-                    className="w-full md:w-auto rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 sm:w-auto"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={saving}
-                    className="w-full md:w-auto bg-green-600 text-white rounded-md px-4 py-2 text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+                    className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:from-emerald-700 hover:to-teal-700 disabled:opacity-50 sm:w-auto"
                   >
                     {saving ? 'Saving...' : 'Record Return'}
                   </button>
@@ -1579,6 +1988,66 @@ export default function DistributionReturnsPage() {
                 className="px-3 py-1.5 text-xs rounded-md border border-gray-300 text-gray-700 hover:bg-gray-100"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteConfirmReturn && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-3">
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-900">Delete Return</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Delete return <span className="font-semibold text-gray-900">{deleteConfirmReturn.return_number || `#${deleteConfirmReturn.id}`}</span>?
+              This action cannot be undone.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmReturn(null)}
+                disabled={deletingReturnId === Number(deleteConfirmReturn.id)}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteReturn}
+                disabled={deletingReturnId === Number(deleteConfirmReturn.id)}
+                className="rounded-md border border-red-300 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {deletingReturnId === Number(deleteConfirmReturn.id) ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBulkDeleteConfirm && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-3">
+          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-900">Delete Selected Returns</h3>
+            <p className="mt-2 text-sm text-gray-600">
+              Delete <span className="font-semibold text-gray-900">{selectedReturnIds.length}</span> selected return record(s)?
+              This action cannot be undone.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteConfirm(false)}
+                disabled={bulkDeleting}
+                className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelectedReturns}
+                disabled={bulkDeleting}
+                className="rounded-md border border-red-300 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {bulkDeleting ? 'Deleting...' : 'Delete Selected'}
               </button>
             </div>
           </div>

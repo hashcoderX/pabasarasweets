@@ -64,6 +64,7 @@ Route::post('/logout', [AuthController::class, 'logout'])->middleware('auth:sanc
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('companies', CompanyController::class);
+    Route::post('companies/{company}/bank-accounts', [CompanyController::class, 'storeBankAccount']);
     Route::apiResource('sales-targets', \App\Http\Controllers\SalesTargetController::class);
     Route::get('petty-cash-transactions', [\App\Http\Controllers\PettyCashTransactionController::class, 'index']);
     Route::post('petty-cash-transactions', [\App\Http\Controllers\PettyCashTransactionController::class, 'store']);
@@ -74,6 +75,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('main-cash-transactions', [\App\Http\Controllers\MainCashTransactionController::class, 'index']);
     Route::post('main-cash-transactions', [\App\Http\Controllers\MainCashTransactionController::class, 'store']);
     Route::delete('main-cash-transactions/{id}', [\App\Http\Controllers\MainCashTransactionController::class, 'destroy']);
+    Route::get('main-cash-transactions/pending-outlet-transfers', [\App\Http\Controllers\MainCashTransactionController::class, 'pendingOutletTransfers']);
+    Route::post('main-cash-transactions/pending-outlet-transfers/{id}/accept', [\App\Http\Controllers\MainCashTransactionController::class, 'acceptOutletTransfer']);
+    Route::post('main-cash-transactions/pending-outlet-transfers/{id}/reject', [\App\Http\Controllers\MainCashTransactionController::class, 'rejectOutletTransfer']);
+    Route::get('outlet-cash-drawer-transfers/pending', [\App\Http\Controllers\MainCashTransactionController::class, 'pendingOutletTransfers']);
+    Route::post('outlet-cash-drawer-transfers/{id}/accept', [\App\Http\Controllers\MainCashTransactionController::class, 'acceptOutletTransfer']);
+    Route::post('outlet-cash-drawer-transfers/{id}/reject', [\App\Http\Controllers\MainCashTransactionController::class, 'rejectOutletTransfer']);
+    Route::get('delivery-completion-cash-transfers/pending', [\App\Http\Controllers\MainCashTransactionController::class, 'pendingDeliveryCompletionCashTransfers']);
+    Route::post('delivery-completion-cash-transfers/{id}/accept', [\App\Http\Controllers\MainCashTransactionController::class, 'acceptDeliveryCompletionCashTransfer']);
+    Route::post('delivery-completion-cash-transfers/{id}/reject', [\App\Http\Controllers\MainCashTransactionController::class, 'rejectDeliveryCompletionCashTransfer']);
+    Route::get('advance-payments', [\App\Http\Controllers\AdvancePaymentController::class, 'index']);
+    Route::post('advance-payments', [\App\Http\Controllers\AdvancePaymentController::class, 'store']);
+    Route::delete('advance-payments/{id}', [\App\Http\Controllers\AdvancePaymentController::class, 'destroy']);
     Route::get('cheque-registry', [\App\Http\Controllers\ChequeRegistryController::class, 'index']);
     Route::post('cheque-registry/register', [\App\Http\Controllers\ChequeRegistryController::class, 'registerReceived']);
     Route::post('cheque-registry/{id}/deposit', [\App\Http\Controllers\ChequeRegistryController::class, 'deposit']);
@@ -92,11 +105,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // HRM Routes
     Route::prefix('hr')->group(function () {
+        Route::post('departments/save-default-list', [DepartmentController::class, 'storeDefaultList']);
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('designations', DesignationController::class);
         Route::apiResource('employees', EmployeeController::class);
         Route::post('employees/{employee}/resign', [EmployeeController::class, 'resign']);
         Route::post('employees/{employee}/reset-password', [EmployeeController::class, 'resetPassword']);
+        Route::post('employees/{employee}/wallet', [EmployeeController::class, 'createWallet']);
         Route::apiResource('candidates', CandidateController::class);
         // Candidate nested resources
         Route::get('candidates/{candidate}/documents', [CandidateDocumentController::class, 'index']);
@@ -187,9 +202,19 @@ Route::middleware('auth:sanctum')->group(function () {
     // Outlets Management Routes
     Route::apiResource('outlets', \App\Http\Controllers\OutletController::class);
     Route::get('outlets/{outlet}/stock-report', [\App\Http\Controllers\OutletController::class, 'stockReport']);
+    Route::get('orders', [\App\Http\Controllers\OrderController::class, 'index']);
+    Route::post('orders', [\App\Http\Controllers\OrderController::class, 'store']);
+    Route::post('orders/{orderId}/accept', [\App\Http\Controllers\OrderController::class, 'acceptOrder']);
+    Route::post('orders/{orderId}/reject', [\App\Http\Controllers\OrderController::class, 'rejectOrder']);
+    Route::post('orders/{orderId}/create-do', [\App\Http\Controllers\OrderController::class, 'createDoFromOrder']);
+    Route::post('orders/{orderId}/create-invoice', [\App\Http\Controllers\OrderController::class, 'createInvoiceFromOrder']);
     Route::get('outlet-pos/me', [\App\Http\Controllers\OutletPosController::class, 'me']);
     Route::get('outlet-pos/sales', [\App\Http\Controllers\OutletPosController::class, 'index']);
     Route::post('outlet-pos/sales', [\App\Http\Controllers\OutletPosController::class, 'store']);
+    Route::post('outlet-pos/orders/{orderId}/accept', [\App\Http\Controllers\OutletPosController::class, 'acceptOrder']);
+    Route::post('outlet-pos/orders/{orderId}/reject', [\App\Http\Controllers\OutletPosController::class, 'rejectOrder']);
+    Route::post('outlet-pos/orders/{orderId}/create-do', [\App\Http\Controllers\OutletPosController::class, 'createDoFromOrder']);
+    Route::post('outlet-pos/orders/{orderId}/create-invoice', [\App\Http\Controllers\OutletPosController::class, 'createInvoiceFromOrder']);
     Route::post('outlet-pos/cash-drawer-balance', [\App\Http\Controllers\OutletPosController::class, 'setCashDrawerBalance']);
     Route::get('outlet-pos/cash-drawer-status', [\App\Http\Controllers\OutletPosController::class, 'cashDrawerStatus']);
     Route::post('outlet-pos/cash-drawer-open', [\App\Http\Controllers\OutletPosController::class, 'openCashDrawer']);
@@ -255,11 +280,16 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Distribution Routes
     Route::apiResource('distribution/customers', \App\Http\Controllers\DistributionCustomerController::class);
+    Route::apiResource('distribution/dos', \App\Http\Controllers\DistributionDoController::class)->only(['index', 'store', 'show']);
+    Route::get('distribution/dos/{do}/receipt', [\App\Http\Controllers\DistributionDoController::class, 'receipt']);
     Route::get('distribution/invoices/{invoice}/receipt', [\App\Http\Controllers\DistributionInvoiceController::class, 'receipt']);
     Route::apiResource('distribution/invoices', \App\Http\Controllers\DistributionInvoiceController::class);
     Route::apiResource('distribution/returns', \App\Http\Controllers\DistributionReturnController::class);
-    Route::apiResource('distribution/payments', \App\Http\Controllers\DistributionPaymentController::class);
+    Route::get('distribution/payments/pending-bank-transfers', [\App\Http\Controllers\DistributionPaymentController::class, 'pendingBankTransfers']);
+    Route::post('distribution/payments/{id}/accept-main-account', [\App\Http\Controllers\DistributionPaymentController::class, 'acceptPendingBankTransfer']);
+    Route::post('distribution/payments/{id}/reject-main-account', [\App\Http\Controllers\DistributionPaymentController::class, 'rejectPendingBankTransfer']);
     Route::post('distribution/payments/bulk', [\App\Http\Controllers\DistributionPaymentController::class, 'bulkStore']);
+    Route::apiResource('distribution/payments', \App\Http\Controllers\DistributionPaymentController::class);
     Route::get('distribution/live-locations', [\App\Http\Controllers\DistributionLiveLocationController::class, 'index']);
     Route::post('distribution/live-locations/ping', [\App\Http\Controllers\DistributionLiveLocationController::class, 'ping']);
 

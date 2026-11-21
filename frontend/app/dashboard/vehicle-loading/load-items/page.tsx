@@ -872,7 +872,7 @@ export default function LoadItemsPage() {
   return (
     <div className="relative min-h-screen p-6">
       <div className="absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_26%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_55%,_#f8fafc_100%)]" />
-      <div className="max-w-7xl mx-auto">
+      <div className="w-full">
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm mb-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>

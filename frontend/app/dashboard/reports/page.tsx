@@ -28,6 +28,7 @@ export default function ReportsPage() {
   const [reportPermission, setReportPermission] = useState(false);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
+  const [widgetControlsLocked, setWidgetControlsLocked] = useState(false);
   const [widgetToggleLoadingKey, setWidgetToggleLoadingKey] = useState('');
   const router = useRouter();
   const apiClient = createApiClient();
@@ -96,9 +97,11 @@ export default function ReportsPage() {
             headers: { Authorization: `Bearer ${token}` },
           });
           setWidgetVisibility(widgetRes.data?.data?.widgets || {});
+          setWidgetControlsLocked(Boolean(widgetRes.data?.data?.widget_controls_locked));
         } catch (widgetError) {
           console.error('Error fetching report widget visibility:', widgetError);
           setWidgetVisibility({});
+          setWidgetControlsLocked(false);
         }
 
         if (!adminUser && !hasReportPermission && !isSalesRef) {
@@ -193,7 +196,6 @@ export default function ReportsPage() {
         bgColor: 'from-indigo-50 to-blue-50',
         reports: [
           { name: 'Vehicle Loading Report', description: 'Load schedules, routes, and quantities', icon: '🧾', path: '/dashboard/reports/vehicle-loading' },
-          { name: 'Vehicle Loading Full Valuation Report', description: 'Load value by vehicle and route', icon: '📊', path: '/dashboard/reports/vehicle-loading/valuation' },
         ],
       },
       {
@@ -325,7 +327,7 @@ export default function ReportsPage() {
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:items-center h-auto sm:h-16 py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <Link href="/dashboard" className="flex items-center space-x-2 text-gray-700 hover:text-rose-600 transition-colors duration-300">
@@ -354,7 +356,7 @@ export default function ReportsPage() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
         <div className="text-center mb-10">
           <div className="inline-block p-1 bg-gradient-to-r from-rose-500 to-orange-500 rounded-full mb-6">
             <div className="bg-white rounded-full p-4">
@@ -396,16 +398,18 @@ export default function ReportsPage() {
                     <p className="text-white/85 text-sm">{category.reports.length} reports available in this category</p>
                   </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setReportWidgetVisibility(`reports-category-${category.name}`, false)}
-                    disabled={widgetToggleLoadingKey === `reports-category-${category.name}`}
-                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/50 bg-white/20 text-lg font-bold text-white transition hover:bg-white/30 disabled:opacity-60"
-                    title="Hide this report widget"
-                    aria-label={`Hide ${category.name}`}
-                  >
-                    {widgetToggleLoadingKey === `reports-category-${category.name}` ? '...' : '×'}
-                  </button>
+                  {!widgetControlsLocked && (
+                    <button
+                      type="button"
+                      onClick={() => setReportWidgetVisibility(`reports-category-${category.name}`, false)}
+                      disabled={widgetToggleLoadingKey === `reports-category-${category.name}`}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/50 bg-white/20 text-lg font-bold text-white transition hover:bg-white/30 disabled:opacity-60"
+                      title="Hide this report widget"
+                      aria-label={`Hide ${category.name}`}
+                    >
+                      {widgetToggleLoadingKey === `reports-category-${category.name}` ? '...' : '×'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -434,19 +438,21 @@ export default function ReportsPage() {
                         <span className="inline-flex items-center rounded-full bg-white/80 border border-white text-[10px] font-semibold px-2 py-1 text-gray-700">
                           {report.comingSoon ? 'Planned' : 'Live'}
                         </span>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setReportWidgetVisibility(`reports-card-${category.name}-${report.name}`, false);
-                          }}
-                          disabled={widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}`}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white bg-white/80 text-xs font-bold text-gray-600 hover:bg-white disabled:opacity-60"
-                          title="Hide this report card"
-                          aria-label={`Hide ${report.name}`}
-                        >
-                          {widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}` ? '...' : '×'}
-                        </button>
+                        {!widgetControlsLocked && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setReportWidgetVisibility(`reports-card-${category.name}-${report.name}`, false);
+                            }}
+                            disabled={widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}`}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white bg-white/80 text-xs font-bold text-gray-600 hover:bg-white disabled:opacity-60"
+                            title="Hide this report card"
+                            aria-label={`Hide ${report.name}`}
+                          >
+                            {widgetToggleLoadingKey === `reports-card-${category.name}-${report.name}` ? '...' : '×'}
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>

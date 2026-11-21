@@ -45,6 +45,11 @@ type SalesTargetCache = {
   rows: SalesTargetPreview[];
 };
 
+type CompanyRow = {
+  id?: number;
+  name?: string;
+};
+
 type WidgetVisibilityChange = {
   widget_key: string;
   is_visible: boolean;
@@ -61,6 +66,33 @@ type BrowserConnectionInfo = {
   addEventListener?: (type: 'change', listener: () => void) => void;
   removeEventListener?: (type: 'change', listener: () => void) => void;
 };
+
+type UiAlertModalState = {
+  open: boolean;
+  title: string;
+  message: string;
+};
+
+const backgroundParticles = [
+  { left: '6%', top: '14%', size: 10, delay: '0s', duration: '10s' },
+  { left: '18%', top: '72%', size: 8, delay: '1.5s', duration: '11s' },
+  { left: '31%', top: '24%', size: 7, delay: '0.8s', duration: '9s' },
+  { left: '42%', top: '82%', size: 9, delay: '2.2s', duration: '12s' },
+  { left: '55%', top: '18%', size: 6, delay: '1.1s', duration: '9.5s' },
+  { left: '66%', top: '68%', size: 10, delay: '0.2s', duration: '13s' },
+  { left: '74%', top: '30%', size: 8, delay: '2.8s', duration: '10.5s' },
+  { left: '83%', top: '78%', size: 7, delay: '1.9s', duration: '11.5s' },
+  { left: '90%', top: '20%', size: 9, delay: '0.6s', duration: '12.5s' },
+];
+
+const DASHBOARD_RECENT_ROUTES_KEY = 'dashboard_recent_routes_v1';
+const DASHBOARD_RECENT_ROUTES_MAX = 8;
+const DASHBOARD_ACCESS_CACHE_PREFIX = 'dashboard_access_cache_';
+const DASHBOARD_ACCESS_CACHE_MAX_ROLES = 40;
+const DASHBOARD_ACCESS_CACHE_MAX_PERMISSIONS = 220;
+const SIDEBAR_WIDGET_VISIBILITY_CACHE_KEY = 'dashboard_sidebar_widget_visibility_v1';
+const SIDEBAR_WIDGET_CONTROLS_LOCKED_KEY = 'dashboard_widget_controls_locked_v1';
+const SIDEBAR_WIDGET_STATE_CHANGED_EVENT = 'dashboard-widget-controls-updated';
 
 const getConnectionStrength = (connection?: BrowserConnectionInfo | null): NetworkStrength => {
   if (!connection) return 'normal';
@@ -97,19 +129,79 @@ export default function Dashboard() {
   const [superAdminEmail, setSuperAdminEmail] = useState('');
   const [superAdminPassword, setSuperAdminPassword] = useState('');
   const [superAdminConfirmLoading, setSuperAdminConfirmLoading] = useState(false);
+  const [showLockedWidgetControlsModal, setShowLockedWidgetControlsModal] = useState(false);
   const [isSalesRefUser, setIsSalesRefUser] = useState(false);
   const [salesTargets, setSalesTargets] = useState<SalesTargetPreview[]>([]);
   const [targetsLoading, setTargetsLoading] = useState(false);
+  const [companyDisplayName, setCompanyDisplayName] = useState('Ceylon-ERP');
+  const [navigatingPath, setNavigatingPath] = useState<string | null>(null);
   const [loggedUserName, setLoggedUserName] = useState('User');
   const [loggedUserId, setLoggedUserId] = useState('-');
   const [isNetworkOnline, setIsNetworkOnline] = useState(true);
   const [networkStrength, setNetworkStrength] = useState<NetworkStrength>('normal');
+  const [uiAlertModal, setUiAlertModal] = useState<UiAlertModalState>({
+    open: false,
+    title: '',
+    message: '',
+  });
   const router = useRouter();
   const apiClient = createApiClient();
   const syncInFlightRef = useRef(false);
+  const hasPrefetchedRoutesRef = useRef(false);
 
   const getAccessCacheKey = (authToken: string) => `dashboard_access_cache_${authToken.slice(-16)}`;
   const getSalesTargetCacheKey = (authToken: string) => `dashboard_sales_targets_cache_${authToken.slice(-16)}`;
+
+  const compactAccessCachePayload = (payload: DashboardAccessCache): DashboardAccessCache => ({
+    ...payload,
+    userRoles: Array.isArray(payload.userRoles)
+      ? payload.userRoles.slice(0, DASHBOARD_ACCESS_CACHE_MAX_ROLES)
+      : [],
+    userPermissions: Array.isArray(payload.userPermissions)
+      ? payload.userPermissions.slice(0, DASHBOARD_ACCESS_CACHE_MAX_PERMISSIONS)
+      : [],
+  });
+
+  const writeAccessCacheSafely = (authToken: string, payload: DashboardAccessCache) => {
+    if (!authToken || typeof window === 'undefined') return;
+
+    const cacheKey = getAccessCacheKey(authToken);
+    const compactPayload = compactAccessCachePayload(payload);
+    const minimalPayload: DashboardAccessCache = {
+      ...compactPayload,
+      userRoles: compactPayload.userRoles.slice(0, 10),
+      userPermissions: [],
+    };
+
+    const attempts = [payload, compactPayload, minimalPayload];
+
+    for (const candidate of attempts) {
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(candidate));
+        return;
+      } catch {
+        // Try next, smaller payload.
+      }
+    }
+
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+        const key = localStorage.key(i);
+        if (!key || key === cacheKey) continue;
+        if (key.startsWith(DASHBOARD_ACCESS_CACHE_PREFIX)) {
+          localStorage.removeItem(key);
+        }
+      }
+
+      localStorage.setItem(cacheKey, JSON.stringify(minimalPayload));
+    } catch {
+      try {
+        localStorage.removeItem(cacheKey);
+      } catch {
+        // Ignore final cache cleanup errors.
+      }
+    }
+  };
 
   useEffect(() => {
     const storedToken = localStorage.getItem('token');
@@ -220,38 +312,35 @@ export default function Dashboard() {
           const controlsLocked = Boolean(widgetRes.data?.data?.widget_controls_locked);
           setWidgetVisibility(widgetMap);
           setWidgetControlsLocked(controlsLocked);
-          localStorage.setItem(
-            getAccessCacheKey(token),
-            JSON.stringify({
-              savedAt: Date.now(),
-              userRoles: Array.from(new Set(roleNames)),
-              userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
-              isAdminUser: adminUser,
-              isSalesRefUser: salesRefUser,
-              userDisplayName: resolvedDisplayName,
-              userDisplayId: resolvedDisplayId,
-              widgetVisibility: widgetMap,
-              widgetControlsLocked: controlsLocked,
-            } satisfies DashboardAccessCache),
-          );
+          localStorage.setItem(SIDEBAR_WIDGET_VISIBILITY_CACHE_KEY, JSON.stringify(widgetMap));
+          localStorage.setItem(SIDEBAR_WIDGET_CONTROLS_LOCKED_KEY, controlsLocked ? '1' : '0');
+          window.dispatchEvent(new Event(SIDEBAR_WIDGET_STATE_CHANGED_EVENT));
+          writeAccessCacheSafely(token, {
+            savedAt: Date.now(),
+            userRoles: Array.from(new Set(roleNames)),
+            userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
+            isAdminUser: adminUser,
+            isSalesRefUser: salesRefUser,
+            userDisplayName: resolvedDisplayName,
+            userDisplayId: resolvedDisplayId,
+            widgetVisibility: widgetMap,
+            widgetControlsLocked: controlsLocked,
+          } satisfies DashboardAccessCache);
         } catch (widgetError) {
           console.error('Error fetching widget visibility:', widgetError);
           setWidgetVisibility({});
           setWidgetControlsLocked(false);
-          localStorage.setItem(
-            getAccessCacheKey(token),
-            JSON.stringify({
-              savedAt: Date.now(),
-              userRoles: Array.from(new Set(roleNames)),
-              userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
-              isAdminUser: adminUser,
-              isSalesRefUser: salesRefUser,
-              userDisplayName: resolvedDisplayName,
-              userDisplayId: resolvedDisplayId,
-              widgetVisibility: {},
-              widgetControlsLocked: false,
-            } satisfies DashboardAccessCache),
-          );
+          writeAccessCacheSafely(token, {
+            savedAt: Date.now(),
+            userRoles: Array.from(new Set(roleNames)),
+            userPermissions: Array.from(new Set(permissionNames.filter(Boolean))),
+            isAdminUser: adminUser,
+            isSalesRefUser: salesRefUser,
+            userDisplayName: resolvedDisplayName,
+            userDisplayId: resolvedDisplayId,
+            widgetVisibility: {},
+            widgetControlsLocked: false,
+          } satisfies DashboardAccessCache);
         }
       } catch (error) {
         console.error('Error fetching dashboard access profile:', error);
@@ -315,6 +404,33 @@ export default function Dashboard() {
     };
 
     fetchSalesTargetPreview();
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const fetchCompanyName = async () => {
+      try {
+        const response = await apiClient.get('/companies', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const companies: CompanyRow[] = Array.isArray(response.data)
+          ? response.data
+          : Array.isArray(response.data?.data)
+            ? response.data.data
+            : [];
+
+        const companyName = String(companies[0]?.name || '').trim();
+        if (companyName) {
+          setCompanyDisplayName(companyName);
+        }
+      } catch (error) {
+        console.error('Error loading company name for dashboard:', error);
+      }
+    };
+
+    void fetchCompanyName();
   }, [token]);
 
   useEffect(() => {
@@ -469,12 +585,12 @@ export default function Dashboard() {
     },
     {
       id: 'purchasing',
-      name: 'Purchasing',
+      name: 'Purchasing / Procurement',
       icon: '🛒',
       color: 'from-cyan-500 to-blue-500',
       bgColor: 'from-cyan-50 to-blue-50',
       path: '/dashboard/purchasing',
-      accessKeywords: ['purchasing', 'purchesing', 'purchase', 'grn'],
+      accessKeywords: ['purchasing', 'procurement', 'purchesing', 'purchase', 'grn'],
     },
     {
       id: 'outlets',
@@ -616,6 +732,70 @@ export default function Dashboard() {
   const isSettingsConfigurationVisible = isWidgetVisible('settings-configuration');
   const isSettingsConfigurationNoteVisible = isWidgetVisible('settings-configuration-note');
 
+  useEffect(() => {
+    if (!accessReady || hasPrefetchedRoutesRef.current) return;
+    hasPrefetchedRoutesRef.current = true;
+
+    const defaultPaths = [
+      '/dashboard/reports',
+      '/dashboard/distribution',
+      '/dashboard/stock',
+      '/dashboard/purchasing',
+      '/dashboard/reports/distribution/sales',
+      '/dashboard/hrm/sales-targets',
+    ];
+
+    let recentPaths: string[] = [];
+    try {
+      const raw = localStorage.getItem(DASHBOARD_RECENT_ROUTES_KEY);
+      recentPaths = raw ? (JSON.parse(raw) as string[]) : [];
+      if (!Array.isArray(recentPaths)) recentPaths = [];
+    } catch {
+      recentPaths = [];
+    }
+
+    const modulePaths = visibleModules
+      .map((module) => module.path)
+      .filter((path): path is string => Boolean(path));
+
+    const paths = Array.from(new Set([...modulePaths, ...defaultPaths, ...recentPaths])).filter((path) => path !== '/dashboard');
+
+    const prefetchWork = () => {
+      paths.forEach((path) => {
+        try {
+          router.prefetch(path);
+        } catch {
+          // Ignore prefetch failures to keep navigation resilient.
+        }
+      });
+    };
+
+    setTimeout(prefetchWork, 0);
+  }, [accessReady, router, visibleModules]);
+
+  const rememberRecentRoute = (path: string) => {
+    try {
+      const raw = localStorage.getItem(DASHBOARD_RECENT_ROUTES_KEY);
+      const prev = raw ? (JSON.parse(raw) as string[]) : [];
+      const safePrev = Array.isArray(prev) ? prev : [];
+      const next = [path, ...safePrev.filter((entry) => entry !== path)].slice(0, DASHBOARD_RECENT_ROUTES_MAX);
+      localStorage.setItem(DASHBOARD_RECENT_ROUTES_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore localStorage failures.
+    }
+  };
+
+  const navigateFast = (path: string) => {
+    setNavigatingPath(path);
+    rememberRecentRoute(path);
+    try {
+      router.prefetch(path);
+    } catch {
+      // Ignore prefetch failures and continue navigation.
+    }
+    router.push(path);
+  };
+
   const openSuperAdminConfirmation = (
     changes: WidgetVisibilityChange[] = [],
     mode: SuperAdminModalMode = 'apply'
@@ -657,17 +837,16 @@ export default function Dashboard() {
     setWidgetVisibilitySnapshot(null);
     setSuperAdminModalMode('apply');
     try {
+      localStorage.setItem(SIDEBAR_WIDGET_CONTROLS_LOCKED_KEY, '1');
+      window.dispatchEvent(new Event(SIDEBAR_WIDGET_STATE_CHANGED_EVENT));
       if (!token) return;
       const raw = localStorage.getItem(getAccessCacheKey(token));
       const cached = raw ? (JSON.parse(raw) as DashboardAccessCache) : null;
       if (cached) {
-        localStorage.setItem(
-          getAccessCacheKey(token),
-          JSON.stringify({
-            ...cached,
-            widgetControlsLocked: true,
-          } satisfies DashboardAccessCache),
-        );
+        writeAccessCacheSafely(token, {
+          ...cached,
+          widgetControlsLocked: true,
+        } satisfies DashboardAccessCache);
       }
     } catch (cacheError) {
       console.error('Error caching widget control lock state:', cacheError);
@@ -685,17 +864,16 @@ export default function Dashboard() {
     setSuperAdminEmail('');
     setSuperAdminPassword('');
     try {
+      localStorage.setItem(SIDEBAR_WIDGET_CONTROLS_LOCKED_KEY, '0');
+      window.dispatchEvent(new Event(SIDEBAR_WIDGET_STATE_CHANGED_EVENT));
       if (!token) return;
       const raw = localStorage.getItem(getAccessCacheKey(token));
       const cached = raw ? (JSON.parse(raw) as DashboardAccessCache) : null;
       if (cached) {
-        localStorage.setItem(
-          getAccessCacheKey(token),
-          JSON.stringify({
-            ...cached,
-            widgetControlsLocked: false,
-          } satisfies DashboardAccessCache),
-        );
+        writeAccessCacheSafely(token, {
+          ...cached,
+          widgetControlsLocked: false,
+        } satisfies DashboardAccessCache);
       }
     } catch (cacheError) {
       console.error('Error caching widget control unlock state:', cacheError);
@@ -706,7 +884,7 @@ export default function Dashboard() {
     if (superAdminModalMode !== 'apply') return;
     if (!pendingWidgetChanges.length) return;
     if (!superAdminEmail.trim() || !superAdminPassword) {
-      alert('Please enter Super Admin email and password.');
+      openUiAlertModal('Super Admin Required', 'Please enter Super Admin email and password.');
       return;
     }
 
@@ -729,13 +907,15 @@ export default function Dashboard() {
         );
       }
 
-      setWidgetVisibility((prev) => {
-        const next = { ...prev };
-        pendingWidgetChanges.forEach((change) => {
-          next[change.widget_key] = change.is_visible;
-        });
-        return next;
+      const visibilityPatch: Record<string, boolean> = {};
+      pendingWidgetChanges.forEach((change) => {
+        visibilityPatch[change.widget_key] = change.is_visible;
       });
+      setWidgetVisibility((prev) => ({
+        ...prev,
+        ...visibilityPatch,
+      }));
+      syncSidebarVisibilityPatch(visibilityPatch);
 
       setShowSuperAdminConfirmModal(false);
       setPendingWidgetChanges([]);
@@ -745,7 +925,7 @@ export default function Dashboard() {
       lockWidgetControls();
     } catch (error) {
       console.error('Error applying widget visibility changes:', error);
-      alert('Super Admin confirmation failed or widget update failed.');
+      openUiAlertModal('Widget Update Failed', 'Super Admin confirmation failed or widget update failed.');
     } finally {
       setSuperAdminConfirmLoading(false);
     }
@@ -753,7 +933,7 @@ export default function Dashboard() {
 
   const showRestoreWidgetList = () => {
     if (!superAdminEmail.trim() || !superAdminPassword) {
-      alert('Please enter Super Admin email and password.');
+      openUiAlertModal('Super Admin Required', 'Please enter Super Admin email and password.');
       return;
     }
     setRestoreWidgetListVisible(true);
@@ -762,7 +942,7 @@ export default function Dashboard() {
   const unlockWidgetControls = async () => {
     if (superAdminModalMode !== 'unlock') return;
     if (!superAdminEmail.trim() || !superAdminPassword) {
-      alert('Please enter Super Admin email and password.');
+      openUiAlertModal('Super Admin Required', 'Please enter Super Admin email and password.');
       return;
     }
 
@@ -787,7 +967,10 @@ export default function Dashboard() {
       unlockWidgetControlsInState();
     } catch (error) {
       console.error('Error unlocking widget controls:', error);
-      alert('Failed to unlock widget controls. Please verify Super Admin credentials and try again.');
+      openUiAlertModal(
+        'Unlock Failed',
+        'Failed to unlock widget controls. Please verify Super Admin credentials and try again.'
+      );
     } finally {
       setSuperAdminConfirmLoading(false);
     }
@@ -795,7 +978,7 @@ export default function Dashboard() {
 
   const restoreHiddenWidgetOneByOne = async (widgetKey: string) => {
     if (!superAdminEmail.trim() || !superAdminPassword) {
-      alert('Please enter Super Admin email and password.');
+      openUiAlertModal('Super Admin Required', 'Please enter Super Admin email and password.');
       return;
     }
 
@@ -819,10 +1002,14 @@ export default function Dashboard() {
         ...prev,
         [widgetKey]: true,
       }));
+      syncSidebarVisibilityPatch({ [widgetKey]: true });
       setPendingWidgetChanges((prev) => prev.filter((change) => change.widget_key !== widgetKey));
     } catch (error) {
       console.error('Error restoring widget:', error);
-      alert('Failed to restore widget. Please verify Super Admin credentials and try again.');
+      openUiAlertModal(
+        'Restore Failed',
+        'Failed to restore widget. Please verify Super Admin credentials and try again.'
+      );
     } finally {
       setRestoreWidgetLoadingKey(null);
     }
@@ -858,13 +1045,43 @@ export default function Dashboard() {
     });
   };
 
+  const openUiAlertModal = (title: string, message: string) => {
+    setUiAlertModal({
+      open: true,
+      title,
+      message,
+    });
+  };
+
+  const closeUiAlertModal = () => {
+    setUiAlertModal((prev) => ({
+      ...prev,
+      open: false,
+    }));
+  };
+
+  const syncSidebarVisibilityPatch = (patch: Record<string, boolean>) => {
+    try {
+      const raw = localStorage.getItem(SIDEBAR_WIDGET_VISIBILITY_CACHE_KEY);
+      const current = raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+      const next = {
+        ...(current && typeof current === 'object' ? current : {}),
+        ...patch,
+      };
+      localStorage.setItem(SIDEBAR_WIDGET_VISIBILITY_CACHE_KEY, JSON.stringify(next));
+      window.dispatchEvent(new Event(SIDEBAR_WIDGET_STATE_CHANGED_EVENT));
+    } catch {
+      // Ignore sidebar cache sync issues.
+    }
+  };
+
   const restoreHiddenWidgetsAfterFix = () => {
     const hiddenKeys = allWidgetItems
       .map((card) => card.id)
       .filter((cardId) => widgetVisibility[cardId] === false);
 
     if (hiddenKeys.length === 0) {
-      alert('All widgets are already visible.');
+      openUiAlertModal('Nothing to Restore', 'All widgets are already visible.');
       return;
     }
 
@@ -900,19 +1117,28 @@ export default function Dashboard() {
 
   const handleModuleClick = (module: DashboardModule) => {
     if (module.path) {
-      router.push(module.path);
+      navigateFast(module.path);
       return;
     }
 
     if (module.comingSoon) {
-      alert(`${module.name} module coming soon!`);
+      openUiAlertModal('Coming Soon', `${module.name} module coming soon!`);
     }
   };
 
   if (!token || !accessReady) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-purple-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600"></div>
+      <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-purple-50 px-3 sm:px-4 lg:px-6 py-8">
+        <div className="mx-auto w-full space-y-6 animate-pulse">
+          <div className="h-16 rounded-2xl border border-white/60 bg-white/70" />
+          <div className="h-40 rounded-2xl border border-white/60 bg-white/70" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            <div className="h-48 rounded-2xl border border-white/60 bg-white/70" />
+            <div className="h-48 rounded-2xl border border-white/60 bg-white/70" />
+            <div className="h-48 rounded-2xl border border-white/60 bg-white/70" />
+            <div className="h-48 rounded-2xl border border-white/60 bg-white/70" />
+          </div>
+        </div>
       </div>
     );
   }
@@ -925,19 +1151,59 @@ export default function Dashboard() {
         <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
         <div className="absolute -bottom-8 left-40 w-72 h-72 bg-purple-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
       </div>
+      <div className="absolute inset-0 pointer-events-none overflow-hidden">
+        {backgroundParticles.map((particle, index) => (
+          <span
+            key={`bg-particle-${index}`}
+            className="absolute rounded-full bg-white/40 shadow-[0_0_18px_rgba(236,72,153,0.22)]"
+            style={{
+              left: particle.left,
+              top: particle.top,
+              width: `${particle.size}px`,
+              height: `${particle.size}px`,
+              animationName: 'dashboardFloat',
+              animationDuration: particle.duration,
+              animationDelay: particle.delay,
+              animationIterationCount: 'infinite',
+              animationTimingFunction: 'ease-in-out',
+            }}
+          />
+        ))}
+      </div>
+
+      {navigatingPath && (
+        <div className="fixed inset-0 z-[85] bg-white/75 backdrop-blur-[2px]">
+          <div className="h-full w-full px-3 sm:px-4 lg:px-6 py-8">
+            <div className="mx-auto w-full space-y-5 animate-pulse">
+              <div className="h-10 w-52 rounded-lg bg-slate-200" />
+              <div className="h-6 w-80 max-w-full rounded bg-slate-200" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="h-36 rounded-xl bg-slate-200" />
+                <div className="h-36 rounded-xl bg-slate-200" />
+                <div className="h-36 rounded-xl bg-slate-200" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modern Navigation */}
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="w-full px-3 sm:px-4 lg:px-6">
           <div className="flex flex-col sm:flex-row justify-between sm:h-16 h-auto py-3 sm:py-0 gap-3 sm:gap-0">
             <div className="flex items-center justify-between sm:justify-start">
               <div className="flex-shrink-0 flex items-center space-x-3">
                 <div className="w-8 h-8 bg-gradient-to-r from-red-500 to-pink-500 rounded-lg flex items-center justify-center">
                   <span className="text-white font-bold text-sm">BMS</span>
                 </div>
-                <h1 className="text-gray-900 text-lg sm:text-xl font-bold bg-gradient-to-r from-red-600 to-pink-600 bg-clip-text text-transparent">
-                  Business Management System
-                </h1>
+                <div>
+                  <h1 className="text-gray-900 text-lg sm:text-xl font-bold bg-gradient-to-r from-red-600 to-pink-600 bg-clip-text text-transparent">
+                    Ceylon-ERP
+                  </h1>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500">
+                    Welcome to {companyDisplayName}
+                  </p>
+                </div>
               </div>
             </div>
             <div className="flex items-center justify-between sm:justify-end space-x-3 sm:space-x-4">
@@ -966,93 +1232,56 @@ export default function Dashboard() {
         </div>
       </nav>
 
-      <main className="relative z-10 max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
-        {/* Hero Section */}
-        <div className="text-center mb-12">
-          <div className="inline-block p-1 bg-gradient-to-r from-red-500 to-pink-500 rounded-full mb-6">
-            <div className="bg-white rounded-full p-4">
-              <span className="text-4xl">🚀</span>
-            </div>
-          </div>
-          <h2 className="text-4xl md:text-5xl font-bold text-gray-900 mb-4">
-            Welcome to <span className="bg-gradient-to-r from-red-600 to-pink-600 bg-clip-text text-transparent">BMS</span>
-          </h2>
-          <p className="text-lg sm:text-xl text-gray-600 max-w-3xl mx-auto leading-relaxed px-1">
-            Transform your business operations with our comprehensive management suite.
-            Streamline processes, boost productivity, and drive growth with intelligent automation.
-          </p>
-          <div className="flex flex-col sm:flex-row items-center justify-center mt-6 gap-2 sm:space-x-4">
-            <div className="flex items-center space-x-2 text-sm text-gray-500">
-              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span>All Systems Operational</span>
-            </div>
-            <div className="flex items-center space-x-2 text-sm text-gray-500">
-              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-              <span>Real-time Updates</span>
-            </div>
-          </div>
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-            {!widgetControlsLocked && hiddenWidgetCount > 0 && (
+      <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
+        <div className="mb-6 flex flex-wrap items-center justify-end gap-2">
+          {!widgetControlsLocked && hiddenWidgetCount > 0 && (
+            <button
+              type="button"
+              onClick={restoreAllHiddenWidgets}
+              className="rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+            >
+              Restore Hidden Widgets ({hiddenWidgetCount})
+            </button>
+          )}
+          {!widgetControlsLocked && (
+            <button
+              type="button"
+              onClick={openLockWidgetsAfterUnlock}
+              className="rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+            >
+              Lock Widgets
+            </button>
+          )}
+          {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (
+            <>
               <button
                 type="button"
-                onClick={restoreAllHiddenWidgets}
-                className="rounded-full border border-red-300 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
+                onClick={() => openSuperAdminConfirmation(pendingWidgetChanges)}
+                className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
               >
-                Restore Hidden Widgets ({hiddenWidgetCount})
+                Fix Widget ({pendingWidgetChanges.length})
               </button>
-            )}
-            {!widgetControlsLocked && (
               <button
                 type="button"
-                onClick={openLockWidgetsAfterUnlock}
-                className="rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                onClick={rollbackPendingWidgetChanges}
+                className="rounded-full border border-gray-300 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
               >
-                Lock Widgets
+                Cancel Widget Changes
               </button>
-            )}
-            {!widgetControlsLocked && pendingWidgetChanges.length > 0 && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => openSuperAdminConfirmation(pendingWidgetChanges)}
-                  className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 transition hover:bg-blue-100"
-                >
-                  Fix Widget ({pendingWidgetChanges.length})
-                </button>
-                <button
-                  type="button"
-                  onClick={rollbackPendingWidgetChanges}
-                  className="rounded-full border border-gray-300 bg-gray-50 px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
-                >
-                  Cancel Widget Changes
-                </button>
-              </>
-            )}
-            {widgetControlsLocked && (
-              <>
-                <div className="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
-                  Widget controls locked after Super Admin confirmation.
-                </div>
-                {hiddenWidgetCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={restoreHiddenWidgetsAfterFix}
-                    className="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
-                  >
-                    Restore Widgets ({hiddenWidgetCount})
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={openUnlockWidgetsAfterFix}
-                  className="rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
-                >
-                  Unlock Widgets
-                </button>
-              </>
-            )}
-          </div>
+            </>
+          )}
         </div>
+
+        <button
+          type="button"
+          onClick={() => setShowLockedWidgetControlsModal(true)}
+          className="fixed right-5 top-1/2 z-[70] inline-flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-emerald-300 bg-white text-lg font-semibold text-emerald-700 shadow-lg transition hover:bg-emerald-50"
+          title="Open widget controls"
+          aria-label="Open widget controls"
+          style={{ animation: 'widgetControlPulse 1.8s ease-in-out infinite' }}
+        >
+          ⚙️
+        </button>
 
         {/* Module Cards */}
         {isSalesTargetWidgetVisible && (
@@ -1094,18 +1323,24 @@ export default function Dashboard() {
                 )}
                 <button
                   type="button"
-                  onClick={() => router.push('/dashboard/reports/distribution/sales')}
+                  onClick={() => navigateFast('/dashboard/reports/distribution/sales')}
                   className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-semibold text-cyan-700 transition hover:bg-cyan-100"
                 >
-                  View Team Performance
+                  <span className="mr-2 text-base leading-none" aria-hidden="true">
+                    📈
+                  </span>
+                  <span>View Team Performance</span>
                 </button>
                 {!isSalesRefUser && (
                   <button
                     type="button"
-                    onClick={() => router.push('/dashboard/hrm/sales-targets')}
+                    onClick={() => navigateFast('/dashboard/hrm/sales-targets')}
                     className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100"
                   >
-                    Open Sales Targets
+                    <span className="mr-2 text-base leading-none" aria-hidden="true">
+                      🎯
+                    </span>
+                    <span>Open Sales Targets</span>
                   </button>
                 )}
               </div>
@@ -1232,6 +1467,8 @@ export default function Dashboard() {
               onClick={() => handleModuleClick(module)}
               className={`group relative bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg hover:shadow-2xl transition-all duration-500 cursor-pointer border border-white/20 overflow-hidden transform hover:-translate-y-2 hover:scale-105 ${
                 module.name === 'HRM (Human Resource Management)' ? 'ring-2 ring-red-500/50' : ''
+              } ${
+                navigatingPath && module.path === navigatingPath ? 'opacity-80 pointer-events-none' : ''
               }`}
             >
               {!widgetControlsLocked && (
@@ -1269,6 +1506,11 @@ export default function Dashboard() {
                   <h3 className="text-lg font-bold text-gray-900 group-hover:text-gray-800 transition-colors duration-300">
                     {module.name}
                   </h3>
+                  {navigatingPath && module.path === navigatingPath && (
+                    <div className="inline-flex items-center rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 text-xs font-semibold text-cyan-700">
+                      Opening...
+                    </div>
+                  )}
                   <p className="text-sm text-gray-600 group-hover:text-gray-700 transition-colors duration-300">
                     {module.name === 'HRM (Human Resource Management)'
                       ? 'Manage your workforce efficiently'
@@ -1278,7 +1520,7 @@ export default function Dashboard() {
                       ? 'Manage vehicle loading operations'
                       : module.name === 'Production'
                       ? 'Oversee production processes and workflows'
-                      : module.name === 'Purchasing'
+                      : module.id === 'purchasing'
                       ? 'Handle procurement and supplier management'
                       : module.name === 'Outlets'
                       ? 'Manage retail outlets and sales points'
@@ -1344,7 +1586,7 @@ export default function Dashboard() {
                     key={index}
                     onClick={() => {
                       if (setting.path) {
-                        router.push(setting.path);
+                        navigateFast(setting.path);
                         return;
                       }
 
@@ -1543,7 +1785,131 @@ export default function Dashboard() {
             </div>
           </div>
         )}
+
+        {showLockedWidgetControlsModal && (
+          <div className="fixed inset-0 z-[82] flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-3xl rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+                <h3 className="text-lg font-semibold text-gray-900">Widget Lock Controls</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowLockedWidgetControlsModal(false)}
+                  className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {widgetControlsLocked ? (
+                  <>
+                    <div className="rounded-full border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
+                      Widget controls locked after Super Admin confirmation.
+                    </div>
+                    {hiddenWidgetCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowLockedWidgetControlsModal(false);
+                          restoreHiddenWidgetsAfterFix();
+                        }}
+                        className="rounded-full border border-indigo-300 bg-indigo-50 px-4 py-2 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                      >
+                        Restore Widgets ({hiddenWidgetCount})
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowLockedWidgetControlsModal(false);
+                        openUnlockWidgetsAfterFix();
+                      }}
+                      className="rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100"
+                    >
+                      Unlock Widgets
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="rounded-full border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700">
+                      Widget controls currently unlocked.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowLockedWidgetControlsModal(false);
+                        openLockWidgetsAfterUnlock();
+                      }}
+                      className="rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                    >
+                      Lock Widgets
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {uiAlertModal.open && (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-md rounded-2xl border border-white/40 bg-white p-5 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-gray-200 pb-3">
+                <h3 className="text-lg font-semibold text-gray-900">{uiAlertModal.title || 'Notice'}</h3>
+                <button
+                  type="button"
+                  onClick={closeUiAlertModal}
+                  className="rounded-full border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-100"
+                >
+                  Close
+                </button>
+              </div>
+
+              <p className="mt-4 text-sm leading-6 text-gray-700">{uiAlertModal.message}</p>
+
+              <div className="mt-5 flex justify-end border-t border-gray-200 pt-3">
+                <button
+                  type="button"
+                  onClick={closeUiAlertModal}
+                  className="rounded-xl bg-gradient-to-r from-red-600 to-pink-600 px-4 py-2 text-sm font-semibold text-white hover:from-red-700 hover:to-pink-700"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
+      <style jsx>{`
+        @keyframes dashboardFloat {
+          0% {
+            transform: translate3d(0, 0, 0) scale(0.9);
+            opacity: 0.2;
+          }
+          50% {
+            transform: translate3d(0, -14px, 0) scale(1);
+            opacity: 0.55;
+          }
+          100% {
+            transform: translate3d(0, 0, 0) scale(0.9);
+            opacity: 0.2;
+          }
+        }
+        @keyframes widgetControlPulse {
+          0% {
+            transform: translateY(-50%) scale(1);
+            box-shadow: 0 8px 18px rgba(16, 185, 129, 0.18);
+          }
+          50% {
+            transform: translateY(-50%) scale(1.06);
+            box-shadow: 0 12px 24px rgba(16, 185, 129, 0.3);
+          }
+          100% {
+            transform: translateY(-50%) scale(1);
+            box-shadow: 0 8px 18px rgba(16, 185, 129, 0.18);
+          }
+        }
+      `}</style>
     </div>
   );
 }

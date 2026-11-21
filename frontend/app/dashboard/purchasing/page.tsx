@@ -246,7 +246,7 @@ export default function PurchasingPage() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <div className="max-w-7xl mx-auto py-12 px-4 sm:px-6 lg:px-8 space-y-8">
+      <div className="w-full py-12 px-3 sm:px-4 lg:px-6 space-y-8">
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -262,7 +262,7 @@ export default function PurchasingPage() {
         </section>
 
         {isWidgetVisible('purchasing-hero-card') && <section className="text-center rounded-xl bg-white border border-gray-200 p-8 shadow-sm">
-          <h1 className="text-4xl font-bold text-gray-900 mb-4">Purchasing Module</h1>
+          <h1 className="text-4xl font-bold text-gray-900 mb-4">Purchasing / Procurement Module</h1>
           <p className="text-xl text-gray-600 max-w-3xl mx-auto">
             Streamline your procurement process with comprehensive purchase order management,
             supplier tracking, and inventory control.
@@ -298,7 +298,7 @@ export default function PurchasingPage() {
         </section>}
 
         {isWidgetVisible('purchasing-overview-card') && <section className="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">Purchasing Overview</h2>
+          <h2 className="text-2xl font-bold text-gray-900 mb-4">Purchasing / Procurement Overview</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="text-center">
               <div className="text-3xl font-bold text-blue-600 mb-2">{stats.purchaseOrders}</div>
