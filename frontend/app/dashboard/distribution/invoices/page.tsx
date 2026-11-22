@@ -266,6 +266,56 @@ type InvoicesPageCache = {
   invoices: InvoiceRecord[];
 };
 
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Cash',
+  check: 'Cheque',
+  cheque: 'Cheque',
+  bank_transfer: 'Bank Transfer',
+  bill_to_bill: 'Bill To Bill',
+  credit: 'Credit',
+};
+
+const PAYMENT_METHOD_BADGE_STYLES: Record<string, string> = {
+  Cash: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  Cheque: 'border-violet-200 bg-violet-50 text-violet-700',
+  'Bank Transfer': 'border-sky-200 bg-sky-50 text-sky-700',
+  'Bill To Bill': 'border-indigo-200 bg-indigo-50 text-indigo-700',
+  Credit: 'border-amber-200 bg-amber-50 text-amber-800',
+};
+
+/**
+ * Payment method(s) chosen for an invoice. The "Payment mode:" line written into the notes at
+ * creation is the source of truth (Bill To Bill is stored as a cash payment row, Credit has no
+ * row at all); payment rows added later are appended, e.g. "Credit" invoice later paid by cheque.
+ */
+const getInvoicePaymentMethods = (invoice: InvoiceRecord): string[] => {
+  const methods: string[] = [];
+  const add = (key: string) => {
+    const label = PAYMENT_METHOD_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    if (label && !methods.includes(label)) methods.push(label);
+  };
+
+  const modeMatch = String(invoice.notes || '').match(/Payment mode:\s*([A-Z_ ]+)/i);
+  const noteMode = modeMatch ? modeMatch[1].trim().toLowerCase().replace(/\s+/g, '_') : '';
+  if (noteMode) add(noteMode);
+
+  for (const payment of invoice.payments || []) {
+    const status = String(payment.status || '').toLowerCase();
+    if (status === 'returned' || status === 'rejected' || status === 'bounced') continue;
+    const method = String(payment.payment_method || '').toLowerCase();
+    // Bill-to-bill settlements are saved as cash rows; don't show them as a separate "Cash".
+    if (!method || (noteMode === 'bill_to_bill' && method === 'cash')) continue;
+    add(method);
+  }
+
+  // A paid-later invoice is no longer purely credit.
+  if (methods.length > 1 && methods.includes('Credit')) {
+    methods.splice(methods.indexOf('Credit'), 1);
+  }
+
+  return methods.length ? methods : ['Credit'];
+};
+
 const compactInvoiceForCache = (invoice: InvoiceRecord): InvoiceRecord => {
   const compactItems = Array.isArray(invoice.items)
     ? invoice.items.slice(0, 40).map((item) => ({
@@ -421,6 +471,7 @@ export default function DistributionInvoicesPage() {
   const pageSize = 10;
 
   const [editingInvoiceId, setEditingInvoiceId] = useState<number | null>(null);
+  const [creditConfirmOpen, setCreditConfirmOpen] = useState(false);
   const [originalLoadReservedByLoadItemId, setOriginalLoadReservedByLoadItemId] = useState<Record<number, number>>({});
 
   const router = useRouter();
@@ -3217,7 +3268,25 @@ export default function DistributionInvoicesPage() {
   const submitInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
     const markAsDispatchOrder = editingInvoiceId === null && createDocumentMode === 'dispatch_order';
+
+    // New invoice without a payment: confirm it should be saved as a credit bill.
+    const isNewRegularInvoice = editingInvoiceId === null && !markAsDispatchOrder;
+    if (isNewRegularInvoice && !addPayment && customerId && lines.length > 0) {
+      setCreditConfirmOpen(true);
+      return;
+    }
+
     await submitInvoiceWithMode(markAsDispatchOrder);
+  };
+
+  const confirmSaveAsCredit = async () => {
+    setCreditConfirmOpen(false);
+    await submitInvoiceWithMode(false);
+  };
+
+  const goBackToAddPayment = () => {
+    setCreditConfirmOpen(false);
+    setAddPayment(true);
   };
   const handleReturnSuggestionClick = (item: Item) => {
     setReturnSelectedItemId(String(item.id));
@@ -3678,6 +3747,7 @@ export default function DistributionInvoicesPage() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice Date</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Total</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Outstanding</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payment Method</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                 </tr>
@@ -3685,7 +3755,7 @@ export default function DistributionInvoicesPage() {
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredInvoices.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</td>
+                    <td colSpan={8} className="px-6 py-10 text-center text-sm text-gray-500">No invoices yet.</td>
                   </tr>
                 ) : (
                   pagedInvoices.map((invoice) => (
@@ -3704,6 +3774,18 @@ export default function DistributionInvoicesPage() {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{new Date(invoice.invoice_date).toLocaleDateString()}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 text-right">{Number(invoice.total).toFixed(2)}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-right text-amber-700">{getInvoiceDueBalance(invoice).toFixed(2)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        <div className="flex flex-wrap gap-1">
+                          {getInvoicePaymentMethods(invoice).map((method) => (
+                            <span
+                              key={method}
+                              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold ${PAYMENT_METHOD_BADGE_STYLES[method] || 'border-gray-200 bg-gray-50 text-gray-700'}`}
+                            >
+                              {method}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{invoice.status}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
                         {isWidgetVisible('distribution-invoices-row-action-buttons') && (
@@ -3756,7 +3838,17 @@ export default function DistributionInvoicesPage() {
                       </span>
                     )}
                   </div>
-                  <span className="text-xs text-gray-600">{invoice.status}</span>
+                  <div className="flex items-center gap-1">
+                    {getInvoicePaymentMethods(invoice).map((method) => (
+                      <span
+                        key={method}
+                        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${PAYMENT_METHOD_BADGE_STYLES[method] || 'border-gray-200 bg-gray-50 text-gray-700'}`}
+                      >
+                        {method}
+                      </span>
+                    ))}
+                    <span className="text-xs text-gray-600">{invoice.status}</span>
+                  </div>
                 </div>
                 <p className="text-sm text-gray-700">{invoice.customer?.shop_name || '-'}</p>
                 <p className="text-xs text-gray-500">{new Date(invoice.invoice_date).toLocaleDateString()}</p>
@@ -5458,6 +5550,73 @@ export default function DistributionInvoicesPage() {
                 className="px-4 py-2 text-sm font-medium rounded-md bg-red-600 text-white hover:bg-red-700"
               >
                 OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {creditConfirmOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/50 px-3"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="credit-confirm-title"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') setCreditConfirmOpen(false);
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-amber-100 bg-white p-6 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 text-lg font-bold text-amber-700">
+                !
+              </div>
+              <div>
+                <h4 id="credit-confirm-title" className="text-base font-semibold text-slate-900">
+                  Save as a credit bill?
+                </h4>
+                <p className="mt-1 text-sm text-slate-600">
+                  No payment has been added to this invoice. If you continue, the full amount will be recorded as
+                  outstanding for the customer and can be collected later.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
+              <div className="flex justify-between gap-3 text-slate-700">
+                <span>Customer</span>
+                <span className="text-right font-semibold text-slate-900">
+                  {customers.find((c) => c.id === Number(customerId))?.shop_name || '-'}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3 text-slate-700">
+                <span>Invoice</span>
+                <span className="font-semibold text-slate-900">{invoiceNumber}</span>
+              </div>
+              <div className="flex justify-between gap-3 border-t border-dashed border-amber-200 pt-1 text-slate-700">
+                <span>Credit amount (outstanding)</span>
+                <span className="font-bold text-amber-800">{invoiceFinalTotal.toFixed(2)}</span>
+              </div>
+            </div>
+
+            <p className="mt-4 text-sm font-medium text-slate-800">Do you agree to save this invoice as a credit bill?</p>
+
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={goBackToAddPayment}
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+              >
+                No, add payment
+              </button>
+              <button
+                type="button"
+                autoFocus
+                onClick={confirmSaveAsCredit}
+                disabled={saving}
+                className="rounded-xl border border-transparent bg-gradient-to-r from-amber-500 to-orange-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-amber-200/70 hover:from-amber-600 hover:to-orange-700 disabled:opacity-50"
+              >
+                Yes, save as credit bill
               </button>
             </div>
           </div>
