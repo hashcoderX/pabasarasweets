@@ -2290,7 +2290,16 @@ export default function DistributionInvoicesPage() {
 
     setNotes(invoice.notes || '');
 
-    const existingDiscount = typeof invoice.discount === 'number' ? invoice.discount : 0;
+    // Stored discount = bill-level discount + line discounts (API sends money as strings).
+    // Lines carry their own discount, so only the bill-level remainder goes in this field.
+    const storedLineDiscount = (invoice.items || []).reduce(
+      (sum, it) => sum + Number(it.quantity || 0) * Number(it.discount || 0),
+      0
+    );
+    const existingDiscount = Math.max(
+      0,
+      Math.round((Number(invoice.discount || 0) - storedLineDiscount) * 100) / 100
+    );
     setDiscountType('amount');
     setDiscountValue(existingDiscount.toString());
 
@@ -5721,8 +5730,10 @@ export default function DistributionInvoicesPage() {
                   0
                 );
                 const grossSubtotalFromItems = netSubtotalFromItems + itemDiscountTotalFromItems;
-                const storedSubtotal = typeof viewInvoice.subtotal === 'number'
-                  ? Number(viewInvoice.subtotal)
+                // API returns decimals as strings ("5100.00"), so parse instead of checking typeof.
+                const parsedSubtotal = Number(viewInvoice.subtotal);
+                const storedSubtotal = viewInvoice.subtotal != null && Number.isFinite(parsedSubtotal)
+                  ? parsedSubtotal
                   : netSubtotalFromItems;
 
                 const notesText = String(viewInvoice.notes || '');
@@ -5926,8 +5937,10 @@ export default function DistributionInvoicesPage() {
         const netSubtotalFromItems = invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0);
         const itemDiscountTotalFromItems = invoice.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.discount || 0), 0);
         const grossSubtotalFromItems = netSubtotalFromItems + itemDiscountTotalFromItems;
-        const storedSubtotal = typeof invoice.subtotal === 'number'
-          ? Number(invoice.subtotal)
+        // API returns decimals as strings ("5100.00"), so parse instead of checking typeof.
+        const parsedSubtotal = Number(invoice.subtotal);
+        const storedSubtotal = invoice.subtotal != null && Number.isFinite(parsedSubtotal)
+          ? parsedSubtotal
           : netSubtotalFromItems;
         const rawDiscount = Number(invoice.discount || 0);
         const storedNonReturnDiscount = Math.max(0, rawDiscount - effectiveReturnAmount);

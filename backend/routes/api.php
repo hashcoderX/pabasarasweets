@@ -165,6 +165,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('attendance/device-settings', [AttendanceController::class, 'saveDeviceSettings']);
         Route::post('attendance/device-settings/test', [AttendanceController::class, 'testDeviceConnection']);
         Route::post('attendance/device-events', [AttendanceController::class, 'syncDeviceEvents']);
+        Route::get('attendance/device-status', [AttendanceController::class, 'getDeviceStatus']);
+        Route::get('attendance/device-punch-logs', [AttendanceController::class, 'getPunchLogs']);
+        Route::post('attendance/device-punch-logs/reprocess', [AttendanceController::class, 'reprocessUnmatchedPunches']);
+        Route::get('attendance/device-packets', [AttendanceController::class, 'getDevicePackets']);
+        Route::post('attendance/device-test/punch', [AttendanceController::class, 'testDevicePunch']);
+        Route::post('attendance/device-test/packet', [AttendanceController::class, 'testDevicePacket']);
         Route::post('attendance/mark', [AttendanceController::class, 'markBasic']);
         Route::post('attendance/mark-out', [AttendanceController::class, 'markOut']);
         Route::post('attendance/upload-csv', [AttendanceController::class, 'uploadCsv']);

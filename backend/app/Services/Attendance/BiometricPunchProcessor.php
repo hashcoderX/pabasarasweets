@@ -60,6 +60,26 @@ class BiometricPunchProcessor
     }
 
     /**
+     * Re-applies an earlier unmatched punch (e.g. after the employee code was fixed).
+     */
+    public function reprocess(BiometricPunchLog $log): array
+    {
+        $employee = $this->resolveEmployee((string) $log->device_user_id);
+        if (!$employee) {
+            return ['result' => 'unmatched', 'message' => "No employee linked to device user {$log->device_user_id}."];
+        }
+
+        $outcome = $this->applyToAttendance($employee, $log->punch_time->copy(), (string) $log->direction, []);
+        $log->update([
+            'employee_id' => $employee->id,
+            'result' => $outcome['result'],
+            'message' => $outcome['message'],
+        ]);
+
+        return $outcome;
+    }
+
+    /**
      * Exact employee_code match first, then numeric match (device user 1 => EMP0001).
      */
     public function resolveEmployee(string $deviceUserId): ?Employee

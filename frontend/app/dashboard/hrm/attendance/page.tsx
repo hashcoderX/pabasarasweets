@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
 
@@ -44,8 +44,74 @@ interface AttendanceDeviceSettings {
   server_port: string;
   p2p_service_enabled: boolean;
   is_active: boolean;
+  listener_port: string;
+  listener_allow_any_ip: boolean;
+  device_timezone: string;
   sample_events_json: string;
 }
+
+interface DeviceListenerStatus {
+  listener: {
+    online: boolean;
+    port: number;
+    started_at: string | null;
+    heartbeat_at: string | null;
+    last_packet_at: string | null;
+    server_ips: string[];
+  };
+  today: { date: string; marked_in: number; marked_out: number; unmatched: number; ignored: number };
+  unmatched_total: number;
+  unparsed_packets: number;
+}
+
+interface BiometricPunchLogRow {
+  id: number;
+  device_user_id: string;
+  employee_code: string | null;
+  employee_name: string | null;
+  punch_time: string;
+  direction: string;
+  source: string;
+  source_ip: string | null;
+  result: string;
+  message: string | null;
+}
+
+interface BiometricPacketRow {
+  id: number;
+  source_ip: string | null;
+  protocol: string;
+  bytes: number;
+  payload_hex: string | null;
+  payload_text: string | null;
+  status: string;
+  events_count: number;
+  message: string | null;
+  created_at: string;
+}
+
+const PUNCH_RESULT_STYLES: Record<string, string> = {
+  marked_in: 'bg-green-100 text-green-800',
+  marked_out: 'bg-blue-100 text-blue-800',
+  ignored: 'bg-gray-100 text-gray-700',
+  duplicate: 'bg-gray-100 text-gray-700',
+  unmatched: 'bg-amber-100 text-amber-800',
+  error: 'bg-red-100 text-red-700',
+};
+
+const PACKET_STATUS_STYLES: Record<string, string> = {
+  parsed: 'bg-green-100 text-green-800',
+  unparsed: 'bg-amber-100 text-amber-800',
+  rejected: 'bg-red-100 text-red-700',
+  error: 'bg-red-100 text-red-700',
+  ignored: 'bg-gray-100 text-gray-700',
+};
+
+const formatDeviceTime = (value: string | null | undefined) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+};
 
 type WidgetVisibilityChange = {
   widget_key: string;
@@ -103,6 +169,19 @@ export default function AttendancePage() {
   const [deviceSaveLoading, setDeviceSaveLoading] = useState(false);
   const [deviceTestLoading, setDeviceTestLoading] = useState(false);
   const [deviceSyncLoading, setDeviceSyncLoading] = useState(false);
+  const [deviceStatus, setDeviceStatus] = useState<DeviceListenerStatus | null>(null);
+  const [punchLogs, setPunchLogs] = useState<BiometricPunchLogRow[]>([]);
+  const [devicePackets, setDevicePackets] = useState<BiometricPacketRow[]>([]);
+  const [showPackets, setShowPackets] = useState(false);
+  const [expandedPacketId, setExpandedPacketId] = useState<number | null>(null);
+  const [testPunchUserId, setTestPunchUserId] = useState('');
+  const [testPunchTime, setTestPunchTime] = useState('');
+  const [testPunchDirection, setTestPunchDirection] = useState<'auto' | 'in' | 'out'>('auto');
+  const [testPunchLoading, setTestPunchLoading] = useState(false);
+  const [testPacketPayload, setTestPacketPayload] = useState('');
+  const [testPacketIsHex, setTestPacketIsHex] = useState(false);
+  const [testPacketLoading, setTestPacketLoading] = useState(false);
+  const [reprocessLoading, setReprocessLoading] = useState(false);
   const [deviceSettings, setDeviceSettings] = useState<AttendanceDeviceSettings>({
     device_name: 'Realand A-L355',
     communication_type: 'CS',
@@ -118,6 +197,9 @@ export default function AttendancePage() {
     server_port: '5055',
     p2p_service_enabled: true,
     is_active: true,
+    listener_port: '5055',
+    listener_allow_any_ip: false,
+    device_timezone: 'Asia/Colombo',
     sample_events_json: JSON.stringify(
       [
         { employee_code: 'EMP001', punch_time: `${todayDate} 08:03:10`, direction: 'in', device_id: 'Realand-A-L355' },
@@ -149,6 +231,14 @@ export default function AttendancePage() {
     if (!token) return;
     fetchTodayAttendance(token, selectedAttendanceDate);
   }, [token, selectedAttendanceDate]);
+
+  useEffect(() => {
+    if (!token || activeTab !== 'device') return;
+    fetchDeviceLive(token);
+    const timer = window.setInterval(() => fetchDeviceLive(token), 5000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, activeTab, selectedAttendanceDate]);
 
   const fetchEmployees = async (authToken?: string) => {
     const tokenToUse = authToken || token;
@@ -215,6 +305,9 @@ export default function AttendancePage() {
         server_port: settings.server_port ? String(settings.server_port) : '',
         p2p_service_enabled: Boolean(settings.p2p_service_enabled),
         is_active: settings.is_active !== false,
+        listener_port: settings.listener_port ? String(settings.listener_port) : prev.listener_port,
+        listener_allow_any_ip: Boolean(settings.listener_allow_any_ip),
+        device_timezone: settings.device_timezone || prev.device_timezone,
       }));
     } catch (error) {
       console.error('Error fetching attendance device settings:', error);
@@ -242,6 +335,9 @@ export default function AttendancePage() {
         server_port: deviceSettings.server_port ? Number(deviceSettings.server_port) : null,
         p2p_service_enabled: deviceSettings.p2p_service_enabled,
         is_active: deviceSettings.is_active,
+        listener_port: deviceSettings.listener_port ? Number(deviceSettings.listener_port) : 5055,
+        listener_allow_any_ip: deviceSettings.listener_allow_any_ip,
+        device_timezone: deviceSettings.device_timezone || 'Asia/Colombo',
       };
 
       await axios.put('/api/hr/attendance/device-settings', payload, {
@@ -338,6 +434,115 @@ export default function AttendancePage() {
       );
     } finally {
       setDeviceSyncLoading(false);
+    }
+  };
+
+  const lastMarkedPunchIdRef = useRef<number | null>(null);
+
+  const fetchDeviceLive = async (authToken?: string) => {
+    const tokenToUse = authToken || token;
+    if (!tokenToUse) return;
+    const headers = { Authorization: `Bearer ${tokenToUse}` };
+    try {
+      const [statusRes, logsRes, packetsRes] = await Promise.all([
+        axios.get('/api/hr/attendance/device-status', { headers }),
+        axios.get('/api/hr/attendance/device-punch-logs', { headers, params: { limit: 50 } }),
+        axios.get('/api/hr/attendance/device-packets', { headers, params: { limit: 30 } }),
+      ]);
+      setDeviceStatus(statusRes.data || null);
+      const logs: BiometricPunchLogRow[] = logsRes.data?.data || [];
+      setPunchLogs(logs);
+      setDevicePackets(packetsRes.data?.data || []);
+
+      // Refresh the attendance table as soon as a new IN/OUT arrives from the machine.
+      const newestMarked = logs.find((log) => log.result === 'marked_in' || log.result === 'marked_out');
+      if (newestMarked) {
+        if (lastMarkedPunchIdRef.current !== null && newestMarked.id !== lastMarkedPunchIdRef.current) {
+          fetchTodayAttendance(tokenToUse, selectedAttendanceDate);
+        }
+        lastMarkedPunchIdRef.current = newestMarked.id;
+      }
+    } catch (error) {
+      console.error('Error fetching device live data:', error);
+    }
+  };
+
+  const sendTestPunch = async () => {
+    if (!token) return;
+    if (!testPunchUserId.trim()) {
+      openNoticeModal('info', 'Device User Required', 'Enter the device user ID (or employee code) to test.');
+      return;
+    }
+    try {
+      setTestPunchLoading(true);
+      const response = await axios.post(
+        '/api/hr/attendance/device-test/punch',
+        {
+          device_user_id: testPunchUserId.trim(),
+          punch_time: testPunchTime ? testPunchTime.replace('T', ' ') + (testPunchTime.length === 16 ? ':00' : '') : null,
+          direction: testPunchDirection,
+        },
+        { headers: { Authorization: `Bearer ${token}` }, validateStatus: () => true }
+      );
+      const ok = response.status >= 200 && response.status < 300;
+      openNoticeModal(
+        response.data?.ok ? 'success' : ok ? 'info' : 'error',
+        response.data?.ok ? 'Punch Marked' : 'Punch Not Marked',
+        response.data?.message || 'Test punch processed.'
+      );
+      fetchDeviceLive();
+      fetchTodayAttendance(token, selectedAttendanceDate);
+    } catch (error: any) {
+      openNoticeModal('error', 'Test Punch Failed', error?.response?.data?.message || 'Failed to send test punch.');
+    } finally {
+      setTestPunchLoading(false);
+    }
+  };
+
+  const sendTestPacket = async () => {
+    if (!token) return;
+    if (!testPacketPayload.trim()) {
+      openNoticeModal('info', 'Payload Required', 'Paste the raw data the device sends.');
+      return;
+    }
+    try {
+      setTestPacketLoading(true);
+      const response = await axios.post(
+        '/api/hr/attendance/device-test/packet',
+        { payload: testPacketPayload, is_hex: testPacketIsHex },
+        { headers: { Authorization: `Bearer ${token}` }, validateStatus: () => true }
+      );
+      const ok = response.status >= 200 && response.status < 300;
+      openNoticeModal(
+        ok ? 'success' : 'error',
+        ok ? `Payload Processed (${response.data?.events ?? 0} punch)` : 'Payload Not Recognised',
+        response.data?.message || 'Payload processed.'
+      );
+      fetchDeviceLive();
+      fetchTodayAttendance(token, selectedAttendanceDate);
+    } catch (error: any) {
+      openNoticeModal('error', 'Test Failed', error?.response?.data?.message || 'Failed to process payload.');
+    } finally {
+      setTestPacketLoading(false);
+    }
+  };
+
+  const reprocessUnmatched = async () => {
+    if (!token) return;
+    try {
+      setReprocessLoading(true);
+      const response = await axios.post(
+        '/api/hr/attendance/device-punch-logs/reprocess',
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      openNoticeModal('success', 'Unmatched Punches Reprocessed', response.data?.message || 'Done.');
+      fetchDeviceLive();
+      fetchTodayAttendance(token, selectedAttendanceDate);
+    } catch (error: any) {
+      openNoticeModal('error', 'Reprocess Failed', error?.response?.data?.message || 'Failed to reprocess punches.');
+    } finally {
+      setReprocessLoading(false);
     }
   };
 
@@ -1548,6 +1753,27 @@ export default function AttendancePage() {
                   className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
                 />
               </label>
+              <label className="text-sm font-medium text-gray-700">
+                Listener Port (this PC)
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={deviceSettings.listener_port}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, listener_port: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                />
+              </label>
+              <label className="text-sm font-medium text-gray-700">
+                Device Time Zone
+                <input
+                  type="text"
+                  value={deviceSettings.device_timezone}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, device_timezone: e.target.value }))}
+                  className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                  placeholder="Asia/Colombo"
+                />
+              </label>
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-4">
@@ -1583,6 +1809,17 @@ export default function AttendancePage() {
                 />
                 Integration Active
               </label>
+              <label
+                className="inline-flex items-center gap-2 text-sm font-medium text-gray-700"
+                title="Accept punches from any IP address (use if the device IP changes because of DHCP)"
+              >
+                <input
+                  type="checkbox"
+                  checked={deviceSettings.listener_allow_any_ip}
+                  onChange={(e) => setDeviceSettings((prev) => ({ ...prev, listener_allow_any_ip: e.target.checked }))}
+                />
+                Accept Punches From Any IP
+              </label>
             </div>
 
             <div className="mt-5 flex flex-wrap gap-3">
@@ -1604,18 +1841,262 @@ export default function AttendancePage() {
               </button>
             </div>
 
-            <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50 p-4">
-              <p className="text-sm font-semibold text-blue-800">Bridge API Endpoint</p>
-              <p className="mt-1 text-sm text-blue-700">
-                POST <code>/api/hr/attendance/device-events</code> with an <code>events</code> array from your device bridge service.
-              </p>
-              <p className="mt-1 text-xs text-blue-600">
-                Tip: Realand A-L355 usually requires an external connector service to read device logs and post them to this API.
-              </p>
+            {/* ---------- Live punch receiver ---------- */}
+            <div className="mt-8 border-t border-gray-200 pt-6">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-lg font-bold text-gray-900">Live Punch Receiver</h4>
+                  <p className="text-sm text-gray-600">Fingerprint punches are marked as IN / OUT the moment the machine sends them.</p>
+                </div>
+                <span
+                  className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-sm font-semibold ${
+                    deviceStatus?.listener.online ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'
+                  }`}
+                >
+                  <span className={`h-2.5 w-2.5 rounded-full ${deviceStatus?.listener.online ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                  {deviceStatus?.listener.online ? `Listener online · port ${deviceStatus.listener.port}` : 'Listener offline'}
+                </span>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+                {[
+                  { label: 'IN marked today', value: deviceStatus?.today.marked_in ?? 0, tone: 'text-green-700' },
+                  { label: 'OUT marked today', value: deviceStatus?.today.marked_out ?? 0, tone: 'text-blue-700' },
+                  { label: 'Unmatched users', value: deviceStatus?.unmatched_total ?? 0, tone: 'text-amber-700' },
+                  { label: 'Last packet', value: formatDeviceTime(deviceStatus?.listener.last_packet_at), tone: 'text-gray-800 text-sm' },
+                ].map((card) => (
+                  <div key={card.label} className="rounded-xl border border-gray-200 bg-white p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{card.label}</p>
+                    <p className={`mt-1 text-2xl font-bold ${card.tone}`}>{card.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              {!deviceStatus?.listener.online && (
+                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                  <p className="font-semibold">Start the listener on the server PC</p>
+                  <p className="mt-1">
+                    Double-click <code className="rounded bg-white px-1">backend\start-attendance-listener.bat</code>, or run{' '}
+                    <code className="rounded bg-white px-1">php artisan attendance:listen</code> in the backend folder. Keep that window open.
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">
+                <p className="font-semibold">Machine setup (Menu → Comm. → Server / Real-time push)</p>
+                <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+                  <li>
+                    Server IP / Host:{' '}
+                    <strong>{deviceStatus?.listener.server_ips?.length ? deviceStatus.listener.server_ips.join(' or ') : 'this PC’s LAN IP'}</strong>
+                  </li>
+                  <li>
+                    Server Port: <strong>{deviceStatus?.listener.port ?? deviceSettings.listener_port}</strong>
+                  </li>
+                  <li>Real-time push: <strong>ON</strong>. Then punch a finger and watch the table below.</li>
+                  <li>Device user ID must match the employee code (user 1 → EMP0001, or the exact code).</li>
+                </ol>
+              </div>
+
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+                <h5 className="font-semibold text-gray-900">Recent Punches</h5>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => fetchDeviceLive()}
+                    className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={reprocessUnmatched}
+                    disabled={reprocessLoading || !(deviceStatus?.unmatched_total)}
+                    className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                  >
+                    {reprocessLoading ? 'Reprocessing...' : 'Reprocess Unmatched'}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 max-h-80 overflow-auto rounded-xl border border-gray-200 bg-white">
+                <table className="min-w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+                    <tr>
+                      <th className="px-3 py-2">Punch Time</th>
+                      <th className="px-3 py-2">Device User</th>
+                      <th className="px-3 py-2">Employee</th>
+                      <th className="px-3 py-2">Result</th>
+                      <th className="px-3 py-2">Details</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 text-gray-800">
+                    {punchLogs.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
+                          No punches received yet.
+                        </td>
+                      </tr>
+                    )}
+                    {punchLogs.map((log) => (
+                      <tr key={log.id}>
+                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs">{log.punch_time}</td>
+                        <td className="px-3 py-2">{log.device_user_id}</td>
+                        <td className="px-3 py-2">
+                          {log.employee_code ? `${log.employee_code} · ${log.employee_name || ''}` : <span className="text-amber-700">Not linked</span>}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${PUNCH_RESULT_STYLES[log.result] || 'bg-gray-100 text-gray-700'}`}>
+                            {log.result.replace('_', ' ').toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-xs text-gray-600">
+                          {log.message}
+                          <span className="ml-1 text-gray-400">({log.source})</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <h5 className="font-semibold text-gray-900">Test Punch (without the machine)</h5>
+                  <p className="text-xs text-gray-500">Runs through the same IN/OUT rules the machine uses.</p>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      value={testPunchUserId}
+                      onChange={(e) => setTestPunchUserId(e.target.value)}
+                      placeholder="Device user / EMP code"
+                      className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                    />
+                    <input
+                      type="datetime-local"
+                      step={1}
+                      value={testPunchTime}
+                      onChange={(e) => setTestPunchTime(e.target.value)}
+                      className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                      title="Leave empty to use the current time"
+                    />
+                    <select
+                      value={testPunchDirection}
+                      onChange={(e) => setTestPunchDirection(e.target.value as 'auto' | 'in' | 'out')}
+                      className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-black"
+                    >
+                      <option value="auto">Auto (first IN, last OUT)</option>
+                      <option value="in">Force IN</option>
+                      <option value="out">Force OUT</option>
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={sendTestPunch}
+                    disabled={testPunchLoading}
+                    className="mt-3 rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:opacity-60"
+                  >
+                    {testPunchLoading ? 'Sending...' : 'Send Test Punch'}
+                  </button>
+                </div>
+
+                <div className="rounded-xl border border-gray-200 bg-white p-4">
+                  <h5 className="font-semibold text-gray-900">Test Raw Device Data</h5>
+                  <p className="text-xs text-gray-500">Paste what the machine sends (text or hex) to check it is understood.</p>
+                  <textarea
+                    rows={3}
+                    value={testPacketPayload}
+                    onChange={(e) => setTestPacketPayload(e.target.value)}
+                    placeholder={'1\t2026-11-22 08:01:05\t0\t1'}
+                    className="mt-3 w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs text-black"
+                  />
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                      <input type="checkbox" checked={testPacketIsHex} onChange={(e) => setTestPacketIsHex(e.target.checked)} />
+                      Payload is hex
+                    </label>
+                    <button
+                      type="button"
+                      onClick={sendTestPacket}
+                      disabled={testPacketLoading}
+                      className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-semibold text-white hover:bg-gray-900 disabled:opacity-60"
+                    >
+                      {testPacketLoading ? 'Processing...' : 'Process Payload'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <button
+                  type="button"
+                  onClick={() => setShowPackets((prev) => !prev)}
+                  className="text-sm font-semibold text-gray-700 hover:text-gray-900"
+                >
+                  {showPackets ? '▾' : '▸'} Raw packets from device ({devicePackets.length})
+                  {(deviceStatus?.unparsed_packets ?? 0) > 0 && (
+                    <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-800">
+                      {deviceStatus?.unparsed_packets} not recognised
+                    </span>
+                  )}
+                </button>
+                {showPackets && (
+                  <div className="mt-2 max-h-80 overflow-auto rounded-xl border border-gray-200 bg-white">
+                    <table className="min-w-full text-sm">
+                      <thead className="sticky top-0 bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500">
+                        <tr>
+                          <th className="px-3 py-2">Received</th>
+                          <th className="px-3 py-2">From</th>
+                          <th className="px-3 py-2">Bytes</th>
+                          <th className="px-3 py-2">Status</th>
+                          <th className="px-3 py-2">Message</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 text-gray-800">
+                        {devicePackets.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="px-3 py-6 text-center text-gray-500">
+                              No packets captured yet.
+                            </td>
+                          </tr>
+                        )}
+                        {devicePackets.map((packet) => (
+                          <Fragment key={packet.id}>
+                            <tr
+                              className="cursor-pointer hover:bg-gray-50"
+                              onClick={() => setExpandedPacketId((prev) => (prev === packet.id ? null : packet.id))}
+                            >
+                              <td className="whitespace-nowrap px-3 py-2 text-xs">{formatDeviceTime(packet.created_at)}</td>
+                              <td className="px-3 py-2 text-xs">
+                                {packet.protocol.toUpperCase()} {packet.source_ip}
+                              </td>
+                              <td className="px-3 py-2 text-xs">{packet.bytes}</td>
+                              <td className="px-3 py-2">
+                                <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${PACKET_STATUS_STYLES[packet.status] || 'bg-gray-100 text-gray-700'}`}>
+                                  {packet.status}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2 text-xs text-gray-600">{packet.message}</td>
+                            </tr>
+                            {expandedPacketId === packet.id && (
+                              <tr>
+                                <td colSpan={5} className="bg-gray-50 px-3 py-2">
+                                  <p className="text-xs font-semibold text-gray-600">Text</p>
+                                  <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-xs text-gray-800">{packet.payload_text}</pre>
+                                  <p className="mt-2 text-xs font-semibold text-gray-600">Hex</p>
+                                  <pre className="mt-1 whitespace-pre-wrap break-all font-mono text-xs text-gray-800">{packet.payload_hex}</pre>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div className="mt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Sample / Incoming Events JSON</label>
+            <div className="mt-8 border-t border-gray-200 pt-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">Bulk Import Events (JSON from a bridge / export)</label>
               <textarea
                 rows={8}
                 value={deviceSettings.sample_events_json}

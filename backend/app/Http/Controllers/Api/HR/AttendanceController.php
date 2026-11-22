@@ -4,7 +4,12 @@ namespace App\Http\Controllers\Api\HR;
 
 use App\Http\Controllers\Controller;
 use App\Models\Attendance;
+use App\Console\Commands\AttendanceListen;
 use App\Models\AttendanceDeviceSetting;
+use App\Models\BiometricDevicePacket;
+use App\Models\BiometricPunchLog;
+use App\Services\Attendance\BiometricPacketIngestor;
+use App\Services\Attendance\BiometricPunchProcessor;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Carbon\Carbon;
@@ -497,7 +502,11 @@ class AttendanceController extends Controller
             'server_port' => 'nullable|integer|min:1|max:65535',
             'p2p_service_enabled' => 'required|boolean',
             'is_active' => 'required|boolean',
+            'listener_port' => 'nullable|integer|min:1|max:65535',
+            'listener_allow_any_ip' => 'nullable|boolean',
+            'device_timezone' => 'nullable|timezone',
         ]);
+        $validated = array_filter($validated, fn ($value, $key) => $value !== null || !in_array($key, ['listener_port', 'listener_allow_any_ip', 'device_timezone'], true), ARRAY_FILTER_USE_BOTH);
 
         $userId = Auth::id();
         $existing = AttendanceDeviceSetting::query()->latest('id')->first();
@@ -606,13 +615,14 @@ class AttendanceController extends Controller
     }
 
     /**
-     * Receive attendance events from external device bridge and upsert attendance.
+     * Receive attendance events from an external bridge / manual JSON and mark IN/OUT.
      */
-    public function syncDeviceEvents(Request $request): JsonResponse
+    public function syncDeviceEvents(Request $request, BiometricPunchProcessor $processor): JsonResponse
     {
         $validated = $request->validate([
             'events' => 'required|array|min:1|max:5000',
-            'events.*.employee_code' => 'required|string|max:100',
+            'events.*.employee_code' => 'required_without:events.*.device_user_id|nullable|string|max:100',
+            'events.*.device_user_id' => 'required_without:events.*.employee_code|nullable|string|max:100',
             'events.*.punch_time' => 'required|date',
             'events.*.direction' => 'nullable|in:in,out,auto',
             'events.*.device_id' => 'nullable|string|max:100',
@@ -626,108 +636,31 @@ class AttendanceController extends Controller
 
         foreach ($validated['events'] as $index => $event) {
             $lineNo = $index + 1;
-            $employeeCode = trim((string) $event['employee_code']);
-            $direction = strtolower((string) ($event['direction'] ?? 'auto'));
-            $deviceId = trim((string) ($event['device_id'] ?? ''));
-            $eventNotes = trim((string) ($event['notes'] ?? ''));
-
-            $employee = Employee::query()
-                ->whereRaw('LOWER(employee_code) = ?', [strtolower($employeeCode)])
-                ->first();
-
-            if (!$employee) {
-                $errors[] = "Event {$lineNo}: Employee code {$employeeCode} not found.";
-                continue;
-            }
+            $userId = trim((string) ($event['device_user_id'] ?? $event['employee_code'] ?? ''));
 
             try {
-                $punchAt = Carbon::parse((string) $event['punch_time']);
+                $outcome = $processor->process([
+                    'device_user_id' => $userId,
+                    'punch_time' => Carbon::parse((string) $event['punch_time']),
+                    'direction' => strtolower((string) ($event['direction'] ?? 'auto')),
+                    'source' => 'bridge_api',
+                    'source_ip' => $request->ip(),
+                    'notes' => trim(implode(' ', array_filter([
+                        !empty($event['device_id']) ? "Device: {$event['device_id']}" : null,
+                        $event['notes'] ?? null,
+                    ]))) ?: null,
+                ]);
             } catch (\Throwable $e) {
-                $errors[] = "Event {$lineNo}: Invalid punch_time.";
+                $errors[] = "Event {$lineNo}: {$e->getMessage()}";
                 continue;
             }
 
-            $attendanceDate = $punchAt->toDateString();
-            $punchTime = $punchAt->format('H:i:s');
-
-            $branchId = $employee->branch_id;
-            if (!$branchId || !DB::table('companies')->where('id', $branchId)->exists()) {
-                $firstCompany = DB::table('companies')->first();
-                if (!$firstCompany) {
-                    $errors[] = "Event {$lineNo}: Company not configured for employee {$employeeCode}.";
-                    continue;
-                }
-                $branchId = $firstCompany->id;
-            }
-
-            $attendance = Attendance::query()
-                ->where('employee_id', $employee->id)
-                ->where('date', $attendanceDate)
-                ->first();
-
-            $wasCreated = false;
-            if (!$attendance) {
-                $attendance = new Attendance();
-                $attendance->tenant_id = $branchId;
-                $attendance->branch_id = $branchId;
-                $attendance->employee_id = $employee->id;
-                $attendance->date = $attendanceDate;
-                $attendance->status = 'present';
-                $wasCreated = true;
-            }
-
-            $inTime = $attendance->in_time;
-            $outTime = $attendance->out_time;
-
-            if ($direction === 'in') {
-                if (!$inTime || strcmp($punchTime, (string) $inTime) < 0) {
-                    $inTime = $punchTime;
-                }
-            } elseif ($direction === 'out') {
-                if (!$outTime || strcmp($punchTime, (string) $outTime) > 0) {
-                    $outTime = $punchTime;
-                }
-            } else {
-                if (!$inTime) {
-                    $inTime = $punchTime;
-                } elseif (!$outTime && strcmp($punchTime, (string) $inTime) >= 0) {
-                    $outTime = $punchTime;
-                } else {
-                    $skipped++;
-                    continue;
-                }
-            }
-
-            $attendance->in_time = $inTime;
-            $attendance->out_time = $outTime;
-
-            if ($attendance->in_time && $attendance->out_time) {
-                $start = Carbon::createFromFormat('H:i:s', $attendance->in_time);
-                $end = Carbon::createFromFormat('H:i:s', $attendance->out_time);
-                if ($end->greaterThanOrEqualTo($start)) {
-                    $attendance->work_hours = round($end->diffInMinutes($start) / 60, 2);
-                }
-            }
-
-            $noteParts = [];
-            if ($attendance->notes) {
-                $noteParts[] = $attendance->notes;
-            }
-            if ($deviceId !== '') {
-                $noteParts[] = "Device: {$deviceId}";
-            }
-            if ($eventNotes !== '') {
-                $noteParts[] = $eventNotes;
-            }
-            $noteParts[] = 'Source: biometric_sync';
-            $attendance->notes = implode(' | ', array_values(array_unique(array_filter($noteParts))));
-
-            $attendance->save();
-            if ($wasCreated) {
-                $created++;
-            } else {
-                $updated++;
-            }
+            match ($outcome['result']) {
+                'marked_in' => $created++,
+                'marked_out' => $updated++,
+                'unmatched', 'error' => $errors[] = "Event {$lineNo}: {$outcome['message']}",
+                default => $skipped++,
+            };
         }
 
         $summary = [
@@ -735,20 +668,182 @@ class AttendanceController extends Controller
             'updated_records' => $updated,
             'skipped_records' => $skipped,
             'error_count' => count($errors),
+            'marked_in' => $created,
+            'marked_out' => $updated,
         ];
 
-        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
-        if ($settings) {
-            $settings->last_synced_at = now();
-            $settings->last_sync_summary = $summary;
-            $settings->updated_by = Auth::id();
-            $settings->save();
-        }
+        AttendanceDeviceSetting::query()->latest('id')->first()?->update([
+            'last_synced_at' => now(),
+            'last_sync_summary' => $summary,
+            'updated_by' => Auth::id(),
+        ]);
 
         return response()->json([
             'message' => 'Device events processed.',
             'summary' => $summary,
             'errors' => $errors,
+        ]);
+    }
+
+    /**
+     * Live status of the punch listener plus today's biometric counters.
+     */
+    public function getDeviceStatus(): JsonResponse
+    {
+        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
+        $heartbeat = $settings?->listener_heartbeat_at;
+        $online = $heartbeat !== null && $heartbeat->greaterThan(now()->subSeconds(45));
+
+        $today = now($settings?->device_timezone ?: 'Asia/Colombo')->toDateString();
+        $todayLogs = BiometricPunchLog::query()
+            ->whereDate('punch_time', $today)
+            ->select('result', DB::raw('COUNT(*) as total'))
+            ->groupBy('result')
+            ->pluck('total', 'result');
+
+        return response()->json([
+            'listener' => [
+                'online' => $online,
+                'port' => $settings?->listener_port ?? 5055,
+                'started_at' => $settings?->listener_started_at,
+                'heartbeat_at' => $heartbeat,
+                'last_packet_at' => $settings?->listener_last_packet_at,
+                'server_ips' => AttendanceListen::localIps(),
+            ],
+            'today' => [
+                'date' => $today,
+                'marked_in' => (int) ($todayLogs['marked_in'] ?? 0),
+                'marked_out' => (int) ($todayLogs['marked_out'] ?? 0),
+                'unmatched' => (int) ($todayLogs['unmatched'] ?? 0),
+                'ignored' => (int) (($todayLogs['ignored'] ?? 0) + ($todayLogs['duplicate'] ?? 0)),
+            ],
+            'unmatched_total' => BiometricPunchLog::query()->where('result', 'unmatched')->count(),
+            'unparsed_packets' => BiometricDevicePacket::query()->where('status', 'unparsed')->count(),
+        ]);
+    }
+
+    /**
+     * Most recent punches received from the device (newest first).
+     */
+    public function getPunchLogs(Request $request): JsonResponse
+    {
+        $limit = min(max((int) $request->query('limit', 50), 1), 200);
+
+        $logs = BiometricPunchLog::query()
+            ->with('employee:id,employee_code,first_name,last_name')
+            ->latest('id')
+            ->limit($limit)
+            ->get()
+            ->map(fn (BiometricPunchLog $log) => [
+                'id' => $log->id,
+                'device_user_id' => $log->device_user_id,
+                'employee_id' => $log->employee_id,
+                'employee_code' => $log->employee?->employee_code,
+                'employee_name' => $log->employee ? trim("{$log->employee->first_name} {$log->employee->last_name}") : null,
+                'punch_time' => $log->punch_time?->format('Y-m-d H:i:s'),
+                'direction' => $log->direction,
+                'source' => $log->source,
+                'source_ip' => $log->source_ip,
+                'result' => $log->result,
+                'message' => $log->message,
+                'received_at' => $log->created_at,
+            ]);
+
+        return response()->json(['data' => $logs]);
+    }
+
+    /**
+     * Raw packets captured by the listener (newest first), for diagnosing the device format.
+     */
+    public function getDevicePackets(Request $request): JsonResponse
+    {
+        $limit = min(max((int) $request->query('limit', 30), 1), 200);
+        $query = BiometricDevicePacket::query()->latest('id')->limit($limit);
+        if ($status = $request->query('status')) {
+            $query->where('status', $status);
+        }
+
+        return response()->json(['data' => $query->get()]);
+    }
+
+    /**
+     * Push a punch through the same pipeline the device uses (for testing without the machine).
+     */
+    public function testDevicePunch(Request $request, BiometricPunchProcessor $processor): JsonResponse
+    {
+        $validated = $request->validate([
+            'device_user_id' => 'required|string|max:64',
+            'punch_time' => 'nullable|date',
+            'direction' => 'nullable|in:in,out,auto',
+        ]);
+
+        $settings = AttendanceDeviceSetting::query()->latest('id')->first();
+        $punchAt = !empty($validated['punch_time'])
+            ? Carbon::parse($validated['punch_time'])
+            : now($settings?->device_timezone ?: 'Asia/Colombo')->shiftTimezone(config('app.timezone'));
+
+        $outcome = $processor->process([
+            'device_user_id' => $validated['device_user_id'],
+            'punch_time' => $punchAt,
+            'direction' => $validated['direction'] ?? 'auto',
+            'source' => 'manual_test',
+            'source_ip' => $request->ip(),
+        ]);
+
+        $ok = in_array($outcome['result'], ['marked_in', 'marked_out'], true);
+
+        return response()->json($outcome + ['ok' => $ok], $ok || in_array($outcome['result'], ['ignored', 'duplicate'], true) ? 200 : 422);
+    }
+
+    /**
+     * Run a raw payload (as the device would send it) through the parser and processor.
+     */
+    public function testDevicePacket(Request $request, BiometricPacketIngestor $ingestor): JsonResponse
+    {
+        $validated = $request->validate([
+            'payload' => 'required|string|max:65535',
+            'is_hex' => 'nullable|boolean',
+        ]);
+
+        $payload = $validated['payload'];
+        if (!empty($validated['is_hex'])) {
+            $clean = preg_replace('/[^0-9a-fA-F]/', '', $payload);
+            if ($clean === '' || strlen($clean) % 2 !== 0) {
+                return response()->json(['message' => 'Hex payload must contain an even number of hex digits.'], 422);
+            }
+            $payload = hex2bin($clean);
+        }
+
+        $result = $ingestor->ingest($payload, 'test', $request->ip(), null, 'manual_test');
+
+        return response()->json($result, $result['events'] > 0 ? 200 : 422);
+    }
+
+    /**
+     * Retry punches that arrived before the device user was linked to an employee.
+     */
+    public function reprocessUnmatchedPunches(BiometricPunchProcessor $processor): JsonResponse
+    {
+        $counts = ['marked' => 0, 'still_unmatched' => 0, 'ignored' => 0];
+
+        BiometricPunchLog::query()
+            ->where('result', 'unmatched')
+            ->orderBy('punch_time')
+            ->chunkById(200, function ($logs) use ($processor, &$counts) {
+                foreach ($logs as $log) {
+                    $outcome = $processor->reprocess($log);
+                    $key = match ($outcome['result']) {
+                        'marked_in', 'marked_out' => 'marked',
+                        'unmatched' => 'still_unmatched',
+                        default => 'ignored',
+                    };
+                    $counts[$key]++;
+                }
+            });
+
+        return response()->json([
+            'message' => "Reprocessed unmatched punches: {$counts['marked']} marked, {$counts['still_unmatched']} still unmatched.",
+            'summary' => $counts,
         ]);
     }
 

@@ -2117,7 +2117,7 @@ export default function DistributionReturnsPage() {
 
               {(() => {
                 const items = Array.isArray(viewInvoice.items) ? viewInvoice.items : [];
-                const subtotalVal = typeof viewInvoice.subtotal === 'number'
+                const subtotalVal = viewInvoice.subtotal != null && Number.isFinite(Number(viewInvoice.subtotal))
                   ? Number(viewInvoice.subtotal)
                   : items.reduce(
                       (sum: number, it: any) => sum + Number(it.quantity || 0) * Number(it.unit_price || 0),
