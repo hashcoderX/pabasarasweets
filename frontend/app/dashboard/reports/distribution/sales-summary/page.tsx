@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -912,7 +913,7 @@ export default function DistributionSalesSummaryReportPage() {
   if (!token || !accessReady) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 via-cyan-50 to-slate-100">
-        <div className="h-11 w-11 animate-spin rounded-full border-b-2 border-emerald-600" />
+        <PageSkeleton />
       </div>
     );
   }

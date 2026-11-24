@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
@@ -495,7 +496,7 @@ function OutletPosDashboardContent() {
     };
 
     load();
-  }, [token, API_URL, params, router]);
+  }, [token, API_URL]);
 
   embeddedMessageHandlerRef.current = (event: MessageEvent) => {
     if (event.origin !== window.location.origin) return;
@@ -806,7 +807,7 @@ function OutletPosDashboardContent() {
       <!doctype html>
       <html>
       <head>
-        <title>Invoice ${sale.sale_number}</title>
+        <title>Invoice ${sale.sale_number}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
         <style>
           @page {
             size: ${printSheetSize};
@@ -814,7 +815,7 @@ function OutletPosDashboardContent() {
           }
         </style>
       </head>
-      <body style="font-family:Arial,sans-serif;margin:0;padding:10px;color:#111827;">
+      <body style="font-family:&quot;DM Sans&quot;,sans-serif;margin:0;padding:10px;color:#111827;">
         <div style="width:${printContentWidth};max-width:${isA4Print ? '190mm' : printContentWidth};margin:0 auto;font-size:${isA4Print ? '14px' : '12px'};line-height:1.4;">
           <div style="text-align:center;padding-bottom:8px;border-bottom:1px dashed #94a3b8;">
             ${companyLogo ? `<img src="${companyLogo}" alt="Company logo" style="max-height:46px;max-width:100%;object-fit:contain;" />` : ''}
@@ -980,7 +981,7 @@ function OutletPosDashboardContent() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -988,9 +989,9 @@ function OutletPosDashboardContent() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden">
       <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       <div className="relative z-10 flex min-h-screen">
@@ -1171,7 +1172,7 @@ function OutletPosDashboardContent() {
           >
             {embeddedLoading ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-white">
-                <div className="h-8 w-8 animate-spin rounded-full border-2 border-rose-200 border-t-rose-500" />
+                <PageSkeleton compact />
               </div>
             ) : null}
             {embeddedFrames.map((frame) => (
@@ -1774,7 +1775,7 @@ export default function OutletPosDashboardPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+          <PageSkeleton />
         </div>
       }
     >

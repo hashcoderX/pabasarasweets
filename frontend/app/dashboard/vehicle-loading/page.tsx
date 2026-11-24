@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -515,7 +516,7 @@ export default function VehicleLoading() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
-        <div className="h-32 w-32 animate-spin rounded-full border-b-2 border-green-500"></div>
+        <PageSkeleton />
       </div>
     );
   }

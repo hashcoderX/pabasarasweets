@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Suspense, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
@@ -14,6 +15,7 @@ function HomeContent() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [noticeOpen, setNoticeOpen] = useState(false);
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeMessage, setNoticeMessage] = useState('');
@@ -125,103 +127,172 @@ function HomeContent() {
     }
   };
 
+  const particles = [
+    { left: '6%', size: 10, dur: 22, delay: 0, drift: 30, color: 'bg-cyan-300/50' },
+    { left: '14%', size: 16, dur: 28, delay: 6, drift: -20, color: 'bg-emerald-300/40' },
+    { left: '23%', size: 8, dur: 19, delay: 3, drift: 40, color: 'bg-sky-300/50' },
+    { left: '34%', size: 14, dur: 26, delay: 11, drift: -30, color: 'bg-teal-300/40' },
+    { left: '45%', size: 9, dur: 21, delay: 8, drift: 25, color: 'bg-cyan-300/50' },
+    { left: '56%', size: 18, dur: 30, delay: 2, drift: -35, color: 'bg-emerald-300/30' },
+    { left: '67%', size: 11, dur: 24, delay: 13, drift: 20, color: 'bg-sky-300/50' },
+    { left: '76%', size: 7, dur: 18, delay: 5, drift: -15, color: 'bg-teal-300/50' },
+    { left: '85%', size: 15, dur: 27, delay: 9, drift: 35, color: 'bg-cyan-300/40' },
+    { left: '93%', size: 10, dur: 23, delay: 1, drift: -25, color: 'bg-emerald-300/40' },
+  ];
+
+  const inputClass =
+    'w-full rounded-xl border border-slate-200 bg-slate-50/70 py-3 pl-11 pr-4 text-slate-900 placeholder-slate-400 shadow-sm transition focus:border-cyan-500 focus:bg-white focus:outline-none focus:ring-4 focus:ring-cyan-100';
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-cyan-50 via-sky-50 to-emerald-50 relative overflow-hidden px-4 py-8 sm:px-6 lg:px-8">
-      <div className="absolute inset-0 opacity-40 pointer-events-none">
-        <div className="absolute -top-16 -left-12 w-72 h-72 rounded-full bg-cyan-200/70 blur-3xl"></div>
-        <div className="absolute top-20 right-0 w-80 h-80 rounded-full bg-sky-200/60 blur-3xl"></div>
-        <div className="absolute bottom-0 left-1/3 w-80 h-80 rounded-full bg-emerald-200/60 blur-3xl"></div>
+    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-cyan-50 to-emerald-50 px-4 py-8 sm:px-6 lg:px-8">
+      <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+        <div className="login-blob absolute -top-24 -left-20 h-96 w-96 rounded-full bg-cyan-300/40 blur-3xl" />
+        <div className="login-blob absolute top-1/4 -right-24 h-[26rem] w-[26rem] rounded-full bg-sky-300/35 blur-3xl" style={{ animationDelay: '-6s' }} />
+        <div className="login-blob absolute -bottom-24 left-1/3 h-96 w-96 rounded-full bg-emerald-300/40 blur-3xl" style={{ animationDelay: '-12s' }} />
+        <div className="absolute inset-0 opacity-[0.35] [background-image:radial-gradient(circle_at_1px_1px,rgba(14,116,144,0.18)_1px,transparent_0)] [background-size:28px_28px]" />
+        {particles.map((p, i) => (
+          <span
+            key={i}
+            className={`login-particle ${p.color}`}
+            style={{
+              left: p.left,
+              width: p.size,
+              height: p.size,
+              animationDuration: `${p.dur}s`,
+              animationDelay: `-${p.delay}s`,
+              ['--drift' as string]: `${p.drift}px`,
+            }}
+          />
+        ))}
       </div>
 
-      <div className="relative z-10 mx-auto w-full max-w-6xl min-h-[calc(100vh-4rem)] flex items-center">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
-          <section className="hidden lg:flex rounded-3xl border border-white/60 bg-gradient-to-br from-cyan-600 via-sky-600 to-emerald-600 p-8 xl:p-10 text-white shadow-2xl">
-            <div className="my-auto">
-              <p className="inline-flex items-center rounded-full border border-white/25 bg-white/15 px-3 py-1 text-xs font-semibold tracking-wide uppercase">
-                Corporate ERP
-              </p>
-              <h1 className="mt-4 text-4xl xl:text-5xl font-bold leading-tight">
-                Unified Operations,
+      <div className="relative z-10 mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-6xl items-center">
+        <div className="login-enter grid w-full grid-cols-1 overflow-hidden rounded-[28px] border border-white/70 bg-white/70 shadow-[0_40px_120px_-40px_rgba(8,145,178,0.55)] backdrop-blur-xl lg:grid-cols-[1.05fr_1fr]">
+          <section className="relative hidden overflow-hidden bg-gradient-to-br from-slate-900 via-cyan-900 to-emerald-800 p-10 text-white lg:flex xl:p-14">
+            <div className="login-blob absolute -top-20 -right-16 h-72 w-72 rounded-full bg-cyan-400/25 blur-3xl" aria-hidden="true" />
+            <div className="login-blob absolute -bottom-24 -left-16 h-72 w-72 rounded-full bg-emerald-400/25 blur-3xl" style={{ animationDelay: '-9s' }} aria-hidden="true" />
+            <div className="relative my-auto w-full">
+              <div className="flex items-center gap-3">
+                <img src="/icon-192.png" alt="Pabasara Sweets" className="h-12 w-12 rounded-xl bg-white/90 p-1 shadow-lg" />
+                <div>
+                  <p className="text-lg font-bold leading-tight">Pabasara Sweets</p>
+                  <p className="text-xs uppercase tracking-[0.2em] text-cyan-200">Business Management System</p>
+                </div>
+              </div>
+
+              <h1 className="mt-10 text-4xl font-bold leading-tight xl:text-5xl">
+                Run every operation
                 <br />
-                Better Decisions
+                <span className="login-sheen bg-gradient-to-r from-cyan-200 via-emerald-200 to-cyan-200 bg-clip-text text-transparent">
+                  from one workspace
+                </span>
               </h1>
-              <p className="mt-4 text-sm xl:text-base text-white/90 max-w-md">
-                Access HR, purchasing, stock, production, and distribution in one integrated workspace.
+              <p className="mt-4 max-w-md text-sm text-white/80 xl:text-base">
+                HR, purchasing, stock, production, distribution and accounts, connected and updated in real time.
               </p>
 
-              <div className="mt-8 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="rounded-xl border border-white/25 bg-white/10 p-3">
-                  <p className="text-xs uppercase tracking-wide text-white/70">Workflow</p>
-                  <p className="text-lg font-semibold mt-1">Streamlined</p>
-                </div>
-                <div className="rounded-xl border border-white/25 bg-white/10 p-3">
-                  <p className="text-xs uppercase tracking-wide text-white/70">Insights</p>
-                  <p className="text-lg font-semibold mt-1">Real-Time</p>
-                </div>
+              <ul className="mt-8 space-y-3">
+                {['Real-time stock and sales insights', 'Distribution, invoicing and payments', 'Secure role-based access control'].map((t) => (
+                  <li key={t} className="flex items-center gap-3 text-sm text-white/90">
+                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-400/25 ring-1 ring-emerald-300/40">
+                      <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 fill-emerald-200"><path d="M7.7 13.3 4.4 10l-1.1 1.1 4.4 4.4L16.8 6.4l-1.1-1.1z" /></svg>
+                    </span>
+                    {t}
+                  </li>
+                ))}
+              </ul>
+
+              <div className="mt-10 grid grid-cols-3 gap-3">
+                {[['6+', 'Modules'], ['24/7', 'Access'], ['100%', 'Secure']].map(([v, l]) => (
+                  <div key={l} className="rounded-xl border border-white/15 bg-white/10 p-3 backdrop-blur">
+                    <p className="text-xl font-bold">{v}</p>
+                    <p className="text-[11px] uppercase tracking-wide text-white/65">{l}</p>
+                  </div>
+                ))}
               </div>
             </div>
           </section>
 
-          <section className="rounded-3xl border border-white/70 bg-white/85 backdrop-blur-lg shadow-2xl p-6 sm:p-8 lg:p-10">
-            <div>
-              <p className="inline-flex rounded-full bg-cyan-100 text-cyan-700 px-3 py-1 text-xs font-semibold border border-cyan-200">
-                Welcome Back
-              </p>
-              <h2 className="mt-4 text-2xl sm:text-3xl font-bold text-gray-900">Sign in to continue</h2>
-              <p className="mt-2 text-sm text-gray-600">
-                Use your account credentials to access your dashboard and modules.
-              </p>
-            </div>
-
-            <form className="mt-8 space-y-5" onSubmit={handleLogin}>
-              <div>
-                <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
-                  Email address
-                </label>
-                <input
-                  suppressHydrationWarning
-                  id="email"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  required
-                  className="w-full rounded-xl border border-cyan-200 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition"
-                  placeholder="name@company.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
+          <section className="bg-white/80 p-6 sm:p-10 xl:p-14">
+            <div className="mx-auto w-full max-w-md">
+              <div className="mb-8 flex items-center gap-3 lg:hidden">
+                <img src="/icon-192.png" alt="Pabasara Sweets" className="h-11 w-11 rounded-xl shadow" />
+                <p className="text-lg font-bold text-slate-900">Pabasara Sweets</p>
               </div>
 
-              <div>
-                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
-                  Password
-                </label>
-                <input
+              <p className="inline-flex rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-semibold text-cyan-700">
+                Welcome back
+              </p>
+              <h2 className="mt-4 text-3xl font-bold tracking-tight text-slate-900">Sign in to your account</h2>
+              <p className="mt-2 text-sm text-slate-500">Enter your credentials to access your dashboard and modules.</p>
+
+              <form className="mt-8 space-y-5" onSubmit={handleLogin}>
+                <div>
+                  <label htmlFor="email" className="mb-2 block text-sm font-medium text-slate-700">Email address</label>
+                  <div className="relative">
+                    <svg viewBox="0 0 24 24" className="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 fill-none stroke-slate-400" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" />
+                    </svg>
+                    <input
+                      suppressHydrationWarning
+                      id="email"
+                      name="email"
+                      type="email"
+                      autoComplete="email"
+                      required
+                      className={inputClass}
+                      placeholder="name@company.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-700">Password</label>
+                  <div className="relative">
+                    <svg viewBox="0 0 24 24" className="pointer-events-none absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 fill-none stroke-slate-400" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="4" y="11" width="16" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" />
+                    </svg>
+                    <input
+                      suppressHydrationWarning
+                      id="password"
+                      name="password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      required
+                      className={`${inputClass} pr-16`}
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md px-1.5 py-1 text-xs font-semibold text-slate-500 hover:text-cyan-700"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? 'Hide' : 'Show'}
+                    </button>
+                  </div>
+                </div>
+
+                <button
                   suppressHydrationWarning
-                  id="password"
-                  name="password"
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  className="w-full rounded-xl border border-cyan-200 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 transition"
-                  placeholder="Enter your password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
+                  type="submit"
+                  disabled={loading}
+                  className="w-full rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 px-5 py-3.5 text-sm font-semibold text-white shadow-lg shadow-cyan-200/70 transition hover:-translate-y-0.5 hover:from-emerald-700 hover:to-cyan-700 hover:shadow-xl focus:outline-none focus:ring-4 focus:ring-cyan-200 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+                >
+                  {loading ? 'Signing in...' : 'Sign in'}
+                </button>
+              </form>
+
+              <div className="mt-8 flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-500">
+                <svg viewBox="0 0 24 24" className="mt-0.5 h-4 w-4 shrink-0 fill-none stroke-slate-400" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6z" />
+                </svg>
+                Protected workspace. Contact your administrator if you cannot sign in.
               </div>
-
-              <button
-                suppressHydrationWarning
-                type="submit"
-                disabled={loading}
-                className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-cyan-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-emerald-200/60 hover:from-emerald-700 hover:to-cyan-700 disabled:opacity-60 disabled:cursor-not-allowed transition"
-              >
-                {loading ? 'Signing in...' : 'Sign in'}
-              </button>
-            </form>
-
-            <div className="mt-6 text-xs text-gray-500">
-              Protected workspace. Contact your administrator if you cannot sign in.
             </div>
           </section>
         </div>
@@ -265,7 +336,7 @@ export default function Home() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-gradient-to-br from-cyan-50 to-emerald-100 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-600"></div>
+          <PageSkeleton />
         </div>
       }
     >

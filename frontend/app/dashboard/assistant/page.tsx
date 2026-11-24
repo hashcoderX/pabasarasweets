@@ -164,10 +164,9 @@ export default function DashboardAssistantPage() {
 
   return (
     <div
-      className="min-h-screen bg-[radial-gradient(circle_at_8%_10%,_rgba(34,211,238,0.2),_transparent_28%),radial-gradient(circle_at_90%_12%,_rgba(16,185,129,0.22),_transparent_30%),radial-gradient(circle_at_70%_88%,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#ecfeff_0%,_#f8fafc_42%,_#f0fdfa_100%)] p-4 sm:p-6 lg:p-8"
-      style={{ fontFamily: "'Space Grotesk', 'Manrope', 'Segoe UI', sans-serif" }}
+      className="min-h-screen bg-[radial-gradient(circle_at_8%_10%,_rgba(34,211,238,0.2),_transparent_28%),radial-gradient(circle_at_90%_12%,_rgba(16,185,129,0.22),_transparent_30%),radial-gradient(circle_at_70%_88%,_rgba(14,165,233,0.18),_transparent_30%),linear-gradient(180deg,_#ecfeff_0%,_#f8fafc_42%,_#f0fdfa_100%)] py-4 px-3 sm:py-6 sm:px-4 lg:py-8 lg:px-6"
     >
-      <div className="mx-auto max-w-6xl">
+      <div className="w-full">
         <div className="mb-6 overflow-hidden rounded-[30px] border border-white/85 bg-white/85 p-5 shadow-[0_28px_100px_-42px_rgba(6,182,212,0.55)] backdrop-blur-xl sm:p-7">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>

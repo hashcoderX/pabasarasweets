@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -1510,9 +1511,9 @@ export default function LoadsPage() {
     win.document.write(`
       <html>
         <head>
-          <title>Load ${selectedLoadDetails.load_number}</title>
+          <title>Load ${selectedLoadDetails.load_number}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
         </head>
-        <body style="font-family: Arial, sans-serif; padding: 20px; color: #111;">
+        <body style="font-family: &quot;DM Sans&quot;, sans-serif; padding: 20px; color: #111;">
           <h2 style="margin-bottom: 6px;">Vehicle Load Details</h2>
           <p style="margin: 2px 0;"><strong>Load Number:</strong> ${selectedLoadDetails.load_number}</p>
           <p style="margin: 2px 0;"><strong>Status:</strong> ${selectedLoadDetails.status.replace('_', ' ')}</p>
@@ -1835,7 +1836,7 @@ export default function LoadsPage() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(16,185,129,0.12),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,_#f0fdf4_0%,_#eff6ff_100%)]">
-        <div className="h-14 w-14 animate-spin rounded-full border-b-2 border-emerald-600"></div>
+        <PageSkeleton />
       </div>
     );
   }

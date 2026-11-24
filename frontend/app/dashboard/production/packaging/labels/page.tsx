@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -148,14 +149,14 @@ export default function PackagingLabelsPage() {
     popup.document.write(`
       <html>
         <head>
-          <title>Packaging Labels</title>
+          <title>Packaging Labels</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
           <style>
-            body { font-family: Arial, sans-serif; margin: 12px; color: #111; }
+            body { font-family: "DM Sans", sans-serif; margin: 12px; color: #111; }
             .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
             .label { border: 1px solid #333; border-radius: 8px; padding: 10px; page-break-inside: avoid; }
             .header { font-weight: 700; font-size: 13px; margin-bottom: 8px; letter-spacing: 0.4px; }
             .line { font-size: 11px; margin: 3px 0; }
-            .barcode, .qr { margin-top: 8px; font-family: 'Courier New', monospace; font-size: 10px; border: 1px dashed #666; padding: 5px; }
+            .barcode, .qr { margin-top: 8px; font-family: "DM Sans", sans-serif; font-size: 10px; border: 1px dashed #666; padding: 5px; }
             @media print { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
           </style>
         </head>
@@ -175,7 +176,7 @@ export default function PackagingLabelsPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        <PageSkeleton />
       </div>
     );
   }

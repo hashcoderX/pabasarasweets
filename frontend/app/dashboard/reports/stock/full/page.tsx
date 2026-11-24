@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -245,7 +246,7 @@ export default function FullStockReportPage() {
   const downloadPdf = () => buildPdf().save(`full-stock-report-${new Date().toISOString().split('T')[0]}.pdf`);
 
   if (!token || !accessReady) {
-    return <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-red-50 flex items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div></div>;
+    return <div className="min-h-screen bg-gradient-to-br from-orange-50 via-amber-50 to-red-50 flex items-center justify-center"><PageSkeleton /></div>;
   }
 
   return (

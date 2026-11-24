@@ -3,6 +3,23 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
+import DoReceiptPreview from './DoReceiptPreview';
+import DeliveryOrdersTable from './DeliveryOrdersTable';
+
+// "2026-11-22T00:00:00.000000Z" -> "22 Nov 2026". Uses the date part only, so it never shifts by timezone.
+const formatLoadDate = (value?: string | null): string => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  if (!match) return '';
+  const [, year, month, day] = match;
+  const monthName = new Date(Date.UTC(Number(year), Number(month) - 1, 1)).toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' });
+  return `${day} ${monthName} ${year}`;
+};
+
+// "in_transit" -> "In transit"
+const formatLoadStatus = (value?: string | null): string => {
+  const text = String(value || '').replace(/_/g, ' ').trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+};
 
 type SummaryRow = {
   outlet_id: number;
@@ -78,6 +95,8 @@ type InventoryOption = {
   code?: string | null;
   name?: string | null;
   unit?: string | null;
+  type?: 'raw_material' | 'finished_good' | null;
+  current_stock?: number | string | null;
   sell_price?: number | string | null;
   unit_price?: number | string | null;
 };
@@ -89,8 +108,6 @@ type CreateOrderLine = {
   item_name: string;
   unit: string;
   quantity: number;
-  unit_price: number;
-  line_total: number;
 };
 
 type InvoiceEditLine = {
@@ -132,11 +149,21 @@ export default function DashboardOrderListPage() {
   const [loading, setLoading] = useState(true);
   const [sales, setSales] = useState<SaleRow[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<SaleRow | null>(null);
+  const [orderToDelete, setOrderToDelete] = useState<SaleRow | null>(null);
+  const [deletingOrder, setDeletingOrder] = useState(false);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [message, setMessage] = useState('');
   const [processingAction, setProcessingAction] = useState<'accept' | 'reject' | 'create-do' | 'create-invoice' | null>(null);
   const [showCreateDoModal, setShowCreateDoModal] = useState(false);
+  const [doReceiptPreviewId, setDoReceiptPreviewId] = useState<number | null>(null);
+  const [doListRefreshKey, setDoListRefreshKey] = useState(0);
+  const [openingDoNumber, setOpeningDoNumber] = useState('');
+  // DO flow: step 1 = load / delivery config, step 2 = editable preview before the DO is created.
+  const [doStep, setDoStep] = useState<'config' | 'preview'>('config');
+  const [doEditLines, setDoEditLines] = useState<InvoiceEditLine[]>([]);
+  const [doOrderDiscount, setDoOrderDiscount] = useState('0');
+  const [doOrderDiscountType, setDoOrderDiscountType] = useState<'amount' | 'percent'>('amount');
   const [showCreateOrderModal, setShowCreateOrderModal] = useState(false);
   const [createOrderCustomerId, setCreateOrderCustomerId] = useState(0);
   const [createOrderCustomerName, setCreateOrderCustomerName] = useState('');
@@ -150,7 +177,6 @@ export default function DashboardOrderListPage() {
   const [createOrderItemSearch, setCreateOrderItemSearch] = useState('');
   const [showCreateOrderItemSuggestions, setShowCreateOrderItemSuggestions] = useState(false);
   const [selectedCreateQty, setSelectedCreateQty] = useState('1');
-  const [selectedCreatePrice, setSelectedCreatePrice] = useState('0');
   const [creatingOrder, setCreatingOrder] = useState(false);
   const [loadingCreateOrderMeta, setLoadingCreateOrderMeta] = useState(false);
   const [allocateLoadForDo, setAllocateLoadForDo] = useState(false);
@@ -290,8 +316,15 @@ export default function DashboardOrderListPage() {
   const recentOrdersEnd = Math.min(recentOrdersStart + recentOrdersPageSize, recentOrderRows.length);
   const paginatedRecentOrderRows = recentOrderRows.slice(recentOrdersStart, recentOrdersStart + recentOrdersPageSize);
   const createOrderTotalQty = createOrderLines.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
-  const createOrderTotalAmount = createOrderLines.reduce((sum, row) => sum + Number(row.line_total || 0), 0);
   const invoiceEditSubtotal = invoiceEditLines.reduce((sum, row) => sum + Number(row.line_total || 0), 0);
+  const doEditSubtotal = doEditLines.reduce((sum, row) => sum + Number(row.line_total || 0), 0);
+  const doEditOrderDiscountAmount = (() => {
+    const raw = Math.max(Number(doOrderDiscount || 0), 0);
+    if (!Number.isFinite(raw)) return 0;
+    const amount = doOrderDiscountType === 'percent' ? (doEditSubtotal * Math.min(raw, 100)) / 100 : raw;
+    return Math.min(amount, doEditSubtotal);
+  })();
+  const doEditNetTotal = Math.max(doEditSubtotal - doEditOrderDiscountAmount, 0);
   const invoiceOrderDiscountAmount = useMemo(() => {
     const raw = Math.max(Number(invoiceOrderDiscount || 0), 0);
     if (invoiceOrderDiscountType === 'percent') {
@@ -317,11 +350,18 @@ export default function DashboardOrderListPage() {
   }, [createOrderCustomerSearch, createOrderCustomers]);
   const filteredCreateOrderItems = useMemo(() => {
     const keyword = createOrderItemSearch.trim().toLowerCase();
-    if (!keyword) return createOrderInventory.slice(0, 20);
-    return createOrderInventory
-      .filter((item) => (`${item.code || ''} ${item.name || ''}`).toLowerCase().includes(keyword))
-      .slice(0, 20);
+    const matches = keyword
+      ? createOrderInventory.filter((item) => (`${item.code || ''} ${item.name || ''}`).toLowerCase().includes(keyword))
+      : createOrderInventory;
+    const inStockFirst = [...matches].sort((a, b) => Number(Number(b.current_stock || 0) > 0) - Number(Number(a.current_stock || 0) > 0));
+    return inStockFirst.slice(0, 20);
   }, [createOrderInventory, createOrderItemSearch]);
+
+  const createOrderStockById = useMemo(() => {
+    const map = new Map<number, number>();
+    createOrderInventory.forEach((item) => map.set(Number(item.id), Number(item.current_stock || 0)));
+    return map;
+  }, [createOrderInventory]);
 
   const updateOrderInState = useCallback((updatedOrder: SaleRow) => {
     setSales((prev) => prev.map((row) => (row.id === updatedOrder.id ? { ...row, ...updatedOrder } : row)));
@@ -339,7 +379,6 @@ export default function DashboardOrderListPage() {
     setCreateOrderItemSearch('');
     setShowCreateOrderItemSuggestions(false);
     setSelectedCreateQty('1');
-    setSelectedCreatePrice('0');
   }, []);
 
   const loadCreateOrderMeta = useCallback(async () => {
@@ -351,14 +390,16 @@ export default function DashboardOrderListPage() {
           headers: { Authorization: `Bearer ${token}` },
           params: { per_page: 200, status: 'active' },
         }),
+        // Orders are for finished products only; raw materials are excluded.
         axios.get(`${API_URL}/api/stock/inventory`, {
           headers: { Authorization: `Bearer ${token}` },
-          params: { per_page: 200, status: 'active' },
+          params: { per_page: 200, status: 'active', type: 'finished_good' },
         }),
       ]);
 
       const customerRows = Array.isArray(customerRes.data?.data?.data) ? customerRes.data.data.data : [];
-      const inventoryRows = Array.isArray(inventoryRes.data?.data?.data) ? inventoryRes.data.data.data : [];
+      const inventoryRows = (Array.isArray(inventoryRes.data?.data?.data) ? inventoryRes.data.data.data : [])
+        .filter((item: InventoryOption) => !item.type || item.type === 'finished_good');
       setCreateOrderCustomers(customerRows);
       setCreateOrderInventory(inventoryRows);
     } catch (error) {
@@ -380,7 +421,6 @@ export default function DashboardOrderListPage() {
   const addCreateOrderItem = useCallback(() => {
     const selectedItem = createOrderInventory.find((item) => Number(item.id) === selectedCreateItemId);
     const qty = Number(selectedCreateQty || 0);
-    const price = Number(selectedCreatePrice || 0);
 
     if (!selectedItem) {
       setMessage('Please select an item.');
@@ -390,13 +430,8 @@ export default function DashboardOrderListPage() {
       setMessage('Quantity must be greater than 0.');
       return;
     }
-    if (!Number.isFinite(price) || price < 0) {
-      setMessage('Unit price must be 0 or greater.');
-      return;
-    }
 
     const normalizedId = Number(selectedItem.id || 0);
-    const lineTotal = qty * price;
     setCreateOrderLines((prev) => {
       const existing = prev.find((line) => line.inventory_item_id === normalizedId);
       if (existing) {
@@ -405,7 +440,6 @@ export default function DashboardOrderListPage() {
             ? {
               ...line,
               quantity: Number(line.quantity || 0) + qty,
-              line_total: (Number(line.quantity || 0) + qty) * Number(line.unit_price || 0),
             }
             : line
         ));
@@ -420,8 +454,6 @@ export default function DashboardOrderListPage() {
           item_name: String(selectedItem.name || 'Item'),
           unit: String(selectedItem.unit || ''),
           quantity: qty,
-          unit_price: price,
-          line_total: lineTotal,
         },
       ];
     });
@@ -429,7 +461,7 @@ export default function DashboardOrderListPage() {
     setCreateOrderItemSearch('');
     setSelectedCreateItemId(0);
     setShowCreateOrderItemSuggestions(false);
-  }, [createOrderInventory, selectedCreateItemId, selectedCreatePrice, selectedCreateQty]);
+  }, [createOrderInventory, selectedCreateItemId, selectedCreateQty]);
 
   const selectCreateOrderCustomer = useCallback((customer: DistributionCustomerOption) => {
     const customerId = Number(customer.id || 0);
@@ -445,7 +477,6 @@ export default function DashboardOrderListPage() {
     const itemId = Number(item.id || 0);
     setSelectedCreateItemId(itemId);
     setCreateOrderItemSearch(`${item.code || '-'} - ${item.name || 'Item'}`);
-    setSelectedCreatePrice(String(Number(item.sell_price ?? item.unit_price ?? 0)));
     setShowCreateOrderItemSuggestions(false);
   }, []);
 
@@ -484,7 +515,6 @@ export default function DashboardOrderListPage() {
           items: createOrderLines.map((line) => ({
             inventory_item_id: line.inventory_item_id,
             quantity: line.quantity,
-            unit_price: line.unit_price,
             issue_type: 'retail',
             discount_amount: 0,
           })),
@@ -542,26 +572,11 @@ export default function DashboardOrderListPage() {
     }
   }, [API_URL, token]);
 
+  // Opens the on-screen DO receipt (54mm / 80mm / A4) instead of downloading a PDF.
   const downloadDoReceipt = useCallback(async (distributionDoId: number) => {
     if (!token || distributionDoId <= 0) return;
-    try {
-      const response = await axios.get(`${API_URL}/api/distribution/dos/${distributionDoId}/receipt`, {
-        headers: { Authorization: `Bearer ${token}` },
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `do-receipt-${distributionDoId}.pdf`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Failed to generate DO receipt:', error);
-      setMessage('DO created, but receipt generation failed.');
-    }
-  }, [API_URL, token]);
+    setDoReceiptPreviewId(distributionDoId);
+  }, [token]);
 
   const downloadInvoiceReceipt = useCallback(async (distributionInvoiceId: number) => {
     if (!token || distributionInvoiceId <= 0) return;
@@ -636,6 +651,7 @@ export default function DashboardOrderListPage() {
         await loadData(token);
       }
       if (action === 'create-do') {
+        setDoListRefreshKey((prev) => prev + 1);
         const distributionDoId = Number(res.data?.distribution_do_id || 0);
         if (distributionDoId > 0) {
           await downloadDoReceipt(distributionDoId);
@@ -664,6 +680,35 @@ export default function DashboardOrderListPage() {
     }
   }, [API_URL, downloadDoReceipt, downloadInvoiceReceipt, loadData, selectedOrder, token, updateOrderInState]);
 
+  // Mirrors the backend rule: only untouched orders (no DO, invoice or payment) can be deleted.
+  const canDeleteOrder = useCallback((row: SaleRow) => {
+    const status = String(row.status || 'pending').toLowerCase();
+    return ['pending', 'rejected'].includes(status)
+      && !row.do_number
+      && !row.invoice_number
+      && Number(row.paid_amount || 0) <= 0;
+  }, []);
+
+  const confirmDeleteOrder = useCallback(async () => {
+    if (!orderToDelete || !token) return;
+    try {
+      setDeletingOrder(true);
+      const res = await axios.delete(`${API_URL}/api/orders/${orderToDelete.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (selectedOrder?.id === orderToDelete.id) setSelectedOrder(null);
+      setOrderToDelete(null);
+      await loadData(token);
+      setMessage(res.data?.message || 'Order deleted successfully.');
+    } catch (error: unknown) {
+      const apiError = error as ApiError;
+      setOrderToDelete(null);
+      setMessage(apiError.response?.data?.message || 'Failed to delete order.');
+    } finally {
+      setDeletingOrder(false);
+    }
+  }, [API_URL, loadData, orderToDelete, selectedOrder, token]);
+
   const submitRejectOrder = useCallback(async () => {
     const ok = await handleOrderAction('reject', { reason: rejectReason.trim() });
     if (ok) {
@@ -672,26 +717,123 @@ export default function DashboardOrderListPage() {
     }
   }, [handleOrderAction, rejectReason]);
 
+  const openDoByNumber = useCallback(async (doNumber: string) => {
+    if (!token || !doNumber) return;
+    try {
+      setOpeningDoNumber(doNumber);
+      const res = await axios.get(`${API_URL}/api/distribution/dos`, {
+        headers: { Authorization: `Bearer ${token}` },
+        params: { q: doNumber, per_page: 5 },
+      });
+      const rows = (res.data?.data?.data || []) as Array<{ id: number; do_number: string }>;
+      const match = rows.find((row) => row.do_number === doNumber);
+      if (match) {
+        setDoReceiptPreviewId(match.id);
+      } else {
+        setMessage(`Delivery order ${doNumber} was not found.`);
+      }
+    } catch {
+      setMessage('Could not open the delivery order.');
+    } finally {
+      setOpeningDoNumber('');
+    }
+  }, [API_URL, token]);
+
   const openCreateDoModal = useCallback(() => {
     setDoDeliveryDate(new Date().toISOString().slice(0, 10));
     setAllocateLoadForDo(false);
     setSelectedDoLoadId(-1);
     setDoCallConfirmed(false);
+    setDoStep('config');
     setShowCreateDoModal(true);
     void loadVehicleLoads();
   }, [loadVehicleLoads]);
 
+  const openDoPreview = useCallback(() => {
+    if (!selectedOrder) return;
+    const sourceItems = (selectedOrder.items || []).filter((item) => Number(item.inventory_item_id || 0) > 0);
+    if (sourceItems.length === 0) {
+      setMessage('Order has no item lines to put on a DO.');
+      return;
+    }
+    setDoEditLines(sourceItems.map((item) => {
+      const quantity = Number(item.quantity || 0);
+      const unitPrice = Number(item.unit_price || 0);
+      const discount = Math.min(Number(item.discount_amount || 0), unitPrice);
+      return {
+        row_id: `${item.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        source_item_id: item.id,
+        inventory_item_id: Number(item.inventory_item_id || 0),
+        item_code: String(item.item_code || ''),
+        item_name: String(item.item_name || ''),
+        unit: String(item.unit || ''),
+        quantity,
+        unit_price: unitPrice,
+        discount_type: 'amount',
+        discount_value: discount,
+        discount_amount: discount,
+        line_total: quantity * Math.max(unitPrice - discount, 0),
+      };
+    }));
+    setDoOrderDiscountType('amount');
+    setDoOrderDiscount(String(Number(selectedOrder.discount_amount || 0)));
+    setDoStep('preview');
+  }, [selectedOrder]);
+
+  const updateDoEditLine = useCallback((
+    rowId: string,
+    field: 'quantity' | 'unit_price' | 'discount_value' | 'discount_type',
+    value: number | 'amount' | 'percent',
+  ) => {
+    setDoEditLines((prev) => prev.map((line) => {
+      if (line.row_id !== rowId) return line;
+      const next = { ...line } as InvoiceEditLine;
+      if (field === 'discount_type') {
+        next.discount_type = value as 'amount' | 'percent';
+      } else {
+        next[field] = Number.isFinite(Number(value)) ? Number(value) : 0;
+      }
+      const qty = Math.max(Number(next.quantity || 0), 0);
+      const unitPrice = Math.max(Number(next.unit_price || 0), 0);
+      const discountValue = Math.max(Number(next.discount_value || 0), 0);
+      next.discount_amount = next.discount_type === 'percent'
+        ? Math.min((unitPrice * Math.min(discountValue, 100)) / 100, unitPrice)
+        : Math.min(discountValue, unitPrice);
+      next.line_total = qty * Math.max(unitPrice - next.discount_amount, 0);
+      return next;
+    }));
+  }, []);
+
   const submitCreateDo = useCallback(async () => {
+    if (doEditLines.length === 0) {
+      setMessage('Please keep at least one item on the DO.');
+      return;
+    }
+    if (doEditLines.some((line) => !(Number(line.quantity) > 0))) {
+      setMessage('Every DO line needs a quantity greater than 0.');
+      return;
+    }
     const ok = await handleOrderAction('create-do', {
       allocate_load: allocateLoadForDo && selectedDoLoadId > 0,
       load_id: allocateLoadForDo && selectedDoLoadId > 0 ? selectedDoLoadId : null,
       delivery_date: doDeliveryDate || null,
       call_confirmed: doCallConfirmed,
+      order_discount_amount: Number(doEditOrderDiscountAmount.toFixed(2)),
+      items: doEditLines.map((line) => ({
+        inventory_item_id: line.inventory_item_id,
+        item_code: line.item_code,
+        item_name: line.item_name,
+        unit: line.unit || null,
+        quantity: Number(line.quantity || 0),
+        unit_price: Number(line.unit_price || 0),
+        discount_amount: Number(Number(line.discount_amount || 0).toFixed(2)),
+      })),
     });
     if (ok) {
       setShowCreateDoModal(false);
+      setDoStep('config');
     }
-  }, [allocateLoadForDo, doCallConfirmed, doDeliveryDate, handleOrderAction, selectedDoLoadId]);
+  }, [allocateLoadForDo, doCallConfirmed, doDeliveryDate, doEditLines, doEditOrderDiscountAmount, handleOrderAction, selectedDoLoadId]);
 
   const openCreateInvoiceModal = useCallback(() => {
     if (!selectedOrder) return;
@@ -825,9 +967,9 @@ export default function DashboardOrderListPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden">
       <div className="absolute inset-0 opacity-30 pointer-events-none">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
@@ -1059,13 +1201,26 @@ export default function DashboardOrderListPage() {
                       <td className="px-4 py-2.5 text-sm text-right text-gray-700">{Number(row.total_quantity || 0).toFixed(2)}</td>
                       <td className="px-4 py-2.5 text-sm text-right text-gray-900 font-semibold">{Number(row.total_amount || 0).toFixed(2)}</td>
                       <td className="px-4 py-2.5 text-sm text-right">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedOrder(row)}
-                          className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
-                        >
-                          View
-                        </button>
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedOrder(row)}
+                            className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                          >
+                            View
+                          </button>
+                          {canDeleteOrder(row) ? (
+                            <button
+                              type="button"
+                              onClick={() => setOrderToDelete(row)}
+                              className="rounded-md border border-rose-200 bg-white px-2 py-1.5 text-rose-600 hover:bg-rose-50"
+                              title="Delete order"
+                              aria-label={`Delete order ${row.sale_number}`}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" /></svg>
+                            </button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1102,126 +1257,420 @@ export default function DashboardOrderListPage() {
             </div>
           )}
         </section>
+
+        <DeliveryOrdersTable
+          token={token}
+          apiUrl={API_URL}
+          refreshKey={doListRefreshKey}
+          onView={(doId) => setDoReceiptPreviewId(doId)}
+        />
       </main>
 
-      {selectedOrder && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-white/70 bg-white p-5 shadow-2xl">
-            <div className="mb-4 flex items-center justify-between border-b border-slate-200 pb-3">
-              <h3 className="text-lg font-semibold text-slate-900">Order Preview</h3>
-              <button
-                type="button"
-                onClick={() => setSelectedOrder(null)}
-                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
-              >
-                Close
-              </button>
-            </div>
+      {selectedOrder && (() => {
+        const order = selectedOrder;
+        const status = String(order.status || 'pending').toLowerCase();
+        const isRejected = status === 'rejected';
+        const isInvoiced = Boolean(order.invoice_number) || ['invoiced', 'completed'].includes(status);
+        const hasDo = Boolean(order.do_number) || ['do_created', 'completed'].includes(status);
+        const isAccepted = isInvoiced || hasDo || ['accepted', 'do_created', 'invoiced', 'completed'].includes(status);
+        const money = (value: number | string | null | undefined) =>
+          Number(value || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const orderDate = order.sale_date
+          ? new Date(order.sale_date).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+          : '-';
+        const statusLabel = isInvoiced ? 'Invoiced' : status.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+        const statusTone = isRejected
+          ? 'bg-rose-500/20 text-rose-100 ring-rose-300/40'
+          : isInvoiced
+            ? 'bg-violet-500/20 text-violet-100 ring-violet-300/40'
+            : isAccepted
+              ? 'bg-emerald-500/20 text-emerald-100 ring-emerald-300/40'
+              : 'bg-amber-400/20 text-amber-100 ring-amber-300/40';
+        const balance = Number(order.balance_amount || 0);
+        const items = order.items || [];
 
-            <div className="grid grid-cols-1 gap-3 text-sm text-slate-700 md:grid-cols-2">
-              <div><span className="font-semibold text-slate-900">Order #:</span> {selectedOrder.sale_number || '-'}</div>
-              <div><span className="font-semibold text-slate-900">Date:</span> {selectedOrder.sale_date ? new Date(selectedOrder.sale_date).toLocaleString() : '-'}</div>
-              <div><span className="font-semibold text-slate-900">Outlet:</span> {selectedOrder.outlet?.code || '-'} - {selectedOrder.outlet?.name || '-'}</div>
-              <div><span className="font-semibold text-slate-900">Customer:</span> {selectedOrder.customer_name || '-'}</div>
-              <div><span className="font-semibold text-slate-900">Remark:</span> {selectedOrder.order_type === 'factory_order' ? 'Factory Order' : 'Outlet Order'}</div>
-              <div><span className="font-semibold text-slate-900">Status:</span> {selectedOrder.status || '-'}</div>
-              <div><span className="font-semibold text-slate-900">DO #:</span> {selectedOrder.do_number || '-'}</div>
-              <div><span className="font-semibold text-slate-900">Invoice #:</span> {selectedOrder.invoice_number || '-'}</div>
-              <div><span className="font-semibold text-slate-900">Quantity:</span> {Number(selectedOrder.total_quantity || 0).toFixed(2)}</div>
-              <div><span className="font-semibold text-slate-900">Amount:</span> {Number(selectedOrder.total_amount || 0).toFixed(2)}</div>
-              <div><span className="font-semibold text-slate-900">Discount:</span> {Number(selectedOrder.discount_amount || 0).toFixed(2)}</div>
-              <div><span className="font-semibold text-slate-900">Paid:</span> {Number(selectedOrder.paid_amount || 0).toFixed(2)} ({(selectedOrder.payment_type || 'cash').toUpperCase()})</div>
-              <div><span className="font-semibold text-slate-900">Balance:</span> {Number(selectedOrder.balance_amount || 0).toFixed(2)}</div>
-            </div>
-            {selectedOrder.status === 'rejected' && (
-              <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                <span className="font-semibold">Reject Reason:</span> {selectedOrder.rejected_reason || '-'}
+        const steps = [
+          { label: 'Placed', done: true },
+          { label: 'Accepted', done: isAccepted },
+          { label: 'DO created', done: hasDo },
+          { label: 'Invoiced', done: isInvoiced },
+        ];
+
+        const acceptDisabled = processingAction !== null || ['rejected', 'accepted', 'do_created', 'invoiced', 'completed'].includes(String(order.status));
+        const rejectDisabled = acceptDisabled || !!order.do_number || !!order.invoice_number;
+        const doDisabled = processingAction !== null || ['rejected', 'do_created', 'completed'].includes(String(order.status)) || !!order.do_number;
+        const invoiceDisabled = processingAction !== null || order.status === 'rejected' || !!order.invoice_number;
+
+        return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-5">
+          <div className="flex max-h-[94vh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl bg-white shadow-[0_40px_120px_-30px_rgba(15,23,42,0.6)]">
+            {/* Header */}
+            <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-indigo-950 to-violet-900 px-6 pb-6 pt-5 text-white">
+              <div className="pointer-events-none absolute -right-16 -top-20 h-56 w-56 rounded-full bg-violet-500/30 blur-3xl" aria-hidden="true" />
+              <div className="pointer-events-none absolute -bottom-24 left-10 h-48 w-48 rounded-full bg-cyan-400/20 blur-3xl" aria-hidden="true" />
+
+              <div className="relative flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-white/10 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-100 ring-1 ring-inset ring-white/15">
+                      {order.order_type === 'factory_order' ? 'Factory Order' : 'Outlet Order'}
+                    </span>
+                    <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ring-1 ring-inset ${statusTone}`}>{statusLabel}</span>
+                  </div>
+                  <h3 className="mt-2 truncate text-xl font-bold tracking-tight sm:text-2xl">{order.sale_number || '-'}</h3>
+                  <p className="mt-0.5 text-sm text-indigo-200/80">{orderDate}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedOrder(null)}
+                  className="rounded-xl bg-white/10 p-2 text-white/80 ring-1 ring-inset ring-white/15 transition hover:bg-white/20 hover:text-white"
+                  aria-label="Close"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-5 w-5"><path d="M6 6l12 12M18 6 6 18" /></svg>
+                </button>
               </div>
-            )}
 
-            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-3">
-              <button
-                type="button"
-                onClick={() => handleOrderAction('accept')}
-                disabled={processingAction !== null || selectedOrder.status === 'rejected' || selectedOrder.status === 'accepted' || selectedOrder.status === 'do_created' || selectedOrder.status === 'invoiced' || selectedOrder.status === 'completed'}
-                className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {processingAction === 'accept' ? 'Accepting...' : 'Accept Order'}
-              </button>
+              {/* Progress */}
+              <div className="relative mt-5">
+                {isRejected ? (
+                  <div className="flex items-center gap-2 rounded-xl bg-rose-500/15 px-3 py-2 text-sm text-rose-100 ring-1 ring-inset ring-rose-300/30">
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-[11px] font-bold">✕</span>
+                    Order rejected{order.rejected_reason ? `: ${order.rejected_reason}` : ''}
+                  </div>
+                ) : (
+                  <ol className="grid grid-cols-4 gap-2">
+                    {steps.map((step, index) => (
+                      <li key={step.label} className="min-w-0">
+                        <div className={`h-1.5 rounded-full ${step.done ? 'bg-gradient-to-r from-emerald-300 to-cyan-300 shadow-[0_0_10px_rgba(110,231,183,0.6)]' : 'bg-white/15'}`} />
+                        <p className={`mt-1.5 truncate text-[11px] font-semibold ${step.done ? 'text-white' : 'text-white/45'}`}>
+                          {step.done ? '✓ ' : `${index + 1}. `}{step.label}
+                        </p>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 space-y-5 overflow-y-auto bg-slate-50/60 px-5 py-5 sm:px-6">
+              {/* Parties + references */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-500 text-white shadow-md shadow-indigo-200">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Customer</p>
+                    <p className="truncate text-sm font-semibold text-slate-900">{order.customer_name || '-'}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-sky-500 text-white shadow-md shadow-cyan-200">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5"><path d="M3 9 5 3h14l2 6" /><path d="M4 9h16v12H4z" /><path d="M9 21v-6h6v6" /></svg>
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Outlet</p>
+                    <p className="truncate text-sm font-semibold text-slate-900">{order.outlet?.code || '-'} · {order.outlet?.name || '-'}</p>
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">DO number</p>
+                      <p className={`truncate text-sm font-semibold ${order.do_number ? 'text-slate-900' : 'text-slate-300'}`}>{order.do_number || 'Not created yet'}</p>
+                    </div>
+                    {order.do_number ? (
+                      <button
+                        type="button"
+                        onClick={() => void openDoByNumber(String(order.do_number))}
+                        disabled={openingDoNumber === order.do_number}
+                        className="shrink-0 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
+                      >
+                        {openingDoNumber === order.do_number ? 'Opening…' : 'View DO'}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Invoice number</p>
+                  <p className={`text-sm font-semibold ${order.invoice_number ? 'text-slate-900' : 'text-slate-300'}`}>{order.invoice_number || 'Not created yet'}</p>
+                </div>
+              </div>
+
+              {/* Money summary */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+                {[
+                  { label: 'Quantity', value: Number(order.total_quantity || 0).toFixed(2), tone: 'text-slate-900' },
+                  { label: 'Amount', value: money(order.total_amount), tone: 'text-slate-900' },
+                  { label: 'Discount', value: money(order.discount_amount), tone: 'text-emerald-600' },
+                  { label: `Paid · ${(order.payment_type || 'cash').toUpperCase()}`, value: money(order.paid_amount), tone: 'text-sky-600' },
+                ].map((tile) => (
+                  <div key={tile.label} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                    <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-slate-400">{tile.label}</p>
+                    <p className={`mt-0.5 text-base font-bold ${tile.tone}`}>{tile.value}</p>
+                  </div>
+                ))}
+                <div className={`col-span-2 rounded-2xl px-4 py-3 text-white shadow-lg sm:col-span-1 ${balance > 0 ? 'bg-gradient-to-br from-rose-500 to-orange-500 shadow-rose-200' : 'bg-gradient-to-br from-emerald-500 to-teal-500 shadow-emerald-200'}`}>
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-white/80">{balance > 0 ? 'Balance due' : 'Settled'}</p>
+                  <p className="mt-0.5 text-lg font-extrabold">{money(balance)}</p>
+                </div>
+              </div>
+
+              {/* Notes */}
+              {order.notes ? (
+                <div className="flex gap-3 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3">
+                  <span className="text-lg leading-none">📝</span>
+                  <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Notes</p>
+                    <p className="text-sm text-amber-900">{order.notes}</p>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Items */}
+              <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-900">Items</p>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600">{items.length}</span>
+                </div>
+                {items.length === 0 ? (
+                  <p className="px-4 py-8 text-center text-sm text-slate-500">No order items found.</p>
+                ) : (
+                  <ul className="divide-y divide-slate-100">
+                    {items.map((item) => (
+                      <li key={item.id} className="flex items-center gap-3 px-4 py-3 transition hover:bg-slate-50">
+                        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-100 to-indigo-100 text-sm font-bold text-indigo-700">
+                          {String(item.item_name || '?').trim().charAt(0).toUpperCase()}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900" title={item.item_name || ''}>{item.item_name || '-'}</p>
+                          <p className="truncate text-xs text-slate-500" title={item.item_code || ''}>
+                            {item.item_code || '-'}
+                            {item.issue_type ? <span className="ml-1.5 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-600">{item.issue_type}</span> : null}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="text-sm font-bold text-slate-900">{money(item.line_total)}</p>
+                          <p className="text-xs text-slate-500">
+                            {Number(item.quantity || 0).toFixed(2)} {item.unit || ''} × {money(item.unit_price)}
+                            {Number(item.discount_amount || 0) > 0 ? <span className="text-emerald-600"> · −{money(item.discount_amount)}</span> : null}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-white px-5 py-4 sm:px-6">
               <button
                 type="button"
                 onClick={() => handleOrderAction('reject')}
-                disabled={processingAction !== null || selectedOrder.status === 'rejected' || selectedOrder.status === 'accepted' || selectedOrder.status === 'do_created' || selectedOrder.status === 'invoiced' || selectedOrder.status === 'completed' || !!selectedOrder.do_number || !!selectedOrder.invoice_number}
-                className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={rejectDisabled}
+                className="rounded-xl border border-rose-200 px-4 py-2.5 text-sm font-semibold text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-300 disabled:hover:bg-transparent"
               >
-                {processingAction === 'reject' ? 'Rejecting...' : 'Reject Order'}
+                {processingAction === 'reject' ? 'Rejecting...' : 'Reject'}
               </button>
-              <button
-                type="button"
-                onClick={openCreateDoModal}
-                disabled={processingAction !== null || selectedOrder.status === 'rejected' || selectedOrder.status === 'do_created' || selectedOrder.status === 'completed' || !!selectedOrder.do_number}
-                className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {processingAction === 'create-do' ? 'Creating...' : 'Create DO'}
-              </button>
-              <button
-                type="button"
-                onClick={openCreateInvoiceModal}
-                disabled={processingAction !== null || selectedOrder.status === 'rejected' || !!selectedOrder.invoice_number}
-                className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {processingAction === 'create-invoice' ? 'Creating...' : 'Create Invoice'}
-              </button>
-            </div>
-
-            <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-              <span className="font-semibold text-slate-900">Notes:</span> {selectedOrder.notes || '-'}
-            </div>
-
-            <div className="mt-4 overflow-x-auto rounded-md border border-slate-200">
-              <table className="min-w-full divide-y divide-slate-200 bg-white">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Item</th>
-                    <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Issue</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Qty</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Price</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Discount</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Line Total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(selectedOrder.items || []).length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-3 py-6 text-center text-sm text-slate-500">No order items found.</td>
-                    </tr>
-                  ) : (
-                    (selectedOrder.items || []).map((item) => (
-                      <tr key={item.id}>
-                        <td className="px-3 py-2 text-sm text-slate-800">
-                          <div className="font-medium">{item.item_code || '-'} - {item.item_name || '-'}</div>
-                          <div className="text-xs text-slate-500">{item.unit || '-'}</div>
-                        </td>
-                        <td className="px-3 py-2 text-sm text-slate-700">{item.issue_type || '-'}</td>
-                        <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.quantity || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.unit_price || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(item.discount_amount || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-sm text-right font-semibold text-slate-900">{Number(item.line_total || 0).toFixed(2)}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleOrderAction('accept')}
+                  disabled={acceptDisabled}
+                  className="rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-emerald-200 transition hover:-translate-y-0.5 hover:shadow-lg disabled:translate-y-0 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                >
+                  {processingAction === 'accept' ? 'Accepting...' : '✓ Accept'}
+                </button>
+                <button
+                  type="button"
+                  onClick={openCreateDoModal}
+                  disabled={doDisabled}
+                  className="rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-sky-200 transition hover:-translate-y-0.5 hover:shadow-lg disabled:translate-y-0 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                >
+                  {processingAction === 'create-do' ? 'Creating...' : 'Create DO'}
+                </button>
+                <button
+                  type="button"
+                  onClick={openCreateInvoiceModal}
+                  disabled={invoiceDisabled}
+                  className="rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-violet-200 transition hover:-translate-y-0.5 hover:shadow-lg disabled:translate-y-0 disabled:cursor-not-allowed disabled:from-slate-200 disabled:to-slate-200 disabled:text-slate-400 disabled:shadow-none"
+                >
+                  {processingAction === 'create-invoice' ? 'Creating...' : 'Create Invoice'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
-      {showCreateDoModal && selectedOrder && (
+      {showCreateDoModal && selectedOrder && (() => {
+        const money = (value: number) => value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const selectedLoad = loadOptions.find((load) => load.id === selectedDoLoadId);
+        const loadLabel = allocateLoadForDo && selectedLoad
+          ? [selectedLoad.load_number || `Load #${selectedLoad.id}`, formatLoadDate(selectedLoad.load_date)].filter(Boolean).join(' · ')
+          : 'Factory store (no vehicle load)';
+        const cellInput = 'w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-right text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100';
+
+        if (doStep === 'preview') {
+          return (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-5">
+          <div className="flex max-h-[94vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-sky-50 to-blue-50 px-5 py-4">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">Step 2 of 2</span>
+                  <h4 className="text-lg font-bold text-slate-900">Preview Delivery Order</h4>
+                </div>
+                <p className="mt-0.5 text-sm text-slate-600">Check the lines, apply any discount, then create and print.</p>
+              </div>
+              <button type="button" onClick={() => setShowCreateDoModal(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-slate-700" aria-label="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-5 w-5"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+              <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+                {[
+                  ['Order', selectedOrder.sale_number],
+                  ['Customer', selectedOrder.customer_name || '-'],
+                  ['Delivery date', formatLoadDate(doDeliveryDate) || '-'],
+                  ['Stock from', loadLabel],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{label}</p>
+                    <p className="truncate font-semibold text-slate-900" title={String(value)}>{value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="min-w-[720px] w-full divide-y divide-slate-200">
+                  <thead className="bg-slate-50">
+                    <tr className="text-xs font-semibold text-slate-500">
+                      <th className="px-3 py-2 text-left">Item</th>
+                      <th className="w-24 px-2 py-2 text-right">Qty</th>
+                      <th className="w-28 px-2 py-2 text-right">Unit price</th>
+                      <th className="w-44 px-2 py-2 text-right">Discount / unit</th>
+                      <th className="w-28 px-3 py-2 text-right">Line total</th>
+                      <th className="w-10 px-2 py-2"><span className="sr-only">Remove</span></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {doEditLines.map((line) => (
+                      <tr key={line.row_id} className="align-middle">
+                        <td className="px-3 py-2">
+                          <p className="text-sm font-semibold text-slate-900">{line.item_name}</p>
+                          <p className="text-xs text-slate-500">{line.item_code}{line.unit ? ` · ${line.unit}` : ''}</p>
+                        </td>
+                        <td className="px-2 py-2">
+                          <input type="number" min="0.01" step="0.01" value={line.quantity} onChange={(e) => updateDoEditLine(line.row_id, 'quantity', Number(e.target.value))} className={cellInput} />
+                        </td>
+                        <td className="px-2 py-2">
+                          <input type="number" min="0" step="0.01" value={line.unit_price} onChange={(e) => updateDoEditLine(line.row_id, 'unit_price', Number(e.target.value))} className={cellInput} />
+                        </td>
+                        <td className="px-2 py-2">
+                          <div className="flex items-center gap-1">
+                            <input type="number" min="0" step="0.01" value={line.discount_value} onChange={(e) => updateDoEditLine(line.row_id, 'discount_value', Number(e.target.value))} className={cellInput} />
+                            <select
+                              value={line.discount_type}
+                              onChange={(e) => updateDoEditLine(line.row_id, 'discount_type', e.target.value as 'amount' | 'percent')}
+                              className="rounded-lg border border-slate-300 bg-white px-1.5 py-1.5 text-xs font-semibold text-slate-700"
+                              aria-label="Discount type"
+                            >
+                              <option value="amount">Rs</option>
+                              <option value="percent">%</option>
+                            </select>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2 text-right text-sm font-bold text-slate-900">{money(line.line_total)}</td>
+                        <td className="px-2 py-2 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setDoEditLines((prev) => prev.filter((row) => row.row_id !== line.row_id))}
+                            disabled={doEditLines.length <= 1}
+                            className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-30"
+                            title={doEditLines.length <= 1 ? 'A DO needs at least one item' : 'Remove item'}
+                            aria-label={`Remove ${line.item_name}`}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="w-full max-w-xs">
+                  <label className="mb-1 block text-xs font-semibold text-slate-600">Bill discount (whole DO)</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={doOrderDiscount}
+                      onChange={(e) => setDoOrderDiscount(e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-right text-sm text-slate-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                      placeholder="0.00"
+                    />
+                    <select
+                      value={doOrderDiscountType}
+                      onChange={(e) => setDoOrderDiscountType(e.target.value as 'amount' | 'percent')}
+                      className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-semibold text-slate-700"
+                      aria-label="Bill discount type"
+                    >
+                      <option value="amount">Rs</option>
+                      <option value="percent">%</option>
+                    </select>
+                  </div>
+                </div>
+                <dl className="w-full space-y-1.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm md:w-72">
+                  <div className="flex justify-between text-slate-600"><dt>Items subtotal</dt><dd>{money(doEditSubtotal)}</dd></div>
+                  <div className="flex justify-between text-emerald-700"><dt>Bill discount</dt><dd>− {money(doEditOrderDiscountAmount)}</dd></div>
+                  <div className="flex items-baseline justify-between border-t border-slate-200 pt-2">
+                    <dt className="font-semibold text-slate-900">DO total</dt>
+                    <dd className="text-xl font-extrabold text-slate-900">{money(doEditNetTotal)}</dd>
+                  </div>
+                </dl>
+              </div>
+              <p className="text-xs text-slate-500">These figures are saved to the order too, so the invoice will use the same prices and discounts.</p>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setDoStep('config')}
+                disabled={processingAction !== null}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+              >
+                ← Back
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitCreateDo()}
+                disabled={processingAction !== null || doEditLines.length === 0}
+                className="rounded-lg bg-gradient-to-r from-sky-500 to-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md shadow-sky-200 hover:from-sky-600 hover:to-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {processingAction === 'create-do' ? 'Creating DO...' : 'Confirm, Create DO & Print'}
+              </button>
+            </div>
+          </div>
+        </div>
+          );
+        }
+
+        return (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/60 p-4">
           <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
             <div className="mb-3 border-b border-slate-200 pb-2">
-              <h4 className="text-base font-semibold text-slate-900">Create DO Configuration</h4>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-slate-600">Step 1 of 2</span>
+                <h4 className="text-base font-semibold text-slate-900">Create DO Configuration</h4>
+              </div>
               <p className="text-xs text-slate-600">Order: {selectedOrder.sale_number}</p>
             </div>
 
@@ -1254,7 +1703,11 @@ export default function DashboardOrderListPage() {
                     <option value={0}>{loadingLoadOptions ? 'Loading loads...' : 'Select in-transit load'}</option>
                     {loadOptions.map((load) => (
                       <option key={load.id} value={load.id}>
-                        {load.load_number || `Load #${load.id}`} {load.load_date ? `(${load.load_date})` : ''} {load.status ? `- ${load.status}` : ''}
+                        {[
+                          load.load_number || `Load #${load.id}`,
+                          formatLoadDate(load.load_date),
+                          formatLoadStatus(load.status),
+                        ].filter(Boolean).join(' · ')}
                       </option>
                     ))}
                   </select>
@@ -1292,243 +1745,328 @@ export default function DashboardOrderListPage() {
               </button>
               <button
                 type="button"
-                onClick={() => void submitCreateDo()}
+                onClick={openDoPreview}
                 disabled={processingAction !== null || (allocateLoadForDo && selectedDoLoadId === 0)}
-                className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-md bg-blue-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {processingAction === 'create-do' ? 'Creating...' : 'Create DO & Print'}
+                Preview DO →
               </button>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
-      {showCreateOrderModal && (
+      {showCreateOrderModal && (() => {
+        const previewQty = Number(selectedCreateQty || 0);
+        const canAddItem = selectedCreateItemId > 0 && previewQty > 0;
+        const hasCustomer = createOrderCustomerName.trim().length > 0;
+        const canCreate = createOrderLines.length > 0 && hasCustomer && !creatingOrder && !loadingCreateOrderMeta;
+        const fieldClass = 'w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50';
+        const labelClass = 'mb-1.5 block text-xs font-semibold text-slate-600';
+        const stepBadge = (n: number, done: boolean) => (
+          <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${done ? 'bg-emerald-500 text-white' : 'bg-blue-600 text-white'}`}>
+            {done ? '✓' : n}
+          </span>
+        );
+        const onAddKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            addCreateOrderItem();
+          }
+        };
+
+        return (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-5">
-          <div className="max-h-[94vh] w-[98vw] max-w-[1800px] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
-            <div className="mb-4 flex items-center justify-between border-b border-slate-200 pb-3">
+          <div className="flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4 sm:px-6">
               <div>
-                <h4 className="text-base font-semibold text-slate-900">Create Order</h4>
-                <p className="text-xs text-slate-600">Create a new order with customer and item lines.</p>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-lg font-bold text-slate-900">Create Order</h4>
+                  <span className="rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700 ring-1 ring-inset ring-blue-200">Factory Order</span>
+                </div>
+                <p className="mt-0.5 text-sm text-slate-500">Choose the customer, add the items, then create the order.</p>
               </div>
               <button
                 type="button"
                 onClick={() => setShowCreateOrderModal(false)}
-                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100"
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close"
               >
-                Close
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-5 w-5"><path d="M6 6l12 12M18 6 6 18" /></svg>
               </button>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Order Type</label>
-                <div className="w-full rounded-md border border-slate-300 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800">
-                  Factory Order
+            <div className="flex-1 space-y-5 overflow-y-auto px-5 py-5 sm:px-6">
+              {/* Step 1: customer */}
+              <section>
+                <div className="mb-3 flex items-center gap-2">
+                  {stepBadge(1, hasCustomer)}
+                  <h5 className="text-sm font-semibold text-slate-900">Customer</h5>
                 </div>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Choose Customer</label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={createOrderCustomerSearch}
-                    onChange={(e) => {
-                      setCreateOrderCustomerSearch(e.target.value);
-                      setCreateOrderCustomerId(0);
-                      setShowCreateOrderCustomerSuggestions(true);
-                    }}
-                    onFocus={() => setShowCreateOrderCustomerSuggestions(true)}
-                    onBlur={() => {
-                      window.setTimeout(() => setShowCreateOrderCustomerSuggestions(false), 150);
-                    }}
-                    placeholder={loadingCreateOrderMeta ? 'Loading customers...' : 'Search customer code/name...'}
-                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    disabled={loadingCreateOrderMeta}
-                  />
-                  {showCreateOrderCustomerSuggestions && (
-                    <div className="absolute z-20 mt-1 max-h-52 w-full overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
-                      {filteredCreateOrderCustomers.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-slate-500">No matching customers found.</div>
-                      ) : (
-                        filteredCreateOrderCustomers.map((customer) => (
-                          <button
-                            key={customer.id}
-                            type="button"
-                            onMouseDown={() => selectCreateOrderCustomer(customer)}
-                            className="w-full border-b border-slate-100 px-3 py-2 text-left text-sm text-slate-700 hover:bg-blue-50 last:border-b-0"
-                          >
-                            {customer.customer_code || '-'} - {customer.shop_name || customer.owner_name || 'Customer'}
-                          </button>
-                        ))
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div>
+                    <label className={labelClass}>Find customer</label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={createOrderCustomerSearch}
+                        onChange={(e) => {
+                          setCreateOrderCustomerSearch(e.target.value);
+                          setCreateOrderCustomerId(0);
+                          setShowCreateOrderCustomerSuggestions(true);
+                        }}
+                        onFocus={() => setShowCreateOrderCustomerSuggestions(true)}
+                        onBlur={() => {
+                          window.setTimeout(() => setShowCreateOrderCustomerSuggestions(false), 150);
+                        }}
+                        placeholder={loadingCreateOrderMeta ? 'Loading customers...' : 'Type customer code or shop name'}
+                        className={fieldClass}
+                        disabled={loadingCreateOrderMeta}
+                      />
+                      {showCreateOrderCustomerSuggestions && (
+                        <div className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-slate-200 bg-white shadow-xl">
+                          {filteredCreateOrderCustomers.length === 0 ? (
+                            <div className="px-3 py-2.5 text-sm text-slate-500">No matching customers. You can type the name on the right instead.</div>
+                          ) : (
+                            filteredCreateOrderCustomers.map((customer) => (
+                              <button
+                                key={customer.id}
+                                type="button"
+                                onMouseDown={() => selectCreateOrderCustomer(customer)}
+                                className="block w-full border-b border-slate-100 px-3 py-2 text-left last:border-b-0 hover:bg-blue-50"
+                              >
+                                <span className="block text-sm font-medium text-slate-900">{customer.shop_name || customer.owner_name || 'Customer'}</span>
+                                <span className="block text-xs text-slate-500">{customer.customer_code || '-'}</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                    {createOrderCustomerId > 0 ? (
+                      <p className="mt-1.5 text-xs font-medium text-emerald-700">✓ Registered customer selected</p>
+                    ) : (
+                      <p className="mt-1.5 text-xs text-slate-500">Pick from the list, or leave empty for a walk-in customer.</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className={labelClass}>Name on order <span className="text-rose-500">*</span></label>
+                    <input
+                      type="text"
+                      value={createOrderCustomerName}
+                      onChange={(e) => {
+                        setCreateOrderCustomerName(e.target.value);
+                        if (createOrderCustomerId > 0) {
+                          setCreateOrderCustomerId(0);
+                        }
+                      }}
+                      placeholder="Filled automatically, or type a name"
+                      className={fieldClass}
+                    />
+                    <p className="mt-1.5 text-xs text-slate-500">Editing this name unlinks the selected customer.</p>
+                  </div>
+
+                  <div className="md:col-span-2">
+                    <label className={labelClass}>Notes <span className="font-normal text-slate-400">(optional)</span></label>
+                    <input
+                      type="text"
+                      value={createOrderNotes}
+                      onChange={(e) => setCreateOrderNotes(e.target.value)}
+                      placeholder="Delivery instructions or remarks"
+                      className={fieldClass}
+                    />
+                  </div>
                 </div>
-              </div>
+              </section>
 
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Customer Name</label>
-                <input
-                  type="text"
-                  value={createOrderCustomerName}
-                  onChange={(e) => {
-                    setCreateOrderCustomerName(e.target.value);
-                    if (createOrderCustomerId > 0) {
-                      setCreateOrderCustomerId(0);
-                    }
-                  }}
-                  placeholder="Enter customer name"
-                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                />
-              </div>
+              {/* Step 2: items */}
+              <section className="border-t border-slate-100 pt-5">
+                <div className="mb-3 flex items-center gap-2">
+                  {stepBadge(2, createOrderLines.length > 0)}
+                  <h5 className="text-sm font-semibold text-slate-900">Items</h5>
+                  {createOrderLines.length > 0 ? (
+                    <span className="text-xs text-slate-500">· {createOrderLines.length} added</span>
+                  ) : null}
+                </div>
 
-              <div className="md:col-span-2">
-                <label className="mb-1 block text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Notes</label>
-                <input
-                  type="text"
-                  value={createOrderNotes}
-                  onChange={(e) => setCreateOrderNotes(e.target.value)}
-                  placeholder="Optional notes"
-                  className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                />
-              </div>
-            </div>
-
-            <div className="mt-4 rounded-md border border-slate-200 p-3">
-              <h5 className="mb-2 text-sm font-semibold text-slate-800">Add Item</h5>
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-4">
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={createOrderItemSearch}
-                    onChange={(e) => {
-                      setCreateOrderItemSearch(e.target.value);
-                      setSelectedCreateItemId(0);
-                      setShowCreateOrderItemSuggestions(true);
-                    }}
-                    onFocus={() => setShowCreateOrderItemSuggestions(true)}
-                    onBlur={() => {
-                      window.setTimeout(() => setShowCreateOrderItemSuggestions(false), 150);
-                    }}
-                    placeholder={loadingCreateOrderMeta ? 'Loading items...' : 'Search item code/name...'}
-                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                    disabled={loadingCreateOrderMeta}
-                  />
-                  {showCreateOrderItemSuggestions && (
-                    <div className="absolute z-20 mt-1 max-h-52 w-full overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
-                      {filteredCreateOrderItems.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-slate-500">No matching items found.</div>
-                      ) : (
-                        filteredCreateOrderItems.map((item) => (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onMouseDown={() => selectCreateOrderItem(item)}
-                            className="w-full border-b border-slate-100 px-3 py-2 text-left text-sm text-slate-700 hover:bg-blue-50 last:border-b-0"
-                          >
-                            {item.code || '-'} - {item.name || 'Item'}
-                          </button>
-                        ))
+                <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 sm:p-4">
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-12 md:items-end">
+                    <div className="relative col-span-2 md:col-span-7">
+                      <label className={labelClass}>Item</label>
+                      <input
+                        type="text"
+                        value={createOrderItemSearch}
+                        onChange={(e) => {
+                          setCreateOrderItemSearch(e.target.value);
+                          setSelectedCreateItemId(0);
+                          setShowCreateOrderItemSuggestions(true);
+                        }}
+                        onFocus={() => setShowCreateOrderItemSuggestions(true)}
+                        onBlur={() => {
+                          window.setTimeout(() => setShowCreateOrderItemSuggestions(false), 150);
+                        }}
+                        placeholder={loadingCreateOrderMeta ? 'Loading items...' : 'Type item code or name'}
+                        className={fieldClass}
+                        title={createOrderItemSearch}
+                        disabled={loadingCreateOrderMeta}
+                      />
+                      {showCreateOrderItemSuggestions && (
+                        <div className="absolute z-20 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-slate-200 bg-white shadow-xl">
+                          {filteredCreateOrderItems.length === 0 ? (
+                            <div className="px-3 py-2.5 text-sm text-slate-500">No matching items found.</div>
+                          ) : (
+                            filteredCreateOrderItems.map((item) => {
+                              const stock = Number(item.current_stock || 0);
+                              const outOfStock = stock <= 0;
+                              return (
+                                <button
+                                  key={item.id}
+                                  type="button"
+                                  onMouseDown={() => selectCreateOrderItem(item)}
+                                  className={`flex w-full items-center gap-3 border-b border-slate-100 px-3 py-2 text-left last:border-b-0 ${outOfStock ? 'bg-slate-50/80 hover:bg-rose-50/60' : 'hover:bg-blue-50'}`}
+                                >
+                                  <span className="min-w-0 flex-1">
+                                    <span className={`block truncate text-sm font-medium ${outOfStock ? 'text-slate-500' : 'text-slate-900'}`}>{item.name || 'Item'}</span>
+                                    <span className="block truncate text-xs text-slate-400">{item.code || '-'}</span>
+                                  </span>
+                                  {outOfStock ? (
+                                    <span className="shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">Out of stock</span>
+                                  ) : (
+                                    <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">{stock.toLocaleString('en-US', { maximumFractionDigits: 2 })} in stock</span>
+                                  )}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
+                    <div className="col-span-2 md:col-span-2">
+                      <label className={labelClass}>Quantity</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={selectedCreateQty}
+                        onChange={(e) => setSelectedCreateQty(e.target.value)}
+                        onKeyDown={onAddKeyDown}
+                        placeholder="0"
+                        className={`${fieldClass} text-right`}
+                      />
+                    </div>
+                    <div className="md:col-span-3">
+                      <button
+                        type="button"
+                        onClick={addCreateOrderItem}
+                        disabled={!canAddItem}
+                        className="w-full rounded-lg bg-slate-900 px-3 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                      >
+                        + Add to order
+                      </button>
+                    </div>
+                  </div>
+                  <p className={`mt-2 text-xs ${selectedCreateItemId > 0 && (createOrderStockById.get(selectedCreateItemId) ?? 0) <= 0 ? 'font-medium text-amber-700' : 'text-slate-500'}`}>
+                    {selectedCreateItemId > 0 ? (createOrderStockById.get(selectedCreateItemId) ?? 0) <= 0
+                      ? '⚠ This item is out of stock in the factory store. You can still order it, but a DO cannot be created until stock is available.'
+                      : 'Press Enter in Quantity to add quickly. Adding the same item again increases its quantity. Prices are applied when the invoice is created.' : 'Select an item from the list to enable “Add to order”.'}
+                  </p>
                 </div>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={selectedCreateQty}
-                  onChange={(e) => setSelectedCreateQty(e.target.value)}
-                  placeholder="Qty"
-                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                />
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={selectedCreatePrice}
-                  onChange={(e) => {
-                    setSelectedCreatePrice(e.target.value);
-                  }}
-                  placeholder="Unit Price"
-                  className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                />
-                <button
-                  type="button"
-                  onClick={addCreateOrderItem}
-                  className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100"
-                >
-                  Add Item
-                </button>
+
+                <div className="mt-3 overflow-hidden rounded-xl border border-slate-200">
+                  <div className="max-h-[36vh] overflow-auto">
+                    <table className="min-w-full divide-y divide-slate-200 bg-white">
+                      <thead className="sticky top-0 bg-slate-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-semibold text-slate-500">Item</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold text-slate-500">Qty</th>
+                          <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {createOrderLines.length === 0 ? (
+                          <tr>
+                            <td colSpan={3} className="px-3 py-8 text-center">
+                              <p className="text-sm font-medium text-slate-600">No items yet</p>
+                              <p className="mt-0.5 text-xs text-slate-400">Items you add above will appear here.</p>
+                            </td>
+                          </tr>
+                        ) : (
+                          createOrderLines.map((line) => (
+                            <tr key={line.row_id} className="hover:bg-slate-50/70">
+                              <td className="px-3 py-2.5">
+                                <p className="text-sm font-medium text-slate-900">
+                                  {line.item_name}
+                                  {(createOrderStockById.get(line.inventory_item_id) ?? 0) <= 0 ? (
+                                    <span className="ml-2 rounded-full bg-rose-100 px-2 py-0.5 align-middle text-[10px] font-semibold text-rose-700">Out of stock</span>
+                                  ) : null}
+                                </p>
+                                <p className="text-xs text-slate-500">{line.item_code}{line.unit ? ` · ${line.unit}` : ''}</p>
+                              </td>
+                              <td className="px-3 py-2.5 text-right text-sm text-slate-700">{Number(line.quantity || 0).toFixed(2)}</td>
+                              <td className="px-3 py-2.5 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => removeCreateOrderItem(line.row_id)}
+                                  className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
+                                  aria-label={`Remove ${line.item_name}`}
+                                  title="Remove item"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            {/* Footer: totals + actions */}
+            <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+              <div className="flex items-center gap-6">
+                <div>
+                  <p className="text-xs text-slate-500">Total quantity</p>
+                  <p className="text-xl font-bold text-slate-900">{createOrderTotalQty.toFixed(2)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-slate-500">Items</p>
+                  <p className="text-xl font-bold text-slate-900">{createOrderLines.length}</p>
+                </div>
               </div>
-            </div>
-
-            <div className="mt-3 max-h-[40vh] overflow-auto rounded-md border border-slate-200">
-              <table className="min-w-full divide-y divide-slate-200 bg-white">
-                <thead className="bg-slate-50">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Item</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Qty</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Price</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Amount</th>
-                    <th className="px-3 py-2 text-right text-xs font-semibold uppercase tracking-[0.08em] text-slate-500">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {createOrderLines.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="px-3 py-6 text-center text-sm text-slate-500">No items added yet.</td>
-                    </tr>
-                  ) : (
-                    createOrderLines.map((line) => (
-                      <tr key={line.row_id}>
-                        <td className="px-3 py-2 text-sm text-slate-800">{line.item_code} - {line.item_name} {line.unit ? `(${line.unit})` : ''}</td>
-                        <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(line.quantity || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-sm text-right text-slate-700">{Number(line.unit_price || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-sm text-right font-semibold text-slate-900">{Number(line.line_total || 0).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => removeCreateOrderItem(line.row_id)}
-                            className="rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100"
-                          >
-                            Remove
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-              <div className="text-slate-700">Total Qty: <span className="font-semibold text-slate-900">{createOrderTotalQty.toFixed(2)}</span></div>
-              <div className="text-slate-700">Total Amount: <span className="font-semibold text-slate-900">{createOrderTotalAmount.toFixed(2)}</span></div>
-            </div>
-
-            <div className="mt-4 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCreateOrderModal(false)}
-                className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-100"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void submitCreateOrder()}
-                disabled={creatingOrder || loadingCreateOrderMeta}
-                className="rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {creatingOrder ? 'Creating...' : 'Create Order'}
-              </button>
+              <div className="flex flex-col items-stretch gap-1 sm:items-end">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateOrderModal(false)}
+                    className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void submitCreateOrder()}
+                    disabled={!canCreate}
+                    className="flex-1 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300 sm:flex-none"
+                  >
+                    {creatingOrder ? 'Creating...' : 'Create Order'}
+                  </button>
+                </div>
+                {!canCreate && !creatingOrder ? (
+                  <p className="text-xs text-slate-500">
+                    {!hasCustomer ? 'Choose a customer or enter a name.' : createOrderLines.length === 0 ? 'Add at least one item.' : ''}
+                  </p>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {showCreateInvoiceModal && selectedOrder && (
         <div className="fixed inset-0 z-[75] flex items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm sm:p-5">
@@ -1794,6 +2332,51 @@ export default function DashboardOrderListPage() {
                 {processingAction === 'create-invoice' ? 'Creating...' : 'Create Invoice'}
               </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <DoReceiptPreview
+        doId={doReceiptPreviewId}
+        token={token}
+        apiUrl={API_URL}
+        onClose={() => setDoReceiptPreviewId(null)}
+      />
+
+      {orderToDelete && (
+        <div className="fixed inset-0 z-[78] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
+              </span>
+              <div className="min-w-0">
+                <h4 className="text-base font-semibold text-slate-900">Delete this order?</h4>
+                <p className="mt-1 text-sm text-slate-600">
+                  <span className="font-semibold text-slate-800">{orderToDelete.sale_number}</span>
+                  {orderToDelete.customer_name ? <> for {orderToDelete.customer_name}</> : null}
+                  {' '}({Number(orderToDelete.total_amount || 0).toFixed(2)}) and all its item lines will be permanently removed. This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOrderToDelete(null)}
+                disabled={deletingOrder}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmDeleteOrder()}
+                disabled={deletingOrder}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
+              >
+                {deletingOrder ? 'Deleting...' : 'Delete order'}
+              </button>
             </div>
           </div>
         </div>

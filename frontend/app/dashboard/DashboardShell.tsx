@@ -14,6 +14,27 @@ type SidebarItem = {
   widgetKey?: string;
 };
 
+const COMPANY_PROFILE_DATA_KEY = 'company_profile_data';
+const COMPANY_PROFILE_ID_KEY = 'company_profile_id';
+
+// Logos are served from the same origin (/storage/...), exactly like the company settings page.
+const resolveCompanyLogo = (company?: { logo_url?: string; logo_path?: string } | null): string => {
+  const rawUrl = String(company?.logo_url || '').trim();
+  const rawPath = String(company?.logo_path || '').trim();
+  if (rawPath) return `/storage/${rawPath.replace(/^\/+/, '')}`;
+  if (!rawUrl) return '';
+  if (rawUrl.startsWith('/storage/')) return rawUrl;
+  if (/^https?:\/\//i.test(rawUrl)) {
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.pathname.startsWith('/storage/')) return parsed.pathname + (parsed.search || '');
+    } catch {
+      return rawUrl;
+    }
+  }
+  return rawUrl;
+};
+
 const SIDEBAR_STATE_KEY = 'dashboard_sidebar_collapsed_v1';
 const SIDEBAR_WIDGET_VISIBILITY_CACHE_KEY = 'dashboard_sidebar_widget_visibility_v1';
 const SIDEBAR_WIDGET_CONTROLS_LOCKED_KEY = 'dashboard_widget_controls_locked_v1';
@@ -35,6 +56,23 @@ const sidebarItems: SidebarItem[] = [
   { label: 'Branches', description: 'Branch setup and control', href: '/dashboard/branches', icon: 'branches', widgetKey: 'branches' },
   { label: 'Settings', description: 'System configuration', href: '/dashboard/system-settings', icon: 'settings', widgetKey: 'system-settings' },
 ];
+
+const SIDEBAR_ICON_TONES: Record<string, string> = {
+  overview: 'from-emerald-400 to-teal-500',
+  assistant: 'from-fuchsia-400 to-purple-500',
+  hrm: 'from-sky-400 to-blue-500',
+  production: 'from-amber-400 to-orange-500',
+  distribution: 'from-cyan-400 to-sky-500',
+  orders: 'from-rose-400 to-pink-500',
+  purchasing: 'from-violet-400 to-indigo-500',
+  stock: 'from-orange-400 to-red-500',
+  accounts: 'from-emerald-400 to-green-500',
+  reports: 'from-indigo-400 to-blue-600',
+  vehicle: 'from-lime-400 to-emerald-500',
+  outlets: 'from-pink-400 to-rose-500',
+  branches: 'from-teal-400 to-cyan-500',
+  settings: 'from-slate-400 to-slate-600',
+};
 
 function SidebarIcon({ icon }: { icon: string }) {
   const baseClass = 'h-4 w-4';
@@ -164,6 +202,49 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [companyLogoUrl, setCompanyLogoUrl] = useState('');
+  const [companyLogoFailed, setCompanyLogoFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    try {
+      const cached = JSON.parse(localStorage.getItem(COMPANY_PROFILE_DATA_KEY) || 'null');
+      const cachedLogo = resolveCompanyLogo(cached);
+      if (cachedLogo) setCompanyLogoUrl(cachedLogo);
+    } catch {
+      // Ignore invalid cached company profile.
+    }
+
+    const loadCompanyLogo = async () => {
+      const storedToken = localStorage.getItem('token');
+      if (!storedToken) return;
+      try {
+        const response = await axios.get('/api/companies', {
+          headers: { Authorization: `Bearer ${storedToken}` },
+        });
+        const payload = response?.data;
+        const companies = (Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : []) as Array<{
+          id?: number | string;
+          logo_url?: string;
+          logo_path?: string;
+        }>;
+        const profileId = Number(localStorage.getItem(COMPANY_PROFILE_ID_KEY) || 0);
+        const company = companies.find((row) => Number(row?.id || 0) === profileId) || companies[0];
+        if (!active || !company) return;
+        const logo = resolveCompanyLogo(company);
+        setCompanyLogoFailed(false);
+        setCompanyLogoUrl(logo);
+      } catch {
+        // Keep cached logo or the default badge.
+      }
+    };
+
+    void loadCompanyLogo();
+    return () => {
+      active = false;
+    };
+  }, []);
   const [authToken, setAuthToken] = useState('');
   const [widgetVisibility, setWidgetVisibility] = useState<Record<string, boolean>>({});
   const [widgetControlsLocked, setWidgetControlsLocked] = useState(true);
@@ -396,60 +477,105 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 border-r border-slate-200 bg-white shadow-xl transition-all duration-300 ${sidebarCollapsed ? 'w-20' : 'w-72'} ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
+        className={`fixed inset-y-0 left-0 z-40 flex flex-col overflow-hidden border-r border-white/10 bg-gradient-to-b from-slate-950 via-slate-900 to-teal-950 text-slate-200 shadow-2xl shadow-slate-900/40 transition-all duration-300 ${sidebarCollapsed ? 'w-20' : 'w-72'} ${mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
       >
-        <div className="flex h-16 items-center justify-between border-b border-slate-100 px-3">
-          <div className={`overflow-hidden transition-all ${sidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
-            <p className="text-sm font-semibold tracking-wide text-slate-800">Pabasara ERP</p>
-            <p className="text-xs text-slate-500">Navigation Menu</p>
+        <div className="pointer-events-none absolute -top-24 -left-16 h-56 w-56 rounded-full bg-emerald-500/20 blur-3xl" aria-hidden="true" />
+        <div className="pointer-events-none absolute -bottom-24 -right-16 h-56 w-56 rounded-full bg-cyan-500/15 blur-3xl" aria-hidden="true" />
+
+        <div className="relative flex h-16 shrink-0 items-center justify-between gap-2 border-b border-white/10 px-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gradient-to-br from-emerald-400 to-cyan-500 text-sm font-extrabold text-slate-900 shadow-lg shadow-emerald-500/30">
+              {companyLogoUrl && !companyLogoFailed ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={companyLogoUrl}
+                  alt="Company logo"
+                  className="h-full w-full bg-white object-contain p-0.5"
+                  onError={() => setCompanyLogoFailed(true)}
+                />
+              ) : (
+                'P'
+              )}
+            </span>
+            <div className={`min-w-0 overflow-hidden transition-all ${sidebarCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
+              <p className="truncate text-sm font-bold tracking-wide text-white">Pabasara ERP</p>
+              <p className="truncate text-[11px] uppercase tracking-[0.18em] text-emerald-300/80">Control center</p>
+            </div>
           </div>
           <button
             type="button"
             onClick={() => setSidebarCollapsed((prev) => !prev)}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white text-sm font-semibold text-slate-600 hover:bg-slate-50"
-            title={sidebarCollapsed ? 'Preview sidebar' : 'Hide sidebar'}
-            aria-label={sidebarCollapsed ? 'Preview sidebar' : 'Hide sidebar'}
+            className="hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 transition hover:bg-white/15 hover:text-white lg:inline-flex"
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           >
-            {sidebarCollapsed ? '>>' : '<<'}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={`h-4 w-4 transition-transform duration-300 ${sidebarCollapsed ? 'rotate-180' : ''}`}>
+              <path d="m15 6-6 6 6 6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMobileSidebarOpen(false)}
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-slate-300 hover:bg-white/15 lg:hidden"
+            aria-label="Close sidebar"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4"><path d="M6 6l12 12M18 6 6 18" /></svg>
           </button>
         </div>
 
-        <div className="flex h-[calc(100vh-64px)] flex-col overflow-y-auto px-2 py-3">
+        <div className="relative flex-1 overflow-y-auto px-3 py-4 [scrollbar-width:thin] [scrollbar-color:rgba(255,255,255,0.18)_transparent]">
+          {!sidebarCollapsed && (
+            <p className="mb-2 px-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">Main menu</p>
+          )}
           <nav className="space-y-1">
             {widgetLoading
               ? Array.from({ length: sidebarCollapsed ? 7 : 9 }, (_, idx) => (
                   <div
                     key={`sidebar-loading-${idx}`}
-                    className="flex items-center gap-3 rounded-xl border border-slate-100 px-3 py-2.5"
+                    className="flex items-center gap-3 rounded-xl px-2.5 py-2"
                   >
-                    <span className="inline-flex h-8 w-8 shrink-0 animate-pulse rounded-lg bg-slate-200" />
-                    {!sidebarCollapsed && <span className="h-3 w-24 animate-pulse rounded bg-slate-200" />}
+                    <span className="inline-flex h-9 w-9 shrink-0 animate-pulse rounded-lg bg-white/10" />
+                    {!sidebarCollapsed && <span className="h-3 w-28 animate-pulse rounded bg-white/10" />}
                   </div>
                 ))
               : visibleSidebarItems.map((item) => {
               const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
               const isClosing = item.widgetKey ? Boolean(closingWidgetKeys[item.widgetKey]) : false;
+              const tone = SIDEBAR_ICON_TONES[item.icon] || 'from-slate-400 to-slate-500';
               return (
                 <div
                   key={item.href}
-                  className={`group flex items-center gap-1 rounded-xl ${isClosing ? 'opacity-60' : ''}`}
+                  className={`group relative flex items-center gap-1 ${isClosing ? 'opacity-60' : ''}`}
                 >
+                  {isActive && (
+                    <span className="absolute -left-3 top-1/2 h-7 w-1 -translate-y-1/2 rounded-r-full bg-gradient-to-b from-emerald-300 to-cyan-400 shadow-[0_0_12px_rgba(52,211,153,0.8)]" />
+                  )}
                   <Link
                     href={item.href}
                     title={sidebarCollapsed ? item.label : undefined}
                     onClick={(event) => {
                       if (isClosing) event.preventDefault();
                     }}
-                    className={`flex min-w-0 flex-1 items-start gap-3 rounded-xl px-3 py-2.5 text-sm transition ${isActive ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 border border-transparent'} ${isClosing ? 'pointer-events-none' : ''}`}
+                    className={`flex min-w-0 flex-1 items-center gap-3 rounded-xl border px-2.5 py-2 text-sm transition-all duration-200 ${
+                      isActive
+                        ? 'border-emerald-400/30 bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-transparent text-white shadow-[inset_0_0_0_1px_rgba(52,211,153,0.08)]'
+                        : 'border-transparent text-slate-300 hover:translate-x-0.5 hover:border-white/10 hover:bg-white/5 hover:text-white'
+                    } ${isClosing ? 'pointer-events-none' : ''}`}
                   >
-                    <span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${isActive ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600 group-hover:bg-slate-300'}`}>
+                    <span
+                      className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-all duration-200 ${
+                        isActive
+                          ? `bg-gradient-to-br ${tone} text-white shadow-lg`
+                          : 'bg-white/5 text-slate-400 ring-1 ring-inset ring-white/10 group-hover:text-white'
+                      }`}
+                    >
                       <SidebarIcon icon={item.icon} />
                     </span>
                     {!sidebarCollapsed && (
                       <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium">{item.label}</span>
+                        <span className="block truncate text-[13px] font-semibold">{item.label}</span>
                         {item.description ? (
-                          <span className="block truncate text-[11px] leading-4 text-slate-500">{item.description}</span>
+                          <span className={`block truncate text-[11px] leading-4 ${isActive ? 'text-emerald-200/70' : 'text-slate-500 group-hover:text-slate-400'}`}>{item.description}</span>
                         ) : null}
                       </span>
                     )}
@@ -466,15 +592,29 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
                         void closeSidebarLink(item);
                       }}
                       disabled={isClosing}
-                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-600 opacity-0 transition hover:bg-rose-500/20 hover:text-rose-300 focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      x
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" className="h-3.5 w-3.5"><path d="M6 6l12 12M18 6 6 18" /></svg>
                     </button>
                   )}
                 </div>
               );
             })}
           </nav>
+        </div>
+
+        <div className="relative shrink-0 border-t border-white/10 p-3">
+          <div className={`flex items-center gap-3 rounded-xl bg-white/5 px-3 py-2.5 ring-1 ring-inset ring-white/10 ${sidebarCollapsed ? 'justify-center px-0' : ''}`}>
+            <span className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.9)]" />
+            </span>
+            {!sidebarCollapsed && (
+              <div className="min-w-0">
+                <p className="truncate text-xs font-semibold text-white">System online</p>
+                <p className="truncate text-[11px] text-slate-500">Pabasara Sweets BMS</p>
+              </div>
+            )}
+          </div>
         </div>
       </aside>
 

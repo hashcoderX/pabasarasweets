@@ -475,7 +475,7 @@ class OutletPosController extends Controller
         return Outlet::where('user_id', $user->id)->where('status', 'active')->first();
     }
 
-    private function accessibleOrderQuery(Request $request)
+    protected function accessibleOrderQuery(Request $request)
     {
         $user = $request->user();
         $admin = $this->isAdmin($user);
@@ -2292,6 +2292,16 @@ class OutletPosController extends Controller
             'load_id' => 'nullable|exists:loads,id',
             'delivery_date' => 'nullable|date',
             'call_confirmed' => 'nullable|boolean',
+            // Optional edits from the DO preview (same shape as invoice edits).
+            'order_discount_amount' => 'nullable|numeric|min:0',
+            'items' => 'nullable|array|min:1',
+            'items.*.inventory_item_id' => 'required_with:items|integer|exists:inventory_items,id',
+            'items.*.item_code' => 'nullable|string|max:100',
+            'items.*.item_name' => 'nullable|string|max:255',
+            'items.*.unit' => 'nullable|string|max:100',
+            'items.*.quantity' => 'required_with:items|numeric|gt:0',
+            'items.*.unit_price' => 'required_with:items|numeric|min:0',
+            'items.*.discount_amount' => 'nullable|numeric|min:0',
         ])->validate();
 
         $userId = $request->user()?->id;
@@ -2401,6 +2411,81 @@ class OutletPosController extends Controller
                 }
 
                 $total = (float) ($order->total_amount ?? 0);
+                $doDiscount = (float) ($order->discount_amount ?? 0);
+                $doSubtotal = max($total + $doDiscount, $total);
+
+                // DO preview edits: replace the order lines and totals with what the user confirmed.
+                $editedItems = collect($validated['items'] ?? []);
+                $hasDoEdits = $editedItems->isNotEmpty() || array_key_exists('order_discount_amount', $validated);
+                if ($hasDoEdits) {
+                    if ($editedItems->isNotEmpty()) {
+                        $metaById = DB::table('inventory_items')
+                            ->whereIn('id', $editedItems->pluck('inventory_item_id')->map(fn ($id) => (int) $id)->all())
+                            ->get(['id', 'code', 'name', 'unit'])
+                            ->keyBy('id');
+
+                        $items = $editedItems->map(function ($line) use ($metaById) {
+                            $inventoryItemId = (int) ($line['inventory_item_id'] ?? 0);
+                            $meta = $metaById->get($inventoryItemId);
+                            $qty = max((float) ($line['quantity'] ?? 0), 0);
+                            $unitPrice = max((float) ($line['unit_price'] ?? 0), 0);
+                            $unitDiscount = min(max((float) ($line['discount_amount'] ?? 0), 0), $unitPrice);
+
+                            return (object) [
+                                'inventory_item_id' => $inventoryItemId,
+                                'item_code' => (string) ($line['item_code'] ?? ($meta->code ?? '')),
+                                'item_name' => (string) ($line['item_name'] ?? ($meta->name ?? '')),
+                                'unit' => (string) ($line['unit'] ?? ($meta->unit ?? '')),
+                                'issue_type' => 'retail',
+                                'quantity' => $qty,
+                                'unit_price' => $unitPrice,
+                                'discount_amount' => $unitDiscount, // per unit
+                                'line_total' => round($qty * ($unitPrice - $unitDiscount), 2),
+                            ];
+                        })->values();
+                    }
+
+                    $doSubtotal = round((float) $items->sum(fn ($line) => (float) ($line->line_total ?? 0)), 2);
+                    $doDiscount = min(max((float) ($validated['order_discount_amount'] ?? $order->discount_amount ?? 0), 0), $doSubtotal);
+                    $total = round(max($doSubtotal - $doDiscount, 0), 2);
+
+                    if ($editedItems->isNotEmpty()) {
+                        DB::table('order_items')->where('order_id', $orderId)->delete();
+                        foreach ($items as $line) {
+                            DB::table('order_items')->insert([
+                                'order_id' => $orderId,
+                                'inventory_item_id' => $line->inventory_item_id ?: null,
+                                'item_code' => $line->item_code,
+                                'item_name' => $line->item_name,
+                                'unit' => $line->unit,
+                                'issue_type' => $line->issue_type,
+                                'discount_amount' => $line->discount_amount,
+                                'quantity' => $line->quantity,
+                                'unit_price' => $line->unit_price,
+                                'line_total' => $line->line_total,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ]);
+                        }
+                    }
+
+                    // Keep the order in step with the DO so the later invoice uses the same figures.
+                    $orderTotals = [];
+                    foreach ([
+                        'total_quantity' => round((float) $items->sum(fn ($line) => (float) ($line->quantity ?? 0)), 2),
+                        'total_amount' => $total,
+                        'discount_amount' => $doDiscount,
+                        'balance_amount' => round(max($total - (float) ($order->paid_amount ?? 0), 0), 2),
+                    ] as $column => $value) {
+                        if (Schema::hasColumn('orders', $column)) {
+                            $orderTotals[$column] = $value;
+                        }
+                    }
+                    if ($orderTotals) {
+                        DB::table('orders')->where('id', $orderId)->update($orderTotals + ['updated_at' => now()]);
+                    }
+                }
+
                 $paid = (float) ($order->paid_amount ?? 0);
                 $status = $paid >= $total ? 'paid' : ($paid > 0 ? 'partial' : 'pending');
                 $doNumber = $this->generateDistributionDoNumber();
@@ -2445,7 +2530,12 @@ class OutletPosController extends Controller
 
                         $availableQty = (float) ($loadItem->qty ?? 0);
                         if (!$loadItem || $availableQty < $requiredQty) {
-                            $insufficientItems[] = "{$itemCode} - {$itemName} (required {$requiredQty}, load has {$availableQty})";
+                            // Load stock was already taken out of the factory store when the vehicle was loaded,
+                            // so a load-allocated DO must draw from the load. Show factory stock for context only.
+                            $factoryQty = $item->inventory_item_id
+                                ? (float) (DB::table('inventory_items')->where('id', (int) $item->inventory_item_id)->value('current_stock') ?? 0)
+                                : 0.0;
+                            $insufficientItems[] = "{$itemName} ({$itemCode}): need {$requiredQty}, vehicle load has {$availableQty}, factory store has {$factoryQty}";
                             continue;
                         }
 
@@ -2466,7 +2556,7 @@ class OutletPosController extends Controller
 
                     $availableQty = (float) ($inventory->current_stock ?? 0);
                     if (!$inventory || $availableQty < $requiredQty) {
-                        $insufficientItems[] = "{$itemCode} - {$itemName} (required {$requiredQty}, stock has {$availableQty})";
+                        $insufficientItems[] = "{$itemName} ({$itemCode}): need {$requiredQty}, factory store has {$availableQty}";
                         continue;
                     }
 
@@ -2492,8 +2582,8 @@ class OutletPosController extends Controller
                     'load_id' => $resolvedLoadId,
                     'do_date' => $doDate,
                     'due_date' => $deliveryDate,
-                    'subtotal' => max($total + (float) ($order->discount_amount ?? 0), $total),
-                    'discount' => (float) ($order->discount_amount ?? 0),
+                    'subtotal' => $doSubtotal,
+                    'discount' => $doDiscount,
                     'total' => $total,
                     'paid_amount' => $paid,
                     'status' => $status,
@@ -2825,52 +2915,104 @@ class OutletPosController extends Controller
                 }
 
                 $resolvedLoadId = $order->load_id ? (int) $order->load_id : null;
-                $insufficientItems = [];
-                $lockedLoadItemsByCode = [];
-                $lockedInventoryById = [];
 
+                // Stock plan. If a DO already exists for this order, its quantities have already left the
+                // factory store / vehicle load, so the invoice only moves the difference:
+                //   invoice qty > DO qty  -> take the extra from the same source
+                //   invoice qty < DO qty  -> return the difference to the same source
+                //   item dropped from the invoice -> return the whole DO quantity
+                // Without a DO the invoice takes the full quantity, as before.
+                $existingDo = (!empty($order->do_number) && Schema::hasTable('distribution_dos'))
+                    ? DB::table('distribution_dos')->where('do_number', $order->do_number)->first(['id', 'load_id'])
+                    : null;
+                $stockLoadId = $existingDo
+                    ? ($existingDo->load_id ? (int) $existingDo->load_id : null)
+                    : $resolvedLoadId;
+                $stockKey = function ($inventoryItemId, $itemCode) use ($stockLoadId) {
+                    return $stockLoadId ? 'code:' . (string) $itemCode : 'inv:' . (int) $inventoryItemId;
+                };
+
+                $stockLines = []; // key => [inventory_item_id, item_code, item_name, required, issued]
                 foreach ($items as $item) {
-                    $requiredQty = (float) ($item->quantity ?? 0);
-                    if ($requiredQty <= 0) {
+                    $key = $stockKey($item->inventory_item_id ?? 0, $item->item_code ?? '');
+                    $stockLines[$key] ??= [
+                        'inventory_item_id' => (int) ($item->inventory_item_id ?? 0),
+                        'item_code' => (string) ($item->item_code ?? ''),
+                        'item_name' => (string) ($item->item_name ?? $item->item_code ?? ''),
+                        'required' => 0.0,
+                        'issued' => 0.0,
+                    ];
+                    $stockLines[$key]['required'] += max((float) ($item->quantity ?? 0), 0);
+                }
+                if ($existingDo) {
+                    $doItems = DB::table('distribution_do_items')
+                        ->where('distribution_do_id', (int) $existingDo->id)
+                        ->get(['inventory_item_id', 'item_code', 'item_name', 'quantity']);
+                    foreach ($doItems as $doItem) {
+                        $key = $stockKey($doItem->inventory_item_id ?? 0, $doItem->item_code ?? '');
+                        $stockLines[$key] ??= [
+                            'inventory_item_id' => (int) ($doItem->inventory_item_id ?? 0),
+                            'item_code' => (string) ($doItem->item_code ?? ''),
+                            'item_name' => (string) ($doItem->item_name ?? $doItem->item_code ?? ''),
+                            'required' => 0.0,
+                            'issued' => 0.0,
+                        ];
+                        $stockLines[$key]['issued'] += max((float) ($doItem->quantity ?? 0), 0);
+                    }
+                }
+
+                $stockMoves = []; // [source => 'load'|'factory', id => row id, delta => +take / -return]
+                $insufficientItems = [];
+                foreach ($stockLines as $line) {
+                    $delta = round($line['required'] - $line['issued'], 2);
+                    if (abs($delta) < 0.00001) {
                         continue;
                     }
+                    $itemCode = $line['item_code'];
+                    $itemName = $line['item_name'];
 
-                    $itemCode = (string) ($item->item_code ?? '');
-                    $itemName = (string) ($item->item_name ?? $itemCode);
-
-                    if ($resolvedLoadId) {
+                    if ($stockLoadId) {
                         $loadItem = DB::table('load_items')
-                            ->where('load_id', $resolvedLoadId)
+                            ->where('load_id', $stockLoadId)
                             ->where('product_code', $itemCode)
                             ->lockForUpdate()
                             ->first(['id', 'qty']);
-
                         $availableQty = (float) ($loadItem->qty ?? 0);
-                        if (!$loadItem || $availableQty < $requiredQty) {
-                            $insufficientItems[] = "{$itemCode} - {$itemName} (required {$requiredQty}, load has {$availableQty})";
+                        if ($delta > 0 && (!$loadItem || $availableQty < $delta)) {
+                            $factoryQty = $line['inventory_item_id'] > 0
+                                ? (float) (DB::table('inventory_items')->where('id', $line['inventory_item_id'])->value('current_stock') ?? 0)
+                                : 0.0;
+                            $insufficientItems[] = "{$itemName} ({$itemCode}): need {$delta} more, vehicle load has {$availableQty}, factory store has {$factoryQty}";
                             continue;
                         }
-                        $lockedLoadItemsByCode[$itemCode] = $loadItem;
+                        if (!$loadItem) {
+                            continue; // nothing to return to
+                        }
+                        $stockMoves[] = ['source' => 'load', 'id' => (int) $loadItem->id, 'delta' => $delta];
                         continue;
                     }
 
-                    $inventoryItemId = $item->inventory_item_id ? (int) $item->inventory_item_id : 0;
-                    if ($inventoryItemId <= 0) {
-                        $insufficientItems[] = "{$itemCode} - {$itemName} (inventory item is not linked)";
+                    if ($line['inventory_item_id'] <= 0) {
+                        if ($delta > 0) {
+                            $insufficientItems[] = "{$itemCode} - {$itemName} (inventory item is not linked)";
+                        }
                         continue;
                     }
-
                     $inventory = DB::table('inventory_items')
-                        ->where('id', $inventoryItemId)
+                        ->where('id', $line['inventory_item_id'])
                         ->lockForUpdate()
                         ->first(['id', 'current_stock']);
-
                     $availableQty = (float) ($inventory->current_stock ?? 0);
-                    if (!$inventory || $availableQty < $requiredQty) {
-                        $insufficientItems[] = "{$itemCode} - {$itemName} (required {$requiredQty}, stock has {$availableQty})";
+                    if ($delta > 0 && (!$inventory || $availableQty < $delta)) {
+                        $insufficientItems[] = $existingDo
+                            ? "{$itemName} ({$itemCode}): need {$delta} more than the DO, factory store has {$availableQty}"
+                            : "{$itemName} ({$itemCode}): need {$delta}, factory store has {$availableQty}";
                         continue;
                     }
-                    $lockedInventoryById[$inventoryItemId] = $inventory;
+                    if (!$inventory) {
+                        continue;
+                    }
+                    $stockMoves[] = ['source' => 'factory', 'id' => (int) $inventory->id, 'delta' => $delta];
                 }
 
                 if (!empty($insufficientItems)) {
@@ -3033,27 +3175,21 @@ class OutletPosController extends Controller
                         $itemData['load_id'] = $resolvedLoadId;
                     }
                     DB::table('distribution_invoice_items')->insert($itemData);
+                }
 
-                    $requiredQty = (float) ($item->quantity ?? 0);
-                    $itemCode = (string) ($item->item_code ?? '');
-                    if ($resolvedLoadId && isset($lockedLoadItemsByCode[$itemCode])) {
-                        DB::table('load_items')
-                            ->where('id', (int) $lockedLoadItemsByCode[$itemCode]->id)
-                            ->update([
-                                'qty' => max(0, (float) $lockedLoadItemsByCode[$itemCode]->qty - $requiredQty),
-                                'updated_at' => now(),
-                            ]);
-                        continue;
-                    }
-
-                    $inventoryItemId = $item->inventory_item_id ? (int) $item->inventory_item_id : 0;
-                    if ($inventoryItemId > 0 && isset($lockedInventoryById[$inventoryItemId])) {
-                        DB::table('inventory_items')
-                            ->where('id', $inventoryItemId)
-                            ->update([
-                                'current_stock' => max(0, (float) $lockedInventoryById[$inventoryItemId]->current_stock - $requiredQty),
-                                'updated_at' => now(),
-                            ]);
+                // Apply the stock plan: positive delta takes stock out, negative delta puts it back.
+                foreach ($stockMoves as $move) {
+                    $delta = (float) $move['delta'];
+                    if ($move['source'] === 'load') {
+                        DB::table('load_items')->where('id', $move['id'])->update([
+                            'qty' => DB::raw('GREATEST(qty - (' . $delta . '), 0)'),
+                            'updated_at' => now(),
+                        ]);
+                    } else {
+                        DB::table('inventory_items')->where('id', $move['id'])->update([
+                            'current_stock' => DB::raw('GREATEST(current_stock - (' . $delta . '), 0)'),
+                            'updated_at' => now(),
+                        ]);
                     }
                 }
 

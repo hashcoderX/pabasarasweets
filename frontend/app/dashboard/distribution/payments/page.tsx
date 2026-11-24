@@ -1930,12 +1930,12 @@ function DistributionPaymentsPageContent() {
           width: var(--outstanding-receipt-width);
           min-height: 140mm;
           padding: 6mm;
-          font-family: Arial, sans-serif;
+          font-family: var(--font-dm-sans), "DM Sans", sans-serif;
           font-size: 12px;
           line-height: 1.4;
         }
         .outstanding-receipt-sheet.dotmatrix {
-          font-family: "Courier New", Courier, monospace;
+          font-family: var(--font-dm-sans), "DM Sans", sans-serif;
           font-size: 11px;
           letter-spacing: 0.2px;
         }

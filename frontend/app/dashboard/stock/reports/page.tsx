@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -415,7 +416,7 @@ export default function StockReports() {
   if (!token) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff3e4_100%)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -592,7 +593,7 @@ export default function StockReports() {
 
         {loading ? (
           <div className="flex justify-center py-12">
-            <div className="h-9 w-9 animate-spin rounded-full border-b-2 border-orange-600"></div>
+            <PageSkeleton compact />
           </div>
         ) : filteredItems.length === 0 ? (
           <div className="py-14 text-center">

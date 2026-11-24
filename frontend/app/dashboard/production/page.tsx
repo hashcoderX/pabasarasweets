@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import axios from '@/lib/http';
@@ -23,7 +24,6 @@ type WidgetVisibilityChange = { widget_key: string; is_visible: boolean };
 
 const productionWidgetItems = [
   { id: 'production-nav-bar', name: 'Production Navigation Bar' },
-  { id: 'production-hero-card', name: 'Production Hero Card' },
   { id: 'production-areas-grid', name: 'Production Areas Grid' },
   { id: 'production-area-bom-card', name: 'Production BOM Area Card' },
   { id: 'production-area-planning-card', name: 'Production Planning Area Card' },
@@ -306,7 +306,7 @@ export default function ProductionPage() {
   if (!token) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-purple-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -314,9 +314,9 @@ export default function ProductionPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-red-50 via-pink-50 to-purple-50 relative overflow-hidden">
       <div className="absolute inset-0 opacity-30 pointer-events-none">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-teal-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       {isWidgetVisible('production-nav-bar') && <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
@@ -332,7 +332,7 @@ export default function ProductionPage() {
             </div>
             <div className="flex items-center justify-between sm:justify-end space-x-3 sm:space-x-4">
               <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
                 <span>Production Module Active</span>
               </div>
               <div className="flex items-center space-x-2">
@@ -354,20 +354,6 @@ export default function ProductionPage() {
       </nav>}
 
       <main className="relative z-10 w-full py-8 px-3 sm:px-4 lg:px-6">
-        {isWidgetVisible('production-hero-card') && <div className="text-center mb-12">
-          <div className="inline-block p-1 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full mb-6">
-            <div className="bg-white rounded-full p-4">
-              <span className="text-4xl">🏭</span>
-            </div>
-          </div>
-          <h2 className="text-3xl md:text-5xl font-bold text-gray-900 mb-4">
-            Production <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">Management</span>
-          </h2>
-          <p className="text-lg sm:text-xl text-gray-600 max-w-3xl mx-auto leading-relaxed px-1">
-            Plan, execute, and control manufacturing operations from formula setup to quality and packaging.
-          </p>
-          {!widgetControlsLocked && <div className="mt-4"><button type="button" onClick={() => stageWidgetVisibilityChange('production-hero-card', false)} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">✕</button></div>}
-        </div>}
 
         {isWidgetVisible('production-areas-grid') && <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {productionAreas.map((area) => {

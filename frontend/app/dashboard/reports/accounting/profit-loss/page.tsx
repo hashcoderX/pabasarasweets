@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -161,7 +162,7 @@ export default function ProfitLossPage() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50">
         <div className="rounded-2xl border border-emerald-100 bg-white/85 px-6 py-5 shadow-xl backdrop-blur">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 animate-spin rounded-full border-2 border-emerald-200 border-t-emerald-600" />
+            <PageSkeleton />
             <div>
               <p className="text-sm font-semibold text-slate-800">Preparing Profit &amp; Loss Report</p>
               <p className="text-xs text-slate-500">Loading sales and expense ledgers...</p>

@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Fragment, useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -1056,7 +1057,7 @@ export default function AttendancePage() {
   if (!token) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-rose-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -1065,9 +1066,9 @@ export default function AttendancePage() {
     <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-rose-50 relative overflow-hidden">
       {/* Background Pattern */}
       <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       {/* Navigation */}
@@ -1853,7 +1854,7 @@ export default function AttendancePage() {
                     deviceStatus?.listener.online ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-700'
                   }`}
                 >
-                  <span className={`h-2.5 w-2.5 rounded-full ${deviceStatus?.listener.online ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+                  <span className={`h-2.5 w-2.5 rounded-full ${deviceStatus?.listener.online ? 'bg-green-500' : 'bg-red-500'}`} />
                   {deviceStatus?.listener.online ? `Listener online · port ${deviceStatus.listener.port}` : 'Listener offline'}
                 </span>
               </div>

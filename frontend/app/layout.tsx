@@ -1,5 +1,15 @@
 import type { Metadata, Viewport } from "next";
+import { DM_Sans } from "next/font/google";
 import "./globals.css";
+
+// Single app-wide font. Self-hosted by Next.js, so it also works offline (POS).
+const dmSans = DM_Sans({
+  subsets: ["latin"],
+  axes: ["opsz"],
+  style: ["normal", "italic"],
+  display: "swap",
+  variable: "--font-dm-sans",
+});
 
 export const metadata: Metadata = {
   title: "BMS - Business Management System",
@@ -39,8 +49,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className="antialiased" suppressHydrationWarning>
+    <html lang="en" className={dmSans.variable}>
+      <body className={`${dmSans.className} antialiased`} suppressHydrationWarning>
         {children}
       </body>
     </html>

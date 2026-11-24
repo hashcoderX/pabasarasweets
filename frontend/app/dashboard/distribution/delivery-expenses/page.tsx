@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -382,7 +383,7 @@ export default function DistributionDeliveryExpensesPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-50 via-teal-50 to-emerald-50 flex items-center justify-center">
-        <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-green-600" />
+        <PageSkeleton />
       </div>
     );
   }

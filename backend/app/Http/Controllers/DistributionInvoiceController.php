@@ -284,6 +284,8 @@ class DistributionInvoiceController extends Controller
             'items.*.quantity' => 'required|numeric|gt:0',
             'items.*.unit_price' => 'required|numeric|min:0',
             'items.*.discount' => 'nullable|numeric|min:0',
+            // Invoicing an existing DO: its stock is already issued, and its order gets linked.
+            'source_do_id' => 'nullable|integer|exists:distribution_dos,id',
         ]);
 
         if ($validator->fails()) {
@@ -296,17 +298,57 @@ class DistributionInvoiceController extends Controller
 
         $payload = $validator->validated();
 
-        $invoice = DB::transaction(function () use ($payload, $request) {
+        try {
+            $invoice = DB::transaction(fn () => $this->createInvoiceRecord($payload, $request));
+        } catch (\RuntimeException $e) {
+            return response()->json(['success' => false, 'message' => $e->getMessage()], 422);
+        }
+                    $this->pushInvoiceLocationToTraccar($invoice);
+
+        return response()->json([
+            'success' => true,
+            'data' => $invoice,
+            'message' => (bool) ($payload['mark_as_dispatch_order'] ?? false)
+                ? 'Dispatch Order (DO) created successfully'
+                : 'Distribution invoice created successfully',
+        ], 201);
+    }
+
+    /**
+     * Body of store(), run inside a transaction. When source_do_id is given the invoice is
+     * created from that DO: stock moves only by the difference from the DO quantities and the
+     * DO's source order is marked as invoiced.
+     */
+    private function createInvoiceRecord(array $payload, Request $request): DistributionInvoice
+    {
             $user = $request->user();
             $invoiceHasLoadId = Schema::hasColumn('distribution_invoices', 'load_id');
             $invoiceItemsHasLoadId = Schema::hasColumn('distribution_invoice_items', 'load_id');
+
+            $sourceDo = null;
+            $sourceOrder = null;
+            if (!empty($payload['source_do_id'])) {
+                $sourceDo = DB::table('distribution_dos')->where('id', (int) $payload['source_do_id'])->lockForUpdate()->first();
+                if (preg_match('/\[ORDER_ID:(\d+)\]/', (string) ($sourceDo->notes ?? ''), $match) && Schema::hasTable('orders')) {
+                    $sourceOrder = DB::table('orders')->where('id', (int) $match[1])->lockForUpdate()->first();
+                }
+                if ($sourceOrder && !empty($sourceOrder->invoice_number ?? null)) {
+                    throw new \RuntimeException("DO {$sourceDo->do_number} is already invoiced ({$sourceOrder->invoice_number}).");
+                }
+                if (!$sourceOrder && Schema::hasColumn('distribution_invoices', 'notes')
+                    && DistributionInvoice::where('notes', 'like', '%[FROM_DO:' . $sourceDo->do_number . ']%')->exists()) {
+                    throw new \RuntimeException("DO {$sourceDo->do_number} is already invoiced.");
+                }
+                // The invoice belongs to the same load the DO was issued from.
+                $payload['load_id'] = $sourceDo->load_id ?: null;
+            }
 
             $activeLoad = null;
             if (!empty($payload['load_id'])) {
                 $activeLoad = Load::find($payload['load_id']);
             }
 
-            if (!$activeLoad && $user && $user->employee_id) {
+            if (!$sourceDo && !$activeLoad && $user && $user->employee_id) {
                 $activeLoad = Load::where('sales_ref_id', $user->employee_id)
                     ->whereIn('status', ['pending', 'in_transit'])
                     ->orderByDesc('load_date')
@@ -343,6 +385,12 @@ class DistributionInvoiceController extends Controller
                     . 'Created at: ' . now()->toDateTimeString();
                 $notes = trim((string) $notes);
                 $notes = $notes !== '' ? ($notes . "\n\n" . $doLog) : $doLog;
+            }
+
+            if ($sourceDo) {
+                $fromDoTag = "[FROM_DO:{$sourceDo->do_number}]";
+                $notes = trim((string) $notes);
+                $notes = $notes !== '' ? ($fromDoTag . "\n" . $notes) : $fromDoTag;
             }
 
             $invoiceData = [
@@ -402,6 +450,10 @@ class DistributionInvoiceController extends Controller
 
                 DistributionInvoiceItem::create($itemData);
 
+                if ($sourceDo) {
+                    continue; // stock for DO invoices is settled below, by difference
+                }
+
                 $handledByLoad = false;
 
                 if ($activeLoad) {
@@ -425,17 +477,124 @@ class DistributionInvoiceController extends Controller
                 }
             }
 
-            return $invoice->load(['customer:id,shop_name,customer_code', 'items']);
-        });
-                    $this->pushInvoiceLocationToTraccar($invoice);
+            if ($sourceDo) {
+                $this->settleStockAgainstDo($sourceDo, $payload['items']);
+                if ($sourceOrder) {
+                    $this->markSourceOrderInvoiced($sourceOrder, $invoice, $payload['items']);
+                }
+            }
 
-        return response()->json([
-            'success' => true,
-            'data' => $invoice,
-            'message' => (bool) ($payload['mark_as_dispatch_order'] ?? false)
-                ? 'DO (Proforma Invoice) created successfully'
-                : 'Distribution invoice created successfully',
-        ], 201);
+            return $invoice->load(['customer:id,shop_name,customer_code', 'items']);
+    }
+
+    /**
+     * The DO already took its quantities out of the vehicle load / factory store. Move only the
+     * difference: invoice qty above the DO takes the extra, below the DO returns it, and DO items
+     * left off the invoice go back in full. Free-quantity lines count as issued stock too.
+     *
+     * @param array<int, array<string, mixed>> $invoiceItems
+     */
+    private function settleStockAgainstDo(object $sourceDo, array $invoiceItems): void
+    {
+        $loadId = $sourceDo->load_id ? (int) $sourceDo->load_id : null;
+        $keyOf = fn ($inventoryItemId, $itemCode) => $loadId
+            ? 'code:' . (string) $itemCode
+            : 'inv:' . (int) $inventoryItemId;
+
+        $lines = [];
+        $add = function ($inventoryItemId, $itemCode, $itemName, $field, $qty) use (&$lines, $keyOf) {
+            $key = $keyOf($inventoryItemId, $itemCode);
+            $lines[$key] ??= [
+                'inventory_item_id' => (int) $inventoryItemId,
+                'item_code' => (string) $itemCode,
+                'item_name' => (string) ($itemName ?: $itemCode),
+                'required' => 0.0,
+                'issued' => 0.0,
+            ];
+            $lines[$key][$field] += max((float) $qty, 0);
+        };
+
+        foreach ($invoiceItems as $item) {
+            $add($item['inventory_item_id'] ?? 0, $item['item_code'] ?? '', $item['item_name'] ?? '', 'required', $item['quantity'] ?? 0);
+        }
+        foreach (DB::table('distribution_do_items')->where('distribution_do_id', (int) $sourceDo->id)->get() as $doItem) {
+            $add($doItem->inventory_item_id ?? 0, $doItem->item_code ?? '', $doItem->item_name ?? '', 'issued', $doItem->quantity ?? 0);
+        }
+
+        $moves = [];
+        $shortages = [];
+        foreach ($lines as $line) {
+            $delta = round($line['required'] - $line['issued'], 2);
+            if (abs($delta) < 0.00001) {
+                continue;
+            }
+
+            if ($loadId) {
+                $loadItem = DB::table('load_items')->where('load_id', $loadId)->where('product_code', $line['item_code'])->lockForUpdate()->first(['id', 'qty']);
+                $available = (float) ($loadItem->qty ?? 0);
+                if ($delta > 0 && (!$loadItem || $available < $delta)) {
+                    $shortages[] = "{$line['item_name']} ({$line['item_code']}): need {$delta} more than the DO, vehicle load has {$available}";
+                    continue;
+                }
+                if ($loadItem) {
+                    $moves[] = ['table' => 'load_items', 'column' => 'qty', 'id' => (int) $loadItem->id, 'delta' => $delta];
+                }
+                continue;
+            }
+
+            if ($line['inventory_item_id'] <= 0) {
+                if ($delta > 0) {
+                    $shortages[] = "{$line['item_name']} ({$line['item_code']}): inventory item is not linked";
+                }
+                continue;
+            }
+            $inventory = DB::table('inventory_items')->where('id', $line['inventory_item_id'])->lockForUpdate()->first(['id', 'current_stock']);
+            $available = (float) ($inventory->current_stock ?? 0);
+            if ($delta > 0 && (!$inventory || $available < $delta)) {
+                $shortages[] = "{$line['item_name']} ({$line['item_code']}): need {$delta} more than the DO, factory store has {$available}";
+                continue;
+            }
+            if ($inventory) {
+                $moves[] = ['table' => 'inventory_items', 'column' => 'current_stock', 'id' => (int) $inventory->id, 'delta' => $delta];
+            }
+        }
+
+        if (!empty($shortages)) {
+            throw new \RuntimeException('Insufficient stock for invoice: ' . implode('; ', array_slice($shortages, 0, 5)));
+        }
+
+        foreach ($moves as $move) {
+            DB::table($move['table'])->where('id', $move['id'])->update([
+                $move['column'] => DB::raw("GREATEST({$move['column']} - (" . (float) $move['delta'] . '), 0)'),
+                'updated_at' => now(),
+            ]);
+        }
+    }
+
+    /**
+     * Link the DO's source order to this invoice so it shows as invoiced everywhere.
+     *
+     * @param array<int, array<string, mixed>> $invoiceItems
+     */
+    private function markSourceOrderInvoiced(object $order, DistributionInvoice $invoice, array $invoiceItems): void
+    {
+        $hasDo = !empty($order->do_number ?? null);
+        $update = ['updated_at' => now()];
+        $values = [
+            'invoice_number' => $invoice->invoice_number,
+            'status' => $hasDo ? 'completed' : 'invoiced',
+            'invoice_created_at' => now(),
+            'total_amount' => (float) $invoice->total,
+            'discount_amount' => (float) $invoice->discount,
+            'total_quantity' => round(array_sum(array_map(fn ($item) => (float) ($item['quantity'] ?? 0), $invoiceItems)), 2),
+            'balance_amount' => max((float) $invoice->total - (float) ($order->paid_amount ?? 0), 0),
+        ];
+        foreach ($values as $column => $value) {
+            if (Schema::hasColumn('orders', $column)) {
+                $update[$column] = $value;
+            }
+        }
+        DB::table('orders')->where('id', (int) $order->id)->update($update);
     }
 
     public function storeDispatchOrder(Request $request): JsonResponse
@@ -829,7 +988,7 @@ class DistributionInvoiceController extends Controller
             'success' => true,
             'data' => $invoice,
             'message' => (bool) ($payload['mark_as_dispatch_order'] ?? false)
-                ? 'DO (Proforma Invoice) updated successfully'
+                ? 'Dispatch Order (DO) updated successfully'
                 : 'Distribution invoice updated successfully',
         ]);
     }

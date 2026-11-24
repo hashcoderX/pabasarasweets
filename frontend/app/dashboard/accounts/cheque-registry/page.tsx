@@ -1,10 +1,12 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { isAxiosError } from '@/lib/http';
 import { createApiClient } from '../../../../lib/apiClient';
+import ChequePrintModal, { type ChequePrintPrefill } from './ChequePrintModal';
 
 type CompanyChequeAccount = {
   id: number;
@@ -99,6 +101,8 @@ export default function ChequeRegistryPage() {
   const [endingClearanceId, setEndingClearanceId] = useState<number | null>(null);
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [showEntryDepositModal, setShowEntryDepositModal] = useState(false);
+  const [chequePrintPrefill, setChequePrintPrefill] = useState<ChequePrintPrefill | null>(null);
+  const [showChequePrint, setShowChequePrint] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -646,7 +650,7 @@ export default function ChequeRegistryPage() {
   if (!token || loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-teal-50 via-emerald-50 to-cyan-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -666,9 +670,19 @@ export default function ChequeRegistryPage() {
       </nav>
 
       <main className="w-full py-8 px-3 sm:px-4 lg:px-6 space-y-6">
-        <div>
-          <h1 className="text-3xl sm:text-4xl font-bold text-gray-900">Cheque Registry</h1>
-          <p className="text-sm text-gray-600 mt-1">Register received cheques, deposit cheques, track distribution salesperson cheques, and save issued supplier cheques.</p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-3xl sm:text-4xl font-bold text-gray-900">Cheque Registry</h1>
+            <p className="text-sm text-gray-600 mt-1">Register received cheques, deposit cheques, track distribution salesperson cheques, and save issued supplier cheques.</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setChequePrintPrefill(null); setShowChequePrint(true); }}
+            className="inline-flex shrink-0 items-center gap-2 rounded-full bg-gradient-to-r from-slate-800 to-slate-900 px-5 py-2.5 text-sm font-semibold text-white shadow-lg hover:from-slate-900 hover:to-black"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M6 9V3h12v6" /><rect x="3" y="9" width="18" height="8" rx="2" /><path d="M6 14h12v7H6z" /></svg>
+            Print Cheque
+          </button>
         </div>
 
         {error ? <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-2 text-sm text-rose-700">{error}</div> : null}
@@ -742,7 +756,19 @@ export default function ChequeRegistryPage() {
         ) : null}
 
         <section className="rounded-2xl border border-white/70 bg-white/90 p-5 shadow-lg">
-          <h2 className="text-lg font-semibold text-gray-900">Issued Cheque (Company to Supplier)</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-lg font-semibold text-gray-900">Issued Cheque (Company to Supplier)</h2>
+            <button
+              type="button"
+              onClick={() => {
+                setChequePrintPrefill({ payee: issueForm.supplierName, amount: issueForm.amount, chequeDate: issueForm.chequeDate });
+                setShowChequePrint(true);
+              }}
+              className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Print this cheque
+            </button>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mt-3">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">Company</label>
@@ -893,7 +919,16 @@ export default function ChequeRegistryPage() {
                           )}
                         </div>
                       ) : (
-                        <span className="text-xs text-gray-400">-</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setChequePrintPrefill({ payee: entry.counterparty_name || '', amount: entry.amount, chequeDate: entry.cheque_date || '' });
+                            setShowChequePrint(true);
+                          }}
+                          className="rounded-full bg-gradient-to-r from-slate-700 to-slate-900 px-3.5 py-1.5 text-xs font-semibold text-white hover:from-slate-800 hover:to-black"
+                        >
+                          Print Cheque
+                        </button>
                       )}
                     </td>
                   </tr>
@@ -1019,6 +1054,7 @@ export default function ChequeRegistryPage() {
             </div>
           </div>
         </section>
+        <ChequePrintModal open={showChequePrint} api={api} prefill={chequePrintPrefill} onClose={() => setShowChequePrint(false)} />
       </main>
 
       {showEntryDepositModal ? (

@@ -93,6 +93,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('cheque-registry/{id}/return', [\App\Http\Controllers\ChequeRegistryController::class, 'returnCheque']);
     Route::post('cheque-registry/{id}/end-clearance', [\App\Http\Controllers\ChequeRegistryController::class, 'endClearance']);
     Route::post('cheque-registry/issue', [\App\Http\Controllers\ChequeRegistryController::class, 'issueCheque']);
+    Route::get('cheque-print-formats', [\App\Http\Controllers\ChequePrintFormatController::class, 'index']);
+    Route::post('cheque-print-formats', [\App\Http\Controllers\ChequePrintFormatController::class, 'store']);
+    Route::post('cheque-print-formats/{id}', [\App\Http\Controllers\ChequePrintFormatController::class, 'update']);
+    Route::delete('cheque-print-formats/{id}', [\App\Http\Controllers\ChequePrintFormatController::class, 'destroy']);
     Route::get('system-settings', [SystemSettingController::class, 'show']);
     Route::put('system-settings', [SystemSettingController::class, 'update']);
     Route::get('security-settings', [SecuritySettingController::class, 'show']);
@@ -216,6 +220,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('orders', [\App\Http\Controllers\OrderController::class, 'store']);
     Route::post('orders/{orderId}/accept', [\App\Http\Controllers\OrderController::class, 'acceptOrder']);
     Route::post('orders/{orderId}/reject', [\App\Http\Controllers\OrderController::class, 'rejectOrder']);
+    Route::delete('orders/{orderId}', [\App\Http\Controllers\OrderController::class, 'destroy']);
     Route::post('orders/{orderId}/create-do', [\App\Http\Controllers\OrderController::class, 'createDoFromOrder']);
     Route::post('orders/{orderId}/create-invoice', [\App\Http\Controllers\OrderController::class, 'createInvoiceFromOrder']);
     Route::get('outlet-pos/me', [\App\Http\Controllers\OutletPosController::class, 'me']);

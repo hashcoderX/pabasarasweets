@@ -1136,7 +1136,7 @@ export default function DistributionPage() {
               )}
             </div>
             <div className="flex items-center space-x-2 text-sm text-gray-600">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
               <span>Distribution Active</span>
             </div>
           </div>

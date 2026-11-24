@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -413,7 +414,7 @@ export default function AccountsPage() {
   if (!token || loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -430,7 +431,7 @@ export default function AccountsPage() {
               </Link>
             </div>
             <div className="flex items-center space-x-2 text-sm text-gray-600">
-              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+              <div className="w-2 h-2 bg-emerald-500 rounded-full"></div>
               <span>Accounts Active</span>
             </div>
           </div>

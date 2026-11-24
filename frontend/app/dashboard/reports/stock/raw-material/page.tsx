@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -159,7 +160,7 @@ export default function RawMaterialStockReportPage() {
     return doc;
   };
 
-  if (!token || !accessReady) return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-amber-600"></div></div>;
+  if (!token || !accessReady) return <div className="min-h-screen flex items-center justify-center"><PageSkeleton /></div>;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50">

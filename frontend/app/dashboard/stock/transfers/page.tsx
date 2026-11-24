@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -520,9 +521,9 @@ export default function StockTransfersPage() {
     win.document.write(`
       <html>
         <head>
-          <title>Transfer ${selectedTransferDetails.transfer_reference}</title>
+          <title>Transfer ${selectedTransferDetails.transfer_reference}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
         </head>
-        <body style="font-family: Arial, sans-serif; padding: 20px; color: #111;">
+        <body style="font-family: &quot;DM Sans&quot;, sans-serif; padding: 20px; color: #111;">
           <h2 style="margin-bottom: 4px;">Transfer Details</h2>
           <p style="margin: 2px 0;"><strong>Reference:</strong> ${selectedTransferDetails.transfer_reference}</p>
           <p style="margin: 2px 0;"><strong>Date:</strong> ${new Date(selectedTransferDetails.transferred_at).toLocaleString()}</p>
@@ -599,7 +600,7 @@ export default function StockTransfersPage() {
   if (!token || loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -607,9 +608,9 @@ export default function StockTransfersPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-yellow-50 relative overflow-hidden">
       <div className="absolute inset-0 opacity-35 pointer-events-none">
-        <div className="absolute top-10 left-12 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-2xl animate-pulse"></div>
-        <div className="absolute top-24 right-12 w-72 h-72 bg-amber-200 rounded-full mix-blend-multiply filter blur-2xl animate-pulse"></div>
-        <div className="absolute -bottom-8 left-1/3 w-80 h-80 bg-yellow-200 rounded-full mix-blend-multiply filter blur-2xl animate-pulse"></div>
+        <div className="absolute top-10 left-12 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-2xl"></div>
+        <div className="absolute top-24 right-12 w-72 h-72 bg-amber-200 rounded-full mix-blend-multiply filter blur-2xl"></div>
+        <div className="absolute -bottom-8 left-1/3 w-80 h-80 bg-yellow-200 rounded-full mix-blend-multiply filter blur-2xl"></div>
       </div>
 
       <div className="relative z-10 w-full px-3 sm:px-4 lg:px-6 py-8 space-y-6">

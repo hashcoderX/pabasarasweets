@@ -135,6 +135,8 @@ class DistributionDoController extends Controller
         $perPage = max(1, min(500, (int) $request->get('per_page', 15)));
         $rows = $query->orderByDesc('do_date')->orderByDesc('id')->paginate($perPage);
 
+        $this->attachSourceOrders($rows->getCollection());
+
         return response()->json([
             'success' => true,
             'data' => $rows,
@@ -309,8 +311,64 @@ class DistributionDoController extends Controller
         return response()->json([
             'success' => true,
             'data' => $record,
-            'message' => 'DO (Proforma Invoice) created successfully',
+            'message' => 'Dispatch Order (DO) created successfully',
         ], 201);
+    }
+
+    /**
+     * DOs created from an order carry "[ORDER_ID:n]" in their notes. Expose that order and its
+     * invoice number so the UI can offer "Create Invoice" only while the order is not invoiced.
+     */
+    private function attachSourceOrders($records): void
+    {
+        $orderIdByDoId = [];
+        foreach ($records as $record) {
+            if (preg_match('/\[ORDER_ID:(\d+)\]/', (string) ($record->notes ?? ''), $match)) {
+                $orderIdByDoId[$record->id] = (int) $match[1];
+            }
+        }
+
+        $orders = (!empty($orderIdByDoId) && Schema::hasTable('orders'))
+            ? DB::table('orders')
+                ->whereIn('id', array_values(array_unique($orderIdByDoId)))
+                ->get(array_values(array_filter([
+                    'id',
+                    'order_number',
+                    'status',
+                    Schema::hasColumn('orders', 'invoice_number') ? 'invoice_number' : null,
+                ])))
+                ->keyBy('id')
+            : collect();
+
+        // Invoices created straight from a DO carry "[FROM_DO:<do_number>]" in their notes.
+        $doNumbers = collect($records)->pluck('do_number')->filter()->values();
+        $taggedInvoiceByDo = [];
+        if ($doNumbers->isNotEmpty() && Schema::hasTable('distribution_invoices')) {
+            $tagged = DB::table('distribution_invoices')
+                ->where(function ($query) use ($doNumbers) {
+                    foreach ($doNumbers as $doNumber) {
+                        $query->orWhere('notes', 'like', '%[FROM_DO:' . $doNumber . ']%');
+                    }
+                })
+                ->get(['invoice_number', 'notes']);
+            foreach ($tagged as $invoiceRow) {
+                if (preg_match('/\[FROM_DO:([^\]]+)\]/', (string) $invoiceRow->notes, $match)) {
+                    $taggedInvoiceByDo[$match[1]] = $invoiceRow->invoice_number;
+                }
+            }
+        }
+
+        foreach ($records as $record) {
+            $order = $orders->get($orderIdByDoId[$record->id] ?? 0);
+            $record->setAttribute('order_id', $order ? (int) $order->id : null);
+            $record->setAttribute('order_number', $order->order_number ?? null);
+            $record->setAttribute('order_status', $order->status ?? null);
+            $record->setAttribute('order_invoice_number', $order->invoice_number ?? null);
+            $record->setAttribute(
+                'invoice_number_for_do',
+                ($order->invoice_number ?? null) ?: ($taggedInvoiceByDo[$record->do_number] ?? null)
+            );
+        }
     }
 
     public function show(string $id): JsonResponse

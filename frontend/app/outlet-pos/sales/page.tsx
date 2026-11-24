@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -171,7 +172,7 @@ function OutletPosSalesContent() {
     };
 
     load();
-  }, [token, currentPage, API_URL, params, router, appliedFilters]);
+  }, [token, currentPage, API_URL, appliedFilters]);
 
   const applyFilters = () => {
     setCurrentPage(1);
@@ -193,7 +194,7 @@ function OutletPosSalesContent() {
   if (loading) {
     return (
       <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center`}>
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -202,9 +203,9 @@ function OutletPosSalesContent() {
     <div className={`${isEmbedded ? '' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative overflow-hidden`}>
       {!isEmbedded ? (
       <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
       ) : null}
 
@@ -456,7 +457,7 @@ export default function OutletPosSalesPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+          <PageSkeleton />
         </div>
       }
     >

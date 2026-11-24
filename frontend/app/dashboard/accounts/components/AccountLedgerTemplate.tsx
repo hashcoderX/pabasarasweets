@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -312,7 +313,7 @@ export default function AccountLedgerTemplate({
   if (!token || loading) {
     return (
       <div className={`min-h-screen bg-gradient-to-br ${gradient} flex items-center justify-center`}>
-        <div className={`animate-spin rounded-full h-12 w-12 border-b-2 ${accent}`}></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -329,7 +330,7 @@ export default function AccountLedgerTemplate({
               </Link>
             </div>
             <div className="flex items-center space-x-2 text-sm text-gray-600">
-              <div className={`w-2 h-2 rounded-full animate-pulse ${accent.replace('text-', 'bg-')}`}></div>
+              <div className={`w-2 h-2 rounded-full ${accent.replace('text-', 'bg-')}`}></div>
               <span>Ledger Active</span>
             </div>
           </div>

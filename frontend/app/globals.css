@@ -8,8 +8,10 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Monaco, Inconsolata, "Fira Code", "Droid Sans Mono", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  /* DM Sans is the only app font: sans, serif and mono utilities all map to it. */
+  --font-sans: var(--font-dm-sans), "DM Sans", sans-serif;
+  --font-serif: var(--font-dm-sans), "DM Sans", sans-serif;
+  --font-mono: var(--font-dm-sans), "DM Sans", sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,5 +24,51 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-dm-sans), "DM Sans", sans-serif;
+  font-optical-sizing: auto;
+}
+
+/* Form controls don't inherit the page font by default in every browser. */
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+}
+
+/* Login page background animation */
+@keyframes login-float {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33% { transform: translate3d(30px, -40px, 0) scale(1.08); }
+  66% { transform: translate3d(-25px, 25px, 0) scale(0.95); }
+}
+@keyframes login-rise {
+  0% { transform: translate3d(0, 0, 0) rotate(0deg); opacity: 0; }
+  15% { opacity: 0.55; }
+  85% { opacity: 0.55; }
+  100% { transform: translate3d(var(--drift, 20px), -110vh, 0) rotate(240deg); opacity: 0; }
+}
+@keyframes login-sheen {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+@keyframes login-enter {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.login-blob { animation: login-float 18s ease-in-out infinite; will-change: transform; }
+.login-particle {
+  position: absolute;
+  bottom: -40px;
+  border-radius: 9999px;
+  animation: login-rise linear infinite;
+  will-change: transform;
+}
+.login-sheen {
+  background-size: 200% 100%;
+  animation: login-sheen 6s linear infinite;
+}
+.login-enter { animation: login-enter 0.7s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .login-blob, .login-particle, .login-sheen, .login-enter { animation: none; }
 }

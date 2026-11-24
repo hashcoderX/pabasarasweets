@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -662,7 +663,7 @@ export default function DistributionDeliveryBalanceReportPage() {
   if (!token || !accessReady) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-lime-50 via-emerald-50 to-green-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-700"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -670,9 +671,9 @@ export default function DistributionDeliveryBalanceReportPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-lime-50 via-emerald-50 to-green-50 relative overflow-hidden">
       <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-16 left-16 w-72 h-72 bg-lime-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-16 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-48 w-72 h-72 bg-green-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
+        <div className="absolute top-16 left-16 w-72 h-72 bg-lime-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-16 w-72 h-72 bg-emerald-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-48 w-72 h-72 bg-green-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       <nav className="relative z-10 bg-white/80 backdrop-blur-lg shadow-lg border-b border-white/20">
@@ -687,7 +688,7 @@ export default function DistributionDeliveryBalanceReportPage() {
               </Link>
             </div>
             <div className="hidden md:flex items-center space-x-2 text-sm text-gray-600">
-              <div className="w-2 h-2 bg-green-600 rounded-full animate-pulse"></div>
+              <div className="w-2 h-2 bg-green-600 rounded-full"></div>
               <span>Delivery Balance Sheet Ready</span>
             </div>
           </div>

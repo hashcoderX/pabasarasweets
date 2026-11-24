@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { isAxiosError } from '@/lib/http';
@@ -576,7 +577,7 @@ export default function OutletAccountPage() {
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="h-12 w-12 animate-spin rounded-full border-b-2 border-violet-600"></div>
+        <PageSkeleton />
       </div>
     );
   }

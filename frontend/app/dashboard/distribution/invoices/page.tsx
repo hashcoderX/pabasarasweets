@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState, useRef, type CSSProperties } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -133,6 +134,12 @@ interface DeliveryOrderRecord {
     name?: string;
     code?: string;
   } | null;
+  /** Order this DO was created from (distribution DOs only). */
+  order_id?: number | null;
+  order_number?: string | null;
+  order_invoice_number?: string | null;
+  /** Invoice already created from this DO (via its order or directly). */
+  invoice_number_for_do?: string | null;
 }
 
 interface InvoiceLine {
@@ -368,6 +375,9 @@ export default function DistributionInvoicesPage() {
   const [items, setItems] = useState<Item[]>([]);
   const [invoices, setInvoices] = useState<InvoiceRecord[]>([]);
   const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRecord[]>([]);
+  // Set while the Create Invoice modal is invoicing an existing DO (stock already issued by the DO).
+  const [invoiceSourceDo, setInvoiceSourceDo] = useState<{ doId: number; doNumber: string; loadId: number | null } | null>(null);
+  const [openingDoInvoiceId, setOpeningDoInvoiceId] = useState<number | null>(null);
 
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [customerId, setCustomerId] = useState('');
@@ -1450,6 +1460,10 @@ export default function DistributionInvoicesPage() {
         total?: unknown;
         status?: unknown;
         customer?: { shop_name?: unknown; customer_code?: unknown } | null;
+        order_id?: unknown;
+        order_number?: unknown;
+        order_invoice_number?: unknown;
+        invoice_number_for_do?: unknown;
       }) => ({
         id: Number(row.id),
         source: 'distribution_do',
@@ -1465,6 +1479,10 @@ export default function DistributionInvoicesPage() {
         total_amount: Number(row.total || 0),
         status: row.status ? String(row.status) : null,
         outlet: null,
+        order_id: Number(row.order_id || 0) || null,
+        order_number: row.order_number ? String(row.order_number) : null,
+        order_invoice_number: row.order_invoice_number ? String(row.order_invoice_number) : null,
+        invoice_number_for_do: row.invoice_number_for_do ? String(row.invoice_number_for_do) : null,
       }));
 
       const merged = [...mappedOutlet, ...mappedDistribution]
@@ -2218,6 +2236,7 @@ export default function DistributionInvoicesPage() {
       .slice(0, 8);
   }, [returnSearch, items, inlineReturnMode, exchangeLoadAvailableByCode]);
   const resetInvoiceForm = () => {
+    setInvoiceSourceDo(null);
     setInvoiceNumber(generateInvoiceNumber());
     setCustomerId('');
     setInvoiceDate(new Date().toISOString().split('T')[0]);
@@ -2265,6 +2284,107 @@ export default function DistributionInvoicesPage() {
 
   const openViewInvoice = (invoice: InvoiceRecord) => {
     setViewInvoice(invoice);
+  };
+
+  // Opens the full Create Invoice modal pre-filled from a DO (customer, lines, discounts, notes, load).
+  const openCreateFromDo = async (record: DeliveryOrderRecord) => {
+    if (!token) return;
+    const doId = Number(record.id);
+    try {
+      setOpeningDoInvoiceId(doId);
+      const response = await axios.get(`/api/distribution/dos/${doId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: DEFAULT_API_TIMEOUT_MS,
+      });
+      const detail = response.data?.data as {
+        customer_id?: number | string | null;
+        load_id?: number | string | null;
+        discount?: number | string | null;
+        notes?: string | null;
+        customer?: { shop_name?: string | null; customer_code?: string | null } | null;
+        items?: Array<{
+          inventory_item_id?: number | string | null;
+          item_code?: string | null;
+          item_name?: string | null;
+          unit?: string | null;
+          quantity?: number | string | null;
+          unit_price?: number | string | null;
+          discount?: number | string | null;
+        }>;
+      } | null;
+      if (!detail || !Array.isArray(detail.items) || detail.items.length === 0) {
+        setQtyWarningMessage('This DO has no item lines to invoice.');
+        setQtyWarningOpen(true);
+        return;
+      }
+
+      openCreate('invoice');
+      const loadId = Number(detail.load_id || 0) || null;
+      if (isAdmin && loadId) setSelectedLoadFilter(String(loadId));
+
+      setCustomerId(String(Number(detail.customer_id || 0) || ''));
+      setCustomerPickerSearch(`${detail.customer?.shop_name || ''}${detail.customer?.customer_code ? ` (${detail.customer.customer_code})` : ''}`);
+      setLines(detail.items.map((item, index) => {
+        const quantity = Number(item.quantity || 0);
+        const grossUnitPrice = Number(item.unit_price || 0);
+        const perUnitDiscount = Math.min(Math.max(Number(item.discount || 0), 0), grossUnitPrice);
+        return {
+          line_id: `do-${doId}-${index}-${Date.now()}`,
+          inventory_item_id: Number(item.inventory_item_id || 0) || null,
+          item_code: String(item.item_code || ''),
+          item_name: String(item.item_name || ''),
+          unit: String(item.unit || ''),
+          quantity,
+          unit_price: Math.max(grossUnitPrice - perUnitDiscount, 0),
+          base_unit_price: grossUnitPrice,
+          item_discount: perUnitDiscount,
+          free_quantity: 0,
+          paid_quantity: quantity,
+          source_load_item_id: null,
+        };
+      }));
+      setDiscountType('amount');
+      setDiscountValue(String(Number(detail.discount || 0)));
+      const humanNotes = String(detail.notes || '')
+        .split('\n')
+        .filter((line) => !/^\s*(\[ORDER_ID:|Call Confirmed:|Delivery Date:)/i.test(line))
+        .join('\n')
+        .trim();
+      setNotes(humanNotes);
+      setInvoiceSourceDo({ doId, doNumber: String(record.do_number || record.sale_number), loadId });
+    } catch (error) {
+      console.error('Failed to open DO for invoicing:', error);
+      setQtyWarningMessage('Could not load this DO for invoicing. Please try again.');
+      setQtyWarningOpen(true);
+    } finally {
+      setOpeningDoInvoiceId(null);
+    }
+  };
+
+  const renderDoInvoiceAction = (record: DeliveryOrderRecord) => {
+    if (record.source !== 'distribution_do') {
+      return <span className="text-xs text-gray-400">-</span>;
+    }
+    const invoicedAs = record.invoice_number_for_do || record.order_invoice_number;
+    if (invoicedAs) {
+      return (
+        <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-semibold text-violet-700" title="Invoice already created">
+          ✓ {invoicedAs}
+        </span>
+      );
+    }
+    const opening = openingDoInvoiceId === Number(record.id);
+    return (
+      <button
+        type="button"
+        onClick={() => void openCreateFromDo(record)}
+        disabled={opening}
+        className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-emerald-600 to-teal-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:from-emerald-700 hover:to-teal-700 disabled:opacity-60"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6M12 12v6M9 15h6" /></svg>
+        {opening ? 'Opening…' : 'Create Invoice'}
+      </button>
+    );
   };
 
   const openReceiptPreview = (invoice: InvoiceRecord) => {
@@ -2626,13 +2746,13 @@ export default function DistributionInvoicesPage() {
     }
 
     if (markAsDispatchOrder && addPayment) {
-      setQtyWarningMessage('DO is stored in a separate table and does not accept invoice payment entries. Save payment after final invoice.');
+      setQtyWarningMessage('A Dispatch Order (DO) does not take payments. Record the payment when you create the invoice for this DO.');
       setQtyWarningOpen(true);
       return;
     }
 
     if (markAsDispatchOrder && returnLines.length > 0) {
-      setQtyWarningMessage('DO is separate from invoice returns. Remove return lines before creating DO.');
+      setQtyWarningMessage('A Dispatch Order (DO) cannot include item returns. Remove the return lines, then record them on the invoice.');
       setQtyWarningOpen(true);
       return;
     }
@@ -2715,7 +2835,7 @@ export default function DistributionInvoicesPage() {
 
     if (addPayment && paymentMethod === 'bill_to_bill') {
       if (markAsDispatchOrder) {
-        setQtyWarningMessage('DO (Proforma Invoice) cannot settle previous bill balances. Please use Cash/Check/Bank Transfer for current invoice only.');
+        setQtyWarningMessage('A Dispatch Order (DO) cannot settle previous bill balances. Please use Cash, Cheque or Bank Transfer for the current invoice only.');
         setQtyWarningOpen(true);
         return;
       }
@@ -2775,7 +2895,7 @@ export default function DistributionInvoicesPage() {
         const parts: string[] = [];
         if (markAsDispatchOrder) {
           parts.push('[DO (PROFORMA INVOICE)]');
-          parts.push('Mode: Dispatch Order (Proforma Invoice)');
+          parts.push('Mode: Dispatch Order (DO)');
           parts.push('Outstanding policy: Previous bill balances are excluded from this DO invoice.');
         }
         if (notes.trim()) parts.push(notes.trim());
@@ -2939,6 +3059,9 @@ export default function DistributionInvoicesPage() {
       billing_gps_accuracy: billingGpsSnapshot?.accuracy ?? null,
       billing_gps_captured_at: billingGpsSnapshot?.captured_at ?? null,
       items: itemsPayload,
+      ...(invoiceSourceDo && !isEditing && !markAsDispatchOrder
+        ? { source_do_id: invoiceSourceDo.doId, load_id: invoiceSourceDo.loadId }
+        : {}),
     };
 
     const paymentPayloads: PaymentEntry[] = [];
@@ -3227,6 +3350,7 @@ export default function DistributionInvoicesPage() {
       setEditingInvoiceId(null);
       resetInvoiceForm();
 
+      void fetchDeliveryOrders(effectiveLoadFilter || undefined);
       await fetchData();
       if (activeLoadId) {
         await fetchLoadItems(activeLoadId);
@@ -3480,7 +3604,7 @@ export default function DistributionInvoicesPage() {
   if (loading && items.length === 0 && invoices.length === 0) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -3661,7 +3785,7 @@ export default function DistributionInvoicesPage() {
           <div className="px-4 py-3 border-b border-gray-100 bg-gradient-to-r from-cyan-50 to-emerald-50 flex items-center justify-between gap-2">
             <div>
               <h3 className="text-sm font-semibold text-gray-800">Delivery Orders By Load</h3>
-              <p className="text-xs text-gray-500 mt-0.5">DO records from Outlet POS and Distribution DO (Proforma Invoice).</p>
+              <p className="text-xs text-gray-500 mt-0.5">Dispatch Orders (DO) from Outlet POS and Distribution.</p>
             </div>
           </div>
 
@@ -3676,12 +3800,13 @@ export default function DistributionInvoicesPage() {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Amount</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Outlet</th>
+                  <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Invoice</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {filteredDeliveryOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-500">
+                    <td colSpan={8} className="px-4 py-6 text-center text-sm text-gray-500">
                       No DO records found for the current filters.
                     </td>
                   </tr>
@@ -3698,6 +3823,7 @@ export default function DistributionInvoicesPage() {
                         {record.source === 'distribution_do' ? 'Distribution' : (record.outlet?.name || '-')}
                         {record.outlet?.code ? ` (${record.outlet.code})` : ''}
                       </td>
+                      <td className="px-4 py-2 text-right">{renderDoInvoiceAction(record)}</td>
                     </tr>
                   ))
                 )}
@@ -3723,10 +3849,13 @@ export default function DistributionInvoicesPage() {
                     <span className="text-gray-600">{record.load_id ? `Load #${record.load_id}` : '-'}</span>
                     <span className="font-semibold text-gray-900">{Number(record.total_amount || 0).toFixed(2)}</span>
                   </div>
-                  <p className="text-xs text-gray-500">
-                    {record.source === 'distribution_do' ? 'Distribution' : (record.outlet?.name || '-')}
-                    {record.outlet?.code ? ` (${record.outlet.code})` : ''}
-                  </p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-gray-500">
+                      {record.source === 'distribution_do' ? 'Distribution' : (record.outlet?.name || '-')}
+                      {record.outlet?.code ? ` (${record.outlet.code})` : ''}
+                    </p>
+                    {renderDoInvoiceAction(record)}
+                  </div>
                 </div>
               ))
             )}
@@ -3923,23 +4052,30 @@ export default function DistributionInvoicesPage() {
 
       {isWidgetVisible('distribution-invoices-create-modal-pane') && showModal && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/50 px-2 py-3 backdrop-blur-sm md:items-center md:px-4">
-          <div className="relative mx-auto flex h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-3xl border border-white/70 bg-white/92 shadow-[0_35px_120px_-45px_rgba(16,185,129,0.6)] md:h-auto md:max-h-[92vh]">
+          <div className="relative mx-auto flex h-[94vh] w-full max-w-[1600px] flex-col overflow-hidden rounded-3xl border border-white/70 bg-white/92 shadow-[0_35px_120px_-45px_rgba(16,185,129,0.6)] md:h-auto md:max-h-[94vh] md:w-[96vw]">
             <div className="flex items-start justify-between border-b border-slate-200/80 bg-gradient-to-r from-emerald-50/80 via-white to-cyan-50/70 px-4 pb-3 pt-4 backdrop-blur-sm md:px-6">
               {isWidgetVisible('distribution-invoices-create-modal-heading') && <div>
                 <h3 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg md:text-xl">
                   {editingInvoiceId
                     ? 'Edit Invoice'
                     : createDocumentMode === 'dispatch_order'
-                      ? 'Create DO (Proforma Invoice)'
+                      ? 'Create Dispatch Order (DO)'
                       : 'Create Invoice'}
                 </h3>
                 <p className="mt-0.5 text-xs text-slate-600 sm:text-sm">
                   {editingInvoiceId
                     ? 'Adjust delivered quantities and update this invoice. Use Update as DO when final delivered quantity changed.'
                     : createDocumentMode === 'dispatch_order'
-                      ? 'Create a Dispatch Order (Proforma Invoice) in a separate flow.'
+                      ? 'Issue goods to a shop now and create the invoice later.'
                       : 'Select shop, add items, and optionally record payment in one flow.'}
                 </p>
+                {invoiceSourceDo && !editingInvoiceId ? (
+                  <p className="mt-2 inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-cyan-200 bg-cyan-50 px-2.5 py-1.5 text-xs text-cyan-800">
+                    <span className="rounded bg-cyan-600 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">From DO</span>
+                    <strong>{invoiceSourceDo.doNumber}</strong>
+                    <span>· Lines, prices and discounts come from the DO. Stock was issued with the DO; changing a qty only moves the difference.</span>
+                  </p>
+                ) : null}
               </div>}
               <button
                 type="button"
@@ -4752,7 +4888,20 @@ export default function DistributionInvoicesPage() {
               </section>
             )}
 
-            <section className="mt-3 rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50/70 via-white to-emerald-50/45 p-4 shadow-sm sm:mt-4 sm:p-5">
+            {editingInvoiceId === null && createDocumentMode === 'dispatch_order' ? (
+              <section className="mt-3 flex items-start gap-3 rounded-2xl border border-sky-200 bg-sky-50/80 p-4 text-sm text-sky-900 sm:mt-4">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-600 text-xs font-bold text-white">i</span>
+                <div>
+                  <p className="font-semibold">Item returns and payments are recorded on the invoice</p>
+                  <p className="mt-0.5 text-sky-800">
+                    A Dispatch Order only issues the goods. Record returns and payments when you create the invoice for this DO.
+                  </p>
+                </div>
+              </section>
+            ) : null}
+
+            {/* Returns + payments apply to invoices only; hidden while creating a Dispatch Order. */}
+            <section className={`mt-3 rounded-2xl border border-amber-100 bg-gradient-to-br from-amber-50/70 via-white to-emerald-50/45 p-4 shadow-sm sm:mt-4 sm:p-5 ${editingInvoiceId === null && createDocumentMode === 'dispatch_order' ? 'hidden' : ''}`}>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-5">
                 <div className="rounded-xl border border-amber-100 bg-white/90 p-4 shadow-sm sm:p-5">
                   <div className="mb-3 flex items-center justify-between">
@@ -6250,7 +6399,7 @@ export default function DistributionInvoicesPage() {
           width: var(--receipt-width);
           min-height: 140mm;
           padding: 5mm 4mm;
-          font-family: Arial, sans-serif;
+          font-family: var(--font-dm-sans), "DM Sans", sans-serif;
           font-size: 12px;
           line-height: 1.45;
         }

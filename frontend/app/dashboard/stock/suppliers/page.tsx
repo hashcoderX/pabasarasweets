@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -371,7 +372,7 @@ export default function Suppliers() {
   if (!token) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(251,146,60,0.16),_transparent_25%),linear-gradient(180deg,_#fffaf5_0%,_#fff3e4_100%)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -447,7 +448,7 @@ export default function Suppliers() {
         <div className="px-4 py-5 sm:p-6">
           {loading ? (
             <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600"></div>
+              <PageSkeleton compact />
             </div>
           ) : suppliers.length === 0 ? (
             <div className="text-center py-8">

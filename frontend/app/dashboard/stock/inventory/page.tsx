@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import axios from '@/lib/http';
@@ -832,7 +833,7 @@ export default function Inventory() {
   if (!token) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -1114,7 +1115,7 @@ export default function Inventory() {
           {/* Items Table */}
           {loading ? (
             <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-600"></div>
+              <PageSkeleton compact />
             </div>
           ) : filteredVisibleItems.length === 0 ? (
             <div className="text-center py-8">

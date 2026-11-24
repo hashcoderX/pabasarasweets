@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -137,7 +138,7 @@ function OutletLoyaltyCustomersContent() {
     };
 
     load();
-  }, [token, search, API_URL, params, router]);
+  }, [token, search, API_URL]);
 
   const handleCreate = async () => {
     if (!token || !outletId) return;
@@ -195,7 +196,7 @@ function OutletLoyaltyCustomersContent() {
   if (loading) {
     return (
       <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 flex items-center justify-center`}>
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -203,8 +204,8 @@ function OutletLoyaltyCustomersContent() {
   return (
     <div className={`${isEmbedded ? '' : 'min-h-screen'} bg-gradient-to-br from-yellow-50 via-amber-50 to-orange-50 relative overflow-hidden`}>
       <div className="absolute inset-0 opacity-30 pointer-events-none">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-amber-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-amber-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-orange-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
 
       <main className={`relative z-10 ${isEmbedded ? 'w-full p-5 sm:p-5 lg:p-5' : 'max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8'} space-y-6`}>
@@ -303,7 +304,7 @@ export default function OutletLoyaltyCustomersPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+          <PageSkeleton />
         </div>
       }
     >

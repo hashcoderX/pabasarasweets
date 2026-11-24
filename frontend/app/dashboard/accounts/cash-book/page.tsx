@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -565,7 +566,7 @@ export default function CashBookPage() {
   if (!token || loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.2),_transparent_24%),radial-gradient(circle_at_top_right,_rgba(16,185,129,0.14),_transparent_28%),linear-gradient(180deg,_#f0f9ff_0%,_#ecfeff_48%,_#f0fdfa_100%)]">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-cyan-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -580,7 +581,7 @@ export default function CashBookPage() {
               <span className="font-medium text-sm sm:text-base">Back to Accounts</span>
             </Link>
             <div className="flex items-center space-x-2 text-sm text-gray-600">
-              <div className="w-2 h-2 bg-sky-500 rounded-full animate-pulse"></div>
+              <div className="w-2 h-2 bg-sky-500 rounded-full"></div>
               <span>Cash Book Journal</span>
             </div>
           </div>

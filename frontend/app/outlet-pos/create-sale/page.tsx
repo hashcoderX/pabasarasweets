@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { Fragment, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -309,6 +310,7 @@ function OutletPosContent() {
   const router = useRouter();
   const params = useSearchParams();
   const isEmbedded = params.get('embedded') === '1';
+  const initialLoadTokenRef = useRef('');
   useOutletEmbeddedBridge(isEmbedded, loading);
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
   const formInputClass =
@@ -765,6 +767,9 @@ function OutletPosContent() {
 
   useEffect(() => {
     if (!token) return;
+    // Load once per token; guards against repeat runs (StrictMode / identity changes) that re-show the loader.
+    if (initialLoadTokenRef.current === token) return;
+    initialLoadTokenRef.current = token;
 
     const load = async () => {
       try {
@@ -783,7 +788,7 @@ function OutletPosContent() {
     };
 
     load();
-  }, [token, API_URL, router, params]);
+  }, [token, API_URL]);
 
   useEffect(() => {
     if (loading) return;
@@ -1730,10 +1735,10 @@ function OutletPosContent() {
     const html = `
       <html>
         <head>
-          <title>Bill ${escapeHtml(sale.sale_number || '')}</title>
+          <title>Bill ${escapeHtml(sale.sale_number || '')}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
           <style>
             body {
-              font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+              font-family: "DM Sans", sans-serif;
               margin: 0;
               padding: 8px;
               color: #111;
@@ -1935,7 +1940,7 @@ function OutletPosContent() {
   if (loading) {
     return (
       <div className={`${isEmbedded ? 'py-10' : 'min-h-screen'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 flex items-center justify-center`}>
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+        <PageSkeleton />
       </div>
     );
   }
@@ -1955,9 +1960,9 @@ function OutletPosContent() {
     <div className={`${isEmbedded ? '' : 'min-h-screen overflow-hidden'} bg-gradient-to-br from-red-50 via-pink-50 to-rose-50 relative`}>
       {!isEmbedded ? (
       <div className="absolute inset-0 opacity-30">
-        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse"></div>
-        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-2000"></div>
-        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl animate-pulse animation-delay-4000"></div>
+        <div className="absolute top-20 left-20 w-72 h-72 bg-rose-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute top-40 right-20 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-xl"></div>
+        <div className="absolute -bottom-8 left-40 w-72 h-72 bg-red-200 rounded-full mix-blend-multiply filter blur-xl"></div>
       </div>
       ) : null}
 
@@ -2030,54 +2035,53 @@ function OutletPosContent() {
           </section>
         )}
 
-        <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Outlet Items</div>
-            <div className="text-2xl font-bold text-gray-900">{stockTotals.totalItems}</div>
-          </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Outlet Available Qty</div>
-            <div className="text-2xl font-bold text-gray-900">{stockTotals.totalAvailableQty.toFixed(2)}</div>
-          </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Today Sales ({todayIsoDate})</div>
-            <div className="text-2xl font-bold text-gray-900">{salesTotals.totalSales}</div>
-          </div>
-          <div className="rounded-xl border border-white/60 bg-white/85 backdrop-blur-lg p-4 shadow-sm">
-            <div className="text-xs text-gray-500">Today Sales Amount ({todayIsoDate})</div>
-            <div className="text-2xl font-bold text-gray-900">{salesTotals.totalAmount.toFixed(2)}</div>
-          </div>
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+          {[
+            ['Items in outlet', String(stockTotals.totalItems)],
+            ['Available qty', stockTotals.totalAvailableQty.toFixed(2)],
+            [`Sales today (${todayIsoDate})`, String(salesTotals.totalSales)],
+            ['Sales amount today', salesTotals.totalAmount.toFixed(2)],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+              <div className="text-xs text-slate-500">{label}</div>
+              <div className="text-lg font-bold text-slate-900">{value}</div>
+            </div>
+          ))}
         </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <section className="lg:col-span-2 rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold text-gray-900">Create Sale</h2>
-              <div className="inline-flex rounded-xl border border-rose-200 bg-rose-50 p-1">
-                <button
-                  type="button"
-                  onClick={() => setSaleMode('order')}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'order' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
-                >
-                  Create Order (DO)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSaleMode('get_order')}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'get_order' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
-                >
-                  Get Order
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSaleMode('exact_invoice')}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${saleMode === 'exact_invoice' ? 'bg-rose-600 text-white' : 'text-rose-700 hover:bg-rose-100'}`}
-                >
-                  Exact Invoice
-                </button>
+        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xl lg:col-span-2">
+            <div className="mb-5">
+              <h2 className="text-lg font-semibold text-slate-900">Create Sale</h2>
+              <p className="mt-0.5 text-sm text-slate-500">Choose the sale type, fill customer details, then add items.</p>
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {([
+                  ['order', 'Create Order (DO)', 'Delivery order from outlet stock'],
+                  ['get_order', 'Get Order', 'Order any item, not limited to outlet stock'],
+                  ['exact_invoice', 'Exact Invoice', 'Invoice from outlet stock, loyalty supported'],
+                ] as const).map(([value, title, hint]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setSaleMode(value)}
+                    aria-pressed={saleMode === value}
+                    className={`rounded-xl border px-3 py-2.5 text-left transition ${
+                      saleMode === value
+                        ? 'border-rose-600 bg-rose-50 ring-2 ring-rose-200'
+                        : 'border-slate-200 bg-white hover:border-rose-300 hover:bg-rose-50/50'
+                    }`}
+                  >
+                    <span className={`block text-sm font-semibold ${saleMode === value ? 'text-rose-700' : 'text-slate-800'}`}>{title}</span>
+                    <span className="block text-xs text-slate-500">{hint}</span>
+                  </button>
+                ))}
               </div>
             </div>
 
+            <div className="mb-3 flex items-center gap-3">
+              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white">1</span>
+              <h3 className="text-sm font-semibold text-slate-900">Customer details</h3>
+            </div>
             <div className={`grid grid-cols-1 ${(saleMode === 'order' || saleMode === 'get_order') ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4 mb-4`}>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Customer Name or Phone</label>
@@ -2256,6 +2260,10 @@ function OutletPosContent() {
               </div>
             </div>
 
+            <div className="mb-3 mt-6 flex items-center gap-3 border-t border-slate-100 pt-5">
+              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white">2</span>
+              <h3 className="text-sm font-semibold text-slate-900">Add items</h3>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-3">
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Item</label>
@@ -2339,7 +2347,7 @@ function OutletPosContent() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Discount</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Line Discount</label>
                 <input
                   type="number"
                   min="0"
@@ -2379,112 +2387,88 @@ function OutletPosContent() {
 
           </section>
 
-          <section id="stock-section" className="rounded-2xl border border-white/60 bg-white/90 backdrop-blur-lg shadow-xl p-5 scroll-mt-24">
-            <div className="flex items-center justify-between gap-2 mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">Cart Summary</h2>
+          <section id="stock-section" className="scroll-mt-24 rounded-2xl border border-slate-200 bg-white shadow-xl lg:sticky lg:top-4 lg:self-start">
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-5 py-4">
+              <div className="flex items-center gap-3">
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white">3</span>
+                <div>
+                  <h2 className="text-base font-semibold text-slate-900">Cart &amp; Payment</h2>
+                  <p className="text-xs text-slate-500">{cart.length} {cart.length === 1 ? 'item' : 'items'} added</p>
+                </div>
+              </div>
               <Link
                 href={getPathWithCode('/outlet-pos/stock')}
-                className="px-3 py-1.5 text-xs rounded-md border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
               >
-                View Stock Page
+                View stock
               </Link>
             </div>
 
-            <div className="overflow-x-auto border border-rose-100 rounded-xl shadow-sm">
-              <table className="min-w-full divide-y divide-rose-100">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Row</th>
-                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Issue</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Qty</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Discount</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Price</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Line Total</th>
-                    <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white">
-                  {cart.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="px-4 py-6 text-center text-sm text-gray-500">No items in cart.</td>
-                    </tr>
-                  ) : (
-                    cart.map((line) => (
-                      <Fragment key={line.row_id}>
-                        <tr className="bg-rose-50/60 border-t border-rose-100">
-                          <td colSpan={7} className="px-4 py-2.5">
-                            <div className="text-sm font-semibold text-gray-900">{line.item_name}</div>
-                            <div className="text-xs text-gray-600">Code: {line.item_code} | Unit: {line.unit}</div>
-                          </td>
-                        </tr>
-                        <tr className="border-b border-rose-100">
-                          <td className="px-4 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide">Details</td>
-                          <td className="px-4 py-2 text-sm text-gray-700">{formatIssueTypeLabel(line.issue_type)}</td>
-                          <td className="px-4 py-2 text-sm text-right text-gray-700">{line.quantity.toFixed(2)}</td>
-                          <td className="px-4 py-2 text-sm text-right text-gray-700">{line.discount_amount.toFixed(2)}</td>
-                          <td className="px-4 py-2 text-sm text-right text-gray-700">{line.unit_price.toFixed(2)}</td>
-                          <td className="px-4 py-2 text-sm text-right text-gray-900 font-semibold">{(line.quantity * line.unit_price).toFixed(2)}</td>
-                          <td className="px-4 py-2 text-right">
-                            <button
-                              type="button"
-                              onClick={() => removeFromCart(line.row_id)}
-                              className="text-red-600 hover:text-red-800 text-sm"
-                            >
-                              Remove
-                            </button>
-                          </td>
-                        </tr>
-                      </Fragment>
-                    ))
-                  )}
-                </tbody>
-              </table>
+            <div className="max-h-72 overflow-y-auto px-5">
+              {cart.length === 0 ? (
+                <div className="py-8 text-center">
+                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-rose-50 text-xl">🛒</div>
+                  <p className="mt-3 text-sm font-medium text-slate-700">Your cart is empty</p>
+                  <p className="mt-1 text-xs text-slate-500">Choose an item in step 2 and press &quot;Add to Cart&quot;.</p>
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {cart.map((line) => (
+                    <li key={line.row_id} className="flex items-start gap-3 py-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold text-slate-900" title={line.item_name}>{line.item_name}</p>
+                        <p className="text-xs text-slate-500">{line.item_code} · {formatIssueTypeLabel(line.issue_type)}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {line.quantity.toFixed(2)} {line.unit} × {line.unit_price.toFixed(2)}
+                          {line.discount_amount > 0 ? <span className="text-emerald-700"> · discount {line.discount_amount.toFixed(2)}</span> : null}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-slate-900">{(line.quantity * line.unit_price).toFixed(2)}</p>
+                        <button
+                          type="button"
+                          onClick={() => removeFromCart(line.row_id)}
+                          className="mt-1 text-xs font-medium text-rose-600 hover:text-rose-800"
+                          aria-label={`Remove ${line.item_name}`}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-4 border-t border-slate-100 px-5 py-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Discount</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={discountAmount}
-                  onChange={(e) => setDiscountAmount(e.target.value)}
-                  className={formInputClassCompact}
-                  placeholder="0.00"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Paid Amount</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={paidAmount}
-                  onChange={(e) => setPaidAmount(e.target.value)}
-                  className={formInputClassCompact}
-                  placeholder="0.00"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Paid Type</label>
-                <select
-                  value={paymentType}
-                  onChange={(e) => setPaymentType(e.target.value as 'cash' | 'bank' | 'card' | 'voucher')}
-                  className={formInputClassCompact}
-                >
-                  <option value="cash">Cash</option>
-                  <option value="bank">Bank Transfer</option>
-                  <option value="card">Card</option>
-                  <option value="voucher">Voucher</option>
-                </select>
+                <p className="mb-1.5 text-sm font-medium text-slate-700">Payment method</p>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {([
+                    ['cash', 'Cash'],
+                    ['bank', 'Bank'],
+                    ['card', 'Card'],
+                    ['voucher', 'Voucher'],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setPaymentType(value)}
+                      className={`rounded-lg border px-2 py-2 text-xs font-semibold transition ${
+                        paymentType === value
+                          ? 'border-rose-600 bg-rose-600 text-white shadow-sm'
+                          : 'border-slate-200 bg-white text-slate-700 hover:border-rose-300 hover:bg-rose-50'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {paymentType === 'bank' && (
-                <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Company Main Account (Bank Account)</label>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">Company bank account</label>
                   <select
                     value={selectedCompanyBankAccountId}
                     onChange={(e) => setSelectedCompanyBankAccountId(Number(e.target.value || 0))}
@@ -2502,53 +2486,91 @@ function OutletPosContent() {
                 </div>
               )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Balance</label>
-                <input
-                  type="number"
-                  value={balanceAmount.toFixed(2)}
-                  className={`${formInputClassCompact} bg-slate-50`}
-                  readOnly
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700">Bill discount</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={discountAmount}
+                    onChange={(e) => setDiscountAmount(e.target.value)}
+                    className={formInputClassCompact}
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <label className="block text-sm font-medium text-slate-700">Amount paid</label>
+                    <button
+                      type="button"
+                      onClick={() => setPaidAmount(payableTotal.toFixed(2))}
+                      disabled={payableTotal <= 0}
+                      className="text-xs font-semibold text-rose-600 hover:text-rose-800 disabled:text-slate-300"
+                    >
+                      Pay full
+                    </button>
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    className={formInputClassCompact}
+                    placeholder="0.00"
+                  />
+                </div>
               </div>
             </div>
 
-            <div className="mt-4 flex items-center justify-between">
-              <div>
-                <div className="text-sm text-gray-600">Subtotal: {cartTotal.toFixed(2)}</div>
-                <div className="text-sm text-gray-600">Total Discount: {totalDiscountAmount.toFixed(2)}</div>
-                <div className="text-lg font-semibold text-gray-900">Grand Total: {payableTotal.toFixed(2)}</div>
-                <div className="text-sm text-gray-600">Paid ({paymentTypeLabel(paymentType)}): {effectivePaidAmount.toFixed(2)}</div>
-                <div className="text-sm font-semibold text-rose-700">Balance: {balanceAmount.toFixed(2)}</div>
+            <div className="rounded-b-2xl border-t border-slate-100 bg-slate-50 px-5 py-4">
+              <dl className="space-y-1.5 text-sm">
+                <div className="flex justify-between text-slate-600"><dt>Subtotal</dt><dd>{cartTotal.toFixed(2)}</dd></div>
+                <div className="flex justify-between text-slate-600"><dt>Total discount</dt><dd>- {totalDiscountAmount.toFixed(2)}</dd></div>
+                <div className="flex items-baseline justify-between border-t border-slate-200 pt-2">
+                  <dt className="text-base font-semibold text-slate-900">Grand total</dt>
+                  <dd className="text-2xl font-bold text-slate-900">{payableTotal.toFixed(2)}</dd>
+                </div>
+                <div className="flex justify-between text-slate-600"><dt>Paid ({paymentTypeLabel(paymentType)})</dt><dd>{effectivePaidAmount.toFixed(2)}</dd></div>
+                <div className={`flex justify-between font-semibold ${balanceAmount > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                  <dt>{balanceAmount > 0 ? 'Balance due' : 'Fully paid'}</dt>
+                  <dd>{balanceAmount.toFixed(2)}</dd>
+                </div>
                 {selectedLoyaltyCustomerId > 0 && (
-                  <div className="text-xs text-amber-700 font-medium">Loyalty points to award: {loyaltyPointsPreview.toFixed(2)}</div>
+                  <div className="flex justify-between text-xs font-medium text-amber-700"><dt>Loyalty points to award</dt><dd>{loyaltyPointsPreview.toFixed(2)}</dd></div>
                 )}
-              </div>
-              <div className="flex items-center gap-2">
-                {lastCreatedSale && (
-                  <button
-                    type="button"
-                    onClick={() => printCustomerBill(lastCreatedSale, lastCreatedSale.do_number ? 'order' : 'exact_invoice')}
-                    className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-md text-sm font-medium hover:from-emerald-700 hover:to-teal-700"
-                  >
-                    Print Last Bill
-                  </button>
-                )}
+              </dl>
+
+              <button
+                type="button"
+                disabled={saving || cart.length === 0 || !cashierSession?.is_open}
+                onClick={submitSale}
+                className="mt-4 w-full rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-rose-200 transition hover:from-rose-700 hover:to-pink-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+              >
+                {saving
+                  ? 'Saving...'
+                  : saleMode === 'order'
+                    ? 'Create Order & Generate DO'
+                    : saleMode === 'get_order'
+                      ? 'Create Get Order'
+                      : 'Create Exact Invoice'}
+              </button>
+              {!cashierSession?.is_open ? (
+                <p className="mt-2 text-center text-xs text-amber-700">Open the cash drawer to create sales.</p>
+              ) : cart.length === 0 ? (
+                <p className="mt-2 text-center text-xs text-slate-500">Add at least one item to continue.</p>
+              ) : null}
+
+              {lastCreatedSale && (
                 <button
                   type="button"
-                  disabled={saving || cart.length === 0 || !cashierSession?.is_open}
-                  onClick={submitSale}
-                  className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-md text-sm font-medium hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50"
+                  onClick={() => printCustomerBill(lastCreatedSale, lastCreatedSale.do_number ? 'order' : 'exact_invoice')}
+                  className="mt-2 w-full rounded-xl border border-emerald-300 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-700 hover:bg-emerald-50"
                 >
-                  {saving
-                    ? 'Saving...'
-                    : saleMode === 'order'
-                      ? 'Create Order & Generate DO'
-                      : saleMode === 'get_order'
-                        ? 'Create Get Order'
-                        : 'Create Exact Invoice'}
+                  Print last bill
                 </button>
-              </div>
+              )}
             </div>
           </section>
         </div>
@@ -2710,7 +2732,7 @@ export default function OutletPosPage() {
     <Suspense
       fallback={
         <div className="min-h-screen bg-gradient-to-br from-rose-50 via-pink-50 to-red-50 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-rose-600"></div>
+          <PageSkeleton />
         </div>
       }
     >

@@ -1,5 +1,6 @@
 'use client';
 
+import PageSkeleton from '@/app/components/PageSkeleton';
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -327,7 +328,7 @@ export default function IncomeReportPage() {
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 via-teal-50 to-cyan-50">
         <div className="rounded-2xl border border-cyan-100 bg-white/85 px-6 py-5 shadow-xl backdrop-blur">
           <div className="flex items-center gap-3">
-            <div className="h-10 w-10 animate-spin rounded-full border-2 border-cyan-200 border-t-cyan-600" />
+            <PageSkeleton />
             <div>
               <p className="text-sm font-semibold text-slate-800">Preparing Income Report</p>
               <p className="text-xs text-slate-500">Loading collections and cash-in transactions...</p>
